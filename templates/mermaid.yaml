@@ -1,0 +1,13 @@
+# Mermaid diagram validator -- local hook running the bundled scripts/lint-mermaid.mjs.
+# No upstream pre-commit hook exists; mermaid's real parser needs a browser, so
+# mermaid-cli (headless Chromium) is pulled in via additional_dependencies.
+- repo: local
+  hooks:
+    - id: mermaid-lint
+      name: mermaid-lint
+      description: Validate fenced mermaid code blocks with mermaid-cli
+      entry: node scripts/lint-mermaid.mjs
+      language: node
+      files: '\.(md|markdown)$'
+      additional_dependencies:
+        - "@mermaid-js/mermaid-cli@__NPM__"

@@ -1,0 +1,5 @@
+# Markdown linter -- config lives in the repo's .markdownlint.yaml (copied by the skill).
+- repo: https://github.com/DavidAnson/markdownlint-cli2
+  rev: __REV__
+  hooks:
+    - id: markdownlint-cli2

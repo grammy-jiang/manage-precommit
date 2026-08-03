@@ -1,0 +1,5 @@
+# Secret scanner -- blocks commits that contain credentials/tokens.
+- repo: https://github.com/gitleaks/gitleaks
+  rev: __REV__
+  hooks:
+    - id: gitleaks

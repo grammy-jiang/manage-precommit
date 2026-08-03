@@ -1,0 +1,6 @@
+# Managed with the manage-precommit skill -- https://pre-commit.com
+# Install the git hook:  pre-commit install
+# Run on all files:      pre-commit run --all-files
+minimum_pre_commit_version: "4.0.0"
+exclude: '^\.gitignore$'
+repos: []

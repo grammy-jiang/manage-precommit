@@ -1,0 +1,11 @@
+# Base hygiene -- fast, universal checks from the pre-commit maintainers.
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: __REV__
+  hooks:
+    - id: trailing-whitespace
+    - id: end-of-file-fixer
+    - id: check-yaml
+    - id: check-json
+    - id: check-added-large-files
+    - id: check-merge-conflict
+    - id: mixed-line-ending

@@ -1,0 +1,5 @@
+# YAML linter -- config lives in the repo's .yamllint.yaml (copied by the skill).
+- repo: https://github.com/adrienverge/yamllint
+  rev: __REV__
+  hooks:
+    - id: yamllint
