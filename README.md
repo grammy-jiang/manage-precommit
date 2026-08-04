@@ -30,18 +30,19 @@ a parse error.
 ## Requirements
 
 - [pre-commit](https://pre-commit.com) 4.0+
-- Python 3 with [`ruamel.yaml`](https://pypi.org/project/ruamel.yaml/) — required
-  for the comment-preserving merge: `python3 -m pip install --user ruamel.yaml`
+- Python 3.10+ and `git`. **No third-party Python packages** — the skill is
+  installed by symlink and its scripts run under your system `python3`, so
+  anything it needed would have to be installed by hand on every machine.
 - For the `mermaid` hook only: Node.js, plus a Chromium/Chrome the hook's
   `mermaid-cli` can drive (it downloads one on first use if none is reusable)
 
 ## Install
 
-Clone the repo and symlink it into your skills directory:
+Clone the repo and symlink the skill directory into your skills directory:
 
 ```bash
 git clone git@github.com:grammy-jiang/manage-precommit.git
-ln -s "$PWD/manage-precommit" ~/.claude/skills/manage-precommit
+ln -s "$PWD/manage-precommit/src/manage_precommit/skill" ~/.claude/skills/manage-precommit
 ```
 
 ## Usage
@@ -57,12 +58,14 @@ actually contains), merges the selection, installs the git hook, runs the suite,
 shows the diff, and — only with confirmation — commits and pushes just the
 pre-commit setup files.
 
-The engine also runs standalone:
+The engine also runs standalone (`S=src/manage_precommit/skill/scripts`):
 
 ```bash
-python3 precommit.py --catalog                        # list catalog keys
-python3 precommit.py --dir /path/to/repo --detect     # inspect existing config
-python3 precommit.py --dir /path/to/repo --force hygiene yamllint gitleaks
+python3 $S/precommit.py --catalog                      # list catalog keys
+python3 $S/precommit.py --dir /path/to/repo --detect   # inspect existing config
+python3 $S/precommit.py --dir /path/to/repo --recommend  # what the repo calls for, and why
+python3 $S/precommit.py --dir /path/to/repo --force \
+    --templates-file keys.txt --facts-out /tmp/facts.json
 ```
 
 ## How a run flows
@@ -85,19 +88,45 @@ flowchart TD
 ## Layout
 
 ```text
-SKILL.md            the skill definition Claude Code reads
-precommit.py        engine: catalog, detect, generate/merge
-render-summary.py   end-of-run summary (color on a TTY, plain when piped)
-templates/          one YAML fragment per catalog entry, plus the base skeleton
-assets/             files copied into the target repo
+src/manage_precommit/skill/SKILL.md       the procedure Claude Code reads
+                    skill/scripts/precommit.py  catalog, detect, recommend, merge, verify
+                    skill/scripts/gitwork.py    status, commit, push-plan, push, facts
+                    skill/scripts/config.py     the config scanner and additive writer
+                    skill/scripts/summary.py    the end-of-run summary
+                    skill/scripts/shared.py     sanitiser, no-follow reader, JSON contract
+                    skill/templates/            one YAML fragment per catalog entry
+                    skill/assets/               files copied into the target repo
+                    skill/references/           on-demand detail (force-push, worked example)
+tests/                                     pytest suite
 ```
 
-Each catalog entry is a YAML fragment with a `__REV__` placeholder. The engine
-fills it with the latest upstream tag, then merges the result into the target
-config with `ruamel.yaml`, which round-trips comments and formatting.
+The checkout and the installed tree are the same paths: nothing is remapped, so
+a path in a traceback traces back here by relative position.
+
+## How the merge keeps its promise
+
+Each catalog entry is a YAML fragment with a `__REV__` or `__NPM__` placeholder.
+The engine substitutes the latest upstream version and **inserts the fragment as
+text** — it never re-emits the file. Every byte outside an inserted block is
+carried across untouched, and the write is rejected unless the original can be
+reconstructed from the result by deleting exactly the blocks that were added.
+
+Reading is a strict line scanner rather than a YAML library. It refuses anything
+it cannot prove it understands — anchors, aliases, merge keys, flow sequences
+where a block is expected, more than one document, tabs — and says which line.
+A refusal is an exit code; a guess would be a wrong answer that looks right.
 
 ## Dogfooding
 
 This repo uses its own hooks. `scripts/lint-mermaid.mjs` is a symlink to
-`assets/lint-mermaid.mjs`, so the copy this repo runs and the payload it ships
-to other repos cannot drift apart.
+`src/manage_precommit/skill/assets/lint-mermaid.mjs`, so the copy this repo runs
+and the payload it ships to other repos cannot drift apart.
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+python3 -m pytest        # 119 tests; no test touches the network
+python3 -m ruff check . && python3 -m ruff format --check .
+python3 -m mypy
+```
