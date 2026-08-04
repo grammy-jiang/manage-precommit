@@ -344,3 +344,19 @@ def test_isolated_lookups_ignore_a_hostile_global_config(tmp_path, monkeypatch):
 
     rc_iso, _, _ = git(str(outside), "ls-remote", "--tags", str(upstream), isolated=True)
     assert rc_iso == 0, "the isolated lookup still read the global config"
+
+
+def test_is_work_tree_rejects_a_git_directory(tmp_path):
+    """`rev-parse --is-inside-work-tree` exits 0 and prints "false" inside a
+    .git directory, so an rc-only check calls that a repository -- and two
+    scripts had independently drifted into exactly that variant."""
+    import subprocess as sp
+
+    repo = tmp_path / "wt"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    git = _git_for_test(tmp_path)
+
+    assert shared.is_work_tree(git, str(repo)) is True
+    assert shared.is_work_tree(git, str(repo / ".git")) is False
+    assert shared.is_work_tree(git, str(tmp_path / "not-a-repo-at-all")) is False

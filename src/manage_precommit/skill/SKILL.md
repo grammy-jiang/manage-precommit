@@ -88,14 +88,27 @@ Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-mis
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.
 
-For `mermaid`, say before they choose: the hook downloads a headless Chromium the
-first time it runs (large, one-off) unless one is already reusable, and it needs
-`node`.
+Before offering `mermaid`, check its prerequisite and say what you found:
+
+```bash
+command -v npm >/dev/null && command -v node >/dev/null && echo present || echo missing
+```
+
+If either is missing, say so in the question — **and say that picking it anyway
+aborts the whole write, not just that entry**: the version pin happens before
+anything is written, so a missing `npm` means none of the other selected hooks
+get written either. Also say the hook downloads a headless Chromium the first
+time it runs (large, one-off) unless one is already reusable.
 
 The final list is `always_on` plus whatever the user selected. **Write it to a
-file with the Write tool**, one name per line, at a `mktemp` path outside the
-repo — free-text names must never reach a command line, for the same reason
+file with the Write tool**, **one name per line**, at a `mktemp` path outside
+the repo — free-text names must never reach a command line, for the same reason
 commit messages go through a file.
+
+An "Other" answer arrives comma-separated; the file is not. Split it on commas,
+trim each name, and write one per line. Written as a single `gitleaks, mermaid`
+line the whole string is read as one catalog name, and the run fails with a
+near-match for something the user never typed.
 
 ## Step 3 — Write
 
@@ -137,6 +150,11 @@ as-is)**, assets **written** vs **kept**, and the pinned **versions**. If it say
 `exclude: left as-is`, tell the user `.gitignore` will not be excluded unless
 they add it themselves.
 
+**If `needs_manual` is non-empty, say so plainly.** That entry exists but its
+`hooks:` list is not a shape this tool can extend, so the hook the user asked
+for **was not installed** and they have to add it by hand. It is an exit-0
+outcome that otherwise reads as success — name each one.
+
 ## Step 4 — Verify
 
 **Ask before running it.** This is the step that changes files, and it is not
@@ -165,7 +183,12 @@ python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify --facts "<fac
 
 Installs the git hook and runs it. **Read `run_ok`, not the exit code of your own
 reading of the output** — the tool already judged two outcomes that look like
-success and are not:
+success and are not.
+
+That applies only when there *is* JSON. `pre-commit` missing from PATH, a failed
+install, or a timeout all stop before anything is emitted: non-zero exit, empty
+stdout. There is no `run_ok` to read, so the general rule applies — report it
+verbatim and stop.
 
 - `vacuous: true` — every hook reported `(no files to check)`. `--all-files`
   covers only git-*tracked* files, so in a repo where the setup files are still
@@ -246,8 +269,15 @@ change and not an intention:
 
   Say its `guidance` sentence — it already names the destination *and its URL*,
   because a remote's nickname says nothing about where code goes. If
-  `suspicious_characters` is true, say that too. If `permits_push` is false, say a
-  push looks unlikely and why; the three options below never change.
+  `suspicious_characters` is true, say that too.
+
+  **This plan describes the state before the commit exists.** On a branch level
+  with its upstream it returns `stop-up-to-date` — "nothing to push" — which
+  stops being true the moment item 3 commits. So use it to name the
+  *destination*, not to predict whether a push will happen: never tell the user
+  a push looks unlikely on the strength of `permits_push` here. Step 5.4
+  recomputes it after the commit, and that is the one that decides. The three
+  options below never change either way.
 
 Then AskUserQuestion — exactly these, never an "also commit other changes"
 option: **Commit + push** / **Commit only** (local) / **Don't commit**.

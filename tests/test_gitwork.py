@@ -743,3 +743,126 @@ def test_the_drop_list_names_who_wrote_each_commit(repo, remote, written, tmp_pa
     got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
     assert got["action"] == "diverged"
     assert any("Other:" in line for line in got["would_drop"]), got["would_drop"]
+
+
+# -- guards added after round 4 of the reviewer panel -------------------------
+
+
+def _rewrite_facts(facts_file, **fields):
+    facts = json.loads(facts_file.read_text())
+    facts["internal"]["managed_files"][0].update(fields)
+    facts_file.write_text(json.dumps(facts))
+
+
+def test_a_managed_path_that_looks_like_an_option_is_refused(repo, written, tmp_path):
+    """These paths reach `git add --` and `git commit --only --` as argv."""
+    _rewrite_facts(written, path="-x")
+    proc = commit(repo, written, tmp_path)
+    assert proc.returncode != 0
+    assert "looks like an option" in proc.stderr
+
+
+@pytest.mark.parametrize("digest", ["deadbeef", "z" * 64, ""])
+def test_a_managed_sha256_of_the_wrong_shape_is_refused(repo, written, tmp_path, digest):
+    """The facts file sits on disk between steps; a rewritten one must not be
+    able to weaken the content check by supplying a digest that cannot match."""
+    _rewrite_facts(written, sha256=digest)
+    proc = commit(repo, written, tmp_path)
+    assert proc.returncode != 0
+    # The specific refusal, not just any mention of sha256: without this guard
+    # a malformed digest still fails later in the content check, whose message
+    # also says "sha256" -- so a looser assertion passed either way.
+    expected = "missing its path or sha256" if digest == "" else "unexpected shape"
+    assert expected in proc.stderr, proc.stderr
+
+
+def test_a_double_failure_says_the_index_may_still_be_staged(repo, written, tmp_path):
+    """add succeeded, commit failed, and the cleanup reset failed too -- the one
+    case where the index is NOT as it was found."""
+    install_hook(repo, "exit 1\n")
+    fake = tmp_path / "noreset"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "reset" ]; then echo "fatal: cannot reset" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        str(msgfile(tmp_path)),
+        "--facts",
+        str(written),
+        stubs=fake,
+    )
+    assert proc.returncode != 0
+    assert "cleanup reset also failed" in proc.stderr
+    assert "may still be staged" in proc.stderr
+
+
+def test_a_multi_line_commit_message_is_refused(repo, written, tmp_path):
+    """Only the subject is shown back and recorded, so a body would be
+    committed having been neither reviewed nor reported."""
+    msg = tmp_path / "long.txt"
+    msg.write_text("chore: add hooks\n\nand a body nobody approved\n")
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        str(msg),
+        "--facts",
+        str(written),
+    )
+    assert proc.returncode != 0
+    assert "single line" in proc.stderr
+
+
+def test_facts_still_records_when_the_path_is_gone_from_the_commit(
+    repo, written_config_only, tmp_path
+):
+    """blob_matches_verified cannot tell, so it must not block."""
+    got = out_json(commit(repo, written_config_only, tmp_path))
+    (repo / ".pre-commit-config.yaml").unlink()
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "remove"], check=True)
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "facts",
+        "--facts",
+        str(written_config_only),
+        "--hash",
+        got["hash"],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_the_consent_lines_are_neutralised_not_merely_flagged(repo, remote, written, tmp_path):
+    """push-safety.md treats showing these lines as consent for an irreversible
+    act, so they must be safe to print, not just accompanied by a warning."""
+    commit(repo, written, tmp_path)
+    other = tmp_path / "other2"
+    subprocess.run([REAL_GIT, "clone", "-q", str(remote), str(other)], check=True)
+    for key, value in (("user.email", "o@example.invalid"), ("user.name", "Other")):
+        subprocess.run([REAL_GIT, "-C", str(other), "config", key, value], check=True)
+    (other / "x.txt").write_text("x\n")
+    subprocess.run([REAL_GIT, "-C", str(other), "add", "-A"], check=True)
+    msg = other / "m.txt"
+    msg.write_text("fix" + chr(0x202E) + " something\n")
+    subprocess.run([REAL_GIT, "-C", str(other), "commit", "-q", "-F", str(msg)], check=True)
+    subprocess.run([REAL_GIT, "-C", str(other), "push", "-q"], check=True)
+
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["suspicious_characters"] is True
+    joined = " ".join(got["would_drop"] + got["would_add"]) + got["guidance"]
+    assert chr(0x202E) not in joined, "a text-reordering character reached the consent text"

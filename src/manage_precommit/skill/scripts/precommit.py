@@ -45,6 +45,7 @@ from shared import (
     clean,
     default_file_mode,
     has_suspicious_chars,
+    is_work_tree,
     make_git,
     preserved_mode,
     read_bytes_nofollow,
@@ -275,7 +276,11 @@ def read_config(directory: str) -> cfgmod.Config | None:
         die(f"{path} is a symlink -- refusing to follow it")
     raw = read_bytes_or_die(path, die)
     try:
-        text = raw.decode("utf-8")
+        # utf-8-sig: identical to utf-8 with no BOM, and strips exactly the BOM
+        # when there is one. Without this a file saved as "UTF-8 with BOM" has
+        # the mark folded into its first key, so `repos:` reads as a different
+        # key entirely and the config is refused for having no `repos:` at all.
+        text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         die(f"{path} is not valid UTF-8: {exc}")
     try:
@@ -388,9 +393,8 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
     of it would be theirs. Their edit is theirs to commit, stash or discard --
     and then the run starts again from the scan.
     """
-    rc, _, _ = git(directory, "rev-parse", "--is-inside-work-tree")
-    if rc != 0:
-        return  # not a repo: nothing is tracked, so nothing can be pending
+    if not is_work_tree(git, directory):
+        return  # not a work tree: nothing is tracked, so nothing can be pending
     rc, out, err = git(
         directory, "status", "--porcelain", "--no-renames", "--", *paths, strip=False
     )
@@ -706,7 +710,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     needs_manual = [text for tag, text in report if tag == "needs-manual"]
     facts: Facts = {
         "scan": {
-            "git_repo": git(directory, "rev-parse", "--is-inside-work-tree")[0] == 0,
+            "git_repo": is_work_tree(git, directory),
             "config": "existing" if existing is not None else "fresh",
             "prev_repos": prev_repos,
         },
@@ -870,7 +874,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
 
     before = dirty_paths(directory)
-    run_args = ["run", "--files", *args.files] if args.files else ["run", "--all-files"]
+    # `--` and a per-value check: these come from the caller, and pre-commit
+    # reads a leading dash as one of its own options. Without this a value like
+    # "--hook-stage" silently changes what the run does, inside a step whose
+    # whole point is that the user approved its scope.
+    for name in args.files:
+        refuse_option_like(name, "file", die)
+    run_args = ["run", "--files", "--", *args.files] if args.files else ["run", "--all-files"]
     rc, output = run_precommit(directory, *run_args)
     autofixed: list[str] = []
 

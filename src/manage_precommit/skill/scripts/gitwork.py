@@ -45,6 +45,7 @@ from shared import (
     PushPlan,
     clean,
     has_suspicious_chars,
+    is_work_tree,
     make_git,
     read_bytes_nofollow,
     read_bytes_or_die,
@@ -79,8 +80,7 @@ def emit(payload: Mapping[str, object]) -> None:
 
 
 def is_repo(repo: str) -> bool:
-    rc, out, _ = git(repo, "rev-parse", "--is-inside-work-tree")
-    return rc == 0 and out == "true"  # inside a .git dir this exits 0 and says "false"
+    return is_work_tree(git, repo)
 
 
 def require_repo(repo: str) -> None:
@@ -395,6 +395,17 @@ def cmd_commit(args: argparse.Namespace) -> int:
     message = read_bytes_or_die(args.message_file, die).decode("utf-8", "replace")
     if not message.strip():
         die(f"message file is empty: {args.message_file}")
+    body = [line for line in message.strip().splitlines() if line.strip()]
+    if len(body) > 1:
+        # SKILL.md has the agent show ONE line and get that approved, and the
+        # summary records only the subject -- so a body would be committed
+        # having been neither shown back nor recorded. Narrating the rule left
+        # it to instruction-following; this decides it.
+        die(
+            f"commit message has {len(body)} non-blank lines; only the subject is shown "
+            "to the user and recorded, so a body would be committed unreviewed. Write "
+            "a single line."
+        )
 
     # Before ANY git call: git itself will hash the working-tree files, and on a
     # FIFO that blocks forever. Refusing a non-regular target here turns a hang
@@ -566,11 +577,14 @@ PUSH_PERMITTED = {"fast-forward", "no-upstream", "diverged"}
 
 def destination(plan: PushPlan) -> str:
     """Where a push would land, always naming the URL and not just a nickname."""
-    urls = plan.get("remote_urls") or {}
-    remote = plan.get("remote")
+    # Every component is repo-controlled (remote names, branch names and URLs
+    # all come from config) and this sentence is relayed verbatim as the
+    # destination the user approves, so it is built from cleaned parts.
+    urls = {k: clean(v) for k, v in (plan.get("remote_urls") or {}).items()}
+    remote = clean(plan["remote"]) if plan.get("remote") else None
     if plan.get("merge_ref"):  # an upstream exists: one destination, fully known
-        branch = str(plan["merge_ref"]).removeprefix("refs/heads/")
-        url = plan.get("remote_url")
+        branch = clean(str(plan["merge_ref"]).removeprefix("refs/heads/"))
+        url = clean(plan["remote_url"]) if plan.get("remote_url") else ""
         return f"{remote}/{branch}" + (f" ({url})" if url else "")
     if remote:  # first push, remote already settled
         return f"{remote}" + (f" ({urls[remote]})" if remote in urls else "")
@@ -666,8 +680,14 @@ def push_plan(repo: str) -> PushPlan:
     _, drop, _ = git(repo, "log", fmt, "HEAD..@{u}")
     _, add, _ = git(repo, "log", fmt, "@{u}..HEAD")
     base["action"] = "diverged"
-    base["would_drop"] = drop.splitlines()
-    base["would_add"] = add.splitlines()
+    # Neutralised, not merely flagged. push-safety.md asks the operator to read
+    # every one of these lines and treats that as consent for an irreversible
+    # act -- but the author names and subjects are repo-controlled, so a
+    # crafted one could hide whose commits a force deletes, or forge a line
+    # that looks like tool output. suspicious_characters stays as the signal
+    # that something was there; the strings themselves are safe to print.
+    base["would_drop"] = [clean(line) for line in drop.splitlines()]
+    base["would_add"] = [clean(line) for line in add.splitlines()]
     # Those subject lines are read to approve an irreversible act, so they join
     # the names already checked in `base`.
     base["suspicious_characters"] = base.get("suspicious_characters", False) or (

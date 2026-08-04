@@ -273,6 +273,18 @@ def refuse_facts_inside_repo(
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 
 
+def is_work_tree(git: Callable[..., tuple[int, str, str]], repo: str) -> bool:
+    """True only inside an actual work tree.
+
+    `rev-parse --is-inside-work-tree` exits 0 and prints "false" when run inside
+    a .git directory, so testing the exit status alone calls that a repository.
+    Shared because two scripts need it and the rc-only variant had already
+    drifted into both of them.
+    """
+    rc, out, _ = git(repo, "rev-parse", "--is-inside-work-tree")
+    return rc == 0 and out == "true"
+
+
 def make_git(
     die: Callable[[str], NoReturn], *, timeout: int = 120
 ) -> Callable[..., tuple[int, str, str]]:

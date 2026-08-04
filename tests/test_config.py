@@ -117,6 +117,8 @@ def test_a_trailing_comment_is_not_part_of_a_rev():
         ("no repos key", "exclude: 'x'\n"),
         ("duplicate top key", "exclude: 'a'\nexclude: 'b'\nrepos: []\n"),
         ("NUL byte", "repos: []\n\x00\n"),
+        ("indented top level", "  repos: []\n"),
+        ("top-level line with no colon", "just some prose\n"),
     ],
 )
 def test_refuses_what_it_cannot_prove_it_understands(name, text):
@@ -138,6 +140,13 @@ def test_refuses_what_it_cannot_prove_it_understands(name, text):
         ("folded repo url", "repos:\n  - repo: https://github.com/psf/\n      black\n"),
         ("block scalar rev", "repos:\n  - repo: https://x/y\n    rev: |\n      v1\n"),
         ("folded hook id", "repos:\n  - repo: local\n    hooks:\n      - id: my\n          hook\n"),
+        # Distinct from "unexpected first key": with no colon at all, _split_key
+        # returns None and a different branch raises.
+        ("repo entry first line has no colon", "repos:\n  - just text\n"),
+        (
+            "hook item first line has no colon",
+            "repos:\n  - repo: local\n    hooks:\n      - just text\n",
+        ),
     ],
 )
 def test_refuses_inside_an_opened_entry_too(name, text):

@@ -631,3 +631,102 @@ def test_hooks_added_to_an_existing_entry_reach_the_facts(repo, keys_file, facts
     generate(repo, keys_file, facts_path, stubs, "hygiene", force=True)
     added = json.loads(facts_path.read_text())["hooks"]["added"]
     assert any("added hooks" in line for line in added)
+
+
+def _fake_bin(tmp_path, name, script):
+    d = tmp_path / name
+    d.mkdir()
+    exe = d / ("npm" if name.startswith("npm") else "pre-commit")
+    exe.write_text(script)
+    exe.chmod(0o755)
+    return d
+
+
+def test_a_failing_npm_stops_the_run(repo, keys_file, facts_path, tmp_path, stubs):
+    fake = _fake_bin(tmp_path, "npmfail", '#!/bin/sh\necho "boom" >&2\nexit 1\n')
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode != 0
+    assert "npm view" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_garbage_npm_version_is_refused(repo, keys_file, facts_path, tmp_path, stubs):
+    """An unchecked value would be substituted straight into the config."""
+    fake = _fake_bin(tmp_path, "npmjunk", "#!/bin/sh\necho not-a-version\n")
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode != 0
+    assert "unexpected version" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_verify_reports_hooks_that_keep_failing(repo, keys_file, facts_path, stubs, tmp_path):
+    """The 'your hooks are broken' outcome the tool exists to report."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = tmp_path / "alwaysfail"
+    fake.mkdir()
+    pc = fake / "pre-commit"
+    pc.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        'echo "gitleaks.................................Failed"\n'
+        "exit 1\n"
+    )
+    pc.chmod(0o755)
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    got = out_json(proc)
+    assert got["run_ok"] is False
+    assert got["vacuous"] is False
+    assert got["run"] == "failed (exit 1)"
+    assert got["autofixed"] == []
+    assert proc.returncode != 0
+
+
+def test_a_config_with_a_utf8_bom_is_read_not_refused(repo, keys_file, facts_path, stubs):
+    """A file saved as "UTF-8 with BOM" folded the mark into its first key, so
+    `repos:` read as a different key and the config was refused for having no
+    `repos:` at all."""
+    body = "repos:\n- repo: local\n  hooks:\n  - id: mine\n"
+    (repo / ".pre-commit-config.yaml").write_bytes(b"\xef\xbb\xbf" + body.encode())
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "gitleaks" in (repo / ".pre-commit-config.yaml").read_text()
+
+
+def test_verify_separates_the_file_list_from_pre_commits_own_options(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """`--files` values are argv for pre-commit, which reads a leading dash as
+    one of its own options. argparse blocks the obvious injection at this
+    script's own boundary, so what actually has to hold is the `--` terminator
+    in the command pre-commit receives -- checked here by having it log argv.
+    """
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = tmp_path / "logargs"
+    fake.mkdir()
+    log = fake / "argv.log"
+    pc_stub = fake / "pre-commit"
+    pc_stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{log}"\n'
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        'echo "trailing-whitespace......Passed"\n'
+        "exit 0\n"
+    )
+    pc_stub.chmod(0o755)
+    run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files",
+        ".pre-commit-config.yaml",
+        stubs=fake,
+    )
+    invocation = log.read_text()
+    assert "run --files -- .pre-commit-config.yaml" in invocation, invocation
