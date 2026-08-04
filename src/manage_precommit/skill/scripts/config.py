@@ -311,6 +311,41 @@ def _scan_repos(
     return i, entries, seq_indent, (last if entries else None)
 
 
+# `|`, `>` and their chomping/indent modifiers open a multi-line scalar.
+_BLOCK_SCALAR = re.compile(r"^[|>][+-]?\d*$|^[|>]\d*[+-]?$")
+
+
+def _refuse_multiline_scalar(
+    lines: list[str], at: int, key_indent: int, raw_value: str, what: str
+) -> None:
+    """Refuse a value that continues onto another line.
+
+    `repo:`, `rev:` and `id:` are read from one physical line. YAML lets a plain
+    or quoted scalar fold across several, and lets `|`/`>` open a block scalar --
+    and the entry/hook loops skip a continuation line without matching anything,
+    so the value would be silently TRUNCATED to its first line. A truncated url
+    is worse than a refusal: it makes `already present` compare against the
+    wrong thing and can insert a duplicate entry.
+    """
+    if _BLOCK_SCALAR.match(raw_value.strip()):
+        raise ConfigRefused(
+            f"`{what}:` opens a multi-line block scalar; this tool reads single-line values",
+            at + 1,
+        )
+    nxt = _next_content(lines, at + 1)
+    if nxt is None or _indent_of(lines[nxt]) <= key_indent:
+        return
+    follower = lines[nxt].strip()
+    # A deeper line that is itself a mapping entry or a sequence item is
+    # ordinary nesting. Anything else at that depth is a folded continuation.
+    if follower.startswith(("- ", "-")) or _split_key(follower) is not None:
+        return
+    raise ConfigRefused(
+        f"`{what}:` continues onto the next line; this tool reads single-line values",
+        nxt + 1,
+    )
+
+
 def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[int, RepoEntry]:
     """Parse one ``- repo: ...`` item and everything indented under it."""
     first = lines[start]
@@ -329,6 +364,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     entry = RepoEntry(url="", rev=None, start=start, end=start, item_indent=item_indent)
     key, value = parsed
     if key == "repo":
+        _refuse_multiline_scalar(lines, start, key_indent, value, "repo")
         entry.url = _scalar(value)
     elif key in ("rev", "hooks"):
         raise ConfigRefused("a repo entry lists `repo:` after another key; unsupported", start + 1)
@@ -361,6 +397,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
             key, value = parsed
             in_hooks = key == "hooks"
             if key == "rev":
+                _refuse_multiline_scalar(lines, i, key_indent, value, "rev")
                 entry.rev = _scalar(value)
             elif key == "repo":
                 raise ConfigRefused("a repo entry defines `repo:` twice", i + 1)
@@ -397,6 +434,7 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
     parsed = _split_key(body)
     if parsed is None or parsed[0] != "id":
         raise ConfigRefused("a hook item does not start with `id:`", start + 1)
+    _refuse_multiline_scalar(lines, start, item_indent + 2, parsed[1], "id")
     hook = Hook(id=_scalar(parsed[1]), start=start, end=start)
     i = start + 1
     while i < len(lines):

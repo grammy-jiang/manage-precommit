@@ -124,6 +124,36 @@ def test_refuses_what_it_cannot_prove_it_understands(name, text):
         C.scan(text)
 
 
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("stray line in repos block", "repos:\n  - repo: https://x/y\n  oops\n"),
+        ("bare dash", "repos:\n  -\n"),
+        ("entry not starting with repo", "repos:\n  - rev: v1\n    repo: https://x/y\n"),
+        ("unexpected first key", "repos:\n  - name: mine\n    repo: https://x/y\n"),
+        ("repo twice", "repos:\n  - repo: https://x/y\n    repo: https://a/b\n"),
+        ("hooks as a scalar", "repos:\n  - repo: https://x/y\n    hooks: nope\n"),
+        ("hook in flow style", "repos:\n  - repo: local\n    hooks:\n      - {id: a}\n"),
+        ("hook without id", "repos:\n  - repo: local\n    hooks:\n      - name: a\n"),
+        ("folded repo url", "repos:\n  - repo: https://github.com/psf/\n      black\n"),
+        ("block scalar rev", "repos:\n  - repo: https://x/y\n    rev: |\n      v1\n"),
+        ("folded hook id", "repos:\n  - repo: local\n    hooks:\n      - id: my\n          hook\n"),
+    ],
+)
+def test_refuses_inside_an_opened_entry_too(name, text):
+    """An untested refusal branch is an untested piece of the spec -- and a
+    regression that downgrades one to a guess corrupts the user's config."""
+    with pytest.raises(C.ConfigRefused):
+        C.scan(text)
+
+
+def test_a_wrapped_url_is_refused_rather_than_truncated():
+    """Truncation is worse than refusal: a shortened url compares against the
+    wrong thing, so `already present` misses and a duplicate entry is added."""
+    with pytest.raises(C.ConfigRefused, match="continues onto the next line"):
+        C.scan("repos:\n  - repo: https://github.com/psf/\n      black\n    rev: v1\n")
+
+
 def test_a_leading_document_marker_is_fine():
     """One `---` opens the only document; only a second one is ambiguous."""
     cfg = C.scan("---\nrepos:\n  - repo: local\n    hooks:\n      - id: a\n")

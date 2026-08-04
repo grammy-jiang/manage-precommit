@@ -45,8 +45,8 @@ exceptions are documented where they occur.
 **If AskUserQuestion is unavailable** (headless), stop at the first choice and
 say which confirmation is needed. Never assume an answer.
 
-**Pick `<facts.json>` once, in Step 3, and pass that same path to every `--facts`
-later.** A different path is not an error — it silently loses everything recorded
+**Pick `<facts.json>` once, in Step 1, and pass that same path to every `--facts`
+and `--facts-out` after it.** A different path is not an error — it silently loses everything recorded
 so far. It must be a `mktemp` path **outside** the repo; the tools refuse one
 inside it.
 
@@ -63,8 +63,12 @@ Relay it and stop. Nothing is written, so there is nothing to review or commit.
 ## Step 1 — Scan
 
 ```bash
-python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --recommend
+python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --recommend \
+  --facts-out "<facts.json>"
 ```
+
+`--facts-out` records what was detected and what was recommended, so the closing
+summary can show them. Later steps add to that file rather than replacing it.
 
 Returns JSON: `always_on` (fixed policy), `recommended` (`[{name, reason}]`, where
 `reason` is the file that triggered it), `previous` (catalog entries the config
@@ -112,7 +116,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
 
 - **exit 3, unknown catalog key** — the only recoverable case. Re-ask *for the
   rejected names only*, quoting the near matches it printed (`"gitleeks" is not a
-  catalog key — did you mean gitleaks?`), write a fresh `<keys.txt>`, and re-run.
+  catalog key — did you mean gitleaks?`). Then write a fresh `<keys.txt>`
+  containing the **ENTIRE corrected selection** — every key that was already
+  accepted, plus the corrected one(s) — never the corrected name alone. The file
+  is read as the whole selection with no memory of the previous attempt, so
+  writing only the fix silently drops every other hook the user asked for.
   **Retry once.** If that fails, report the near matches and stop.
 - **exit 4, a file already carries an uncommitted change** — that edit is the
   user's to commit, stash or discard; no rebuild can honestly commit it as this
@@ -196,6 +204,12 @@ change and not an intention:
 - **Draft the commit message now, on one line**, and show it. The summary records
   only the subject, so a body would be approved and never shown back. If the user
   supplies several lines, say only the first is recorded and confirm it.
+- **Say what else this run touched.** If Step 4 reported a non-empty
+  `autofixed`, say so plainly *before* asking: "verifying the hooks also
+  modified `<those files>` elsewhere in your tree. This run will not stage or
+  commit them — they are yours to review and commit separately." Without this
+  the user approves a commit believing their tree is as clean as the diff they
+  were shown, and only finds out from the summary, after the fact.
 - **Say the files are already written.** *Don't commit* leaves them on disk; it
   does not undo them. Name the right discard for each `state` that `status`
   reported: `modified`/`staged` with history → `git checkout -- <path>`;
@@ -251,6 +265,20 @@ python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
   error to fix; `stop-up-to-date` is a success.
 - `action: "diverged"` → [references/push-safety.md](references/push-safety.md).
   Keep `upstream_sha`; the force needs it.
+- `action: "no-upstream"` **and `remote` is `null`** (several remotes, no
+  `origin`) → ask first. Show each candidate **with its URL** from
+  `remote_urls`, then pass the chosen one:
+
+  ```bash
+  python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push \
+    --remote "<chosen>" --facts "<facts.json>"
+  ```
+
+  Running the plain command here instead returns `error: "ambiguous-remote"` and
+  exit 5. That is the tool asking for this question, not a failed push — ask it
+  rather than abandoning a legitimate first push. `error: "unknown-remote"` (also
+  exit 5) means the name did not match; re-show the candidates and ask again,
+  once.
 - otherwise:
 
 ```bash
@@ -261,11 +289,7 @@ python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push --facts "<facts.jso
 refspec, so `push.default=matching` can never widen it. It refuses to force
 outside a diverged branch.
 
-A `no-upstream` plan whose `remote` is `null` (several remotes, no `origin`)
-needs one more question: show each candidate **with its URL** from `remote_urls`,
-then pass `--remote`.
-
-**A push that did not happen appears two ways** — JSON with `pushed: false`, or a
+**Except for the two questions above, a push that did not happen appears two ways** — JSON with `pushed: false`, or a
 non-zero exit with no JSON. Treat both the same: report it, and go to Step 6 with
 no push recorded.
 

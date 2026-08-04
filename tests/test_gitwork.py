@@ -378,3 +378,149 @@ def test_facts_refuses_a_path_inside_the_repo(repo, written):
     )
     assert proc.returncode != 0
     assert "outside the repository" in proc.stderr
+
+
+# -- gates the round-1 panel found untested ----------------------------------
+
+
+def install_hook(repo, body: str) -> None:
+    """Install a real .git/hooks/pre-commit.
+
+    make_git deliberately does NOT disable hooks -- a repo's hooks are part of
+    how its owner wants commits made, and for this skill they are the subject
+    matter. That also makes them the only honest way to drive the commit gates.
+    """
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\n" + body)
+    hook.chmod(0o755)
+
+
+def test_a_commit_that_pulled_in_an_extra_file_is_refused(repo, written, tmp_path):
+    """A hook that stages something else must not pass as this run's commit."""
+    (repo / "sneaky.txt").write_text("not ours\n")
+    install_hook(repo, f"{REAL_GIT} add sneaky.txt\nexit 0\n")
+    proc = commit(repo, written, tmp_path)
+    assert proc.returncode == 2
+    got = out_json(proc)
+    assert got["verdict"] == "touched-extra-files"
+    assert got["only_managed"] is False
+    assert got["record_choice"] == "not committed"
+    assert "Do NOT push" in got["remedy"]
+
+
+def test_a_commit_recording_different_content_is_refused(repo, written, tmp_path):
+    """The file list is not the content: a hook can commit other bytes under
+    the same path."""
+    install_hook(
+        repo,
+        f"echo '# injected by a hook' >> .pre-commit-config.yaml\n"
+        f"{REAL_GIT} add .pre-commit-config.yaml\nexit 0\n",
+    )
+    proc = commit(repo, written, tmp_path)
+    assert proc.returncode == 2
+    got = out_json(proc)
+    assert got["verdict"] == "content-mismatch"
+    assert got["only_managed"] is True
+    assert got["content_matches"] is False
+
+
+def test_a_failed_commit_leaves_the_index_as_it_was_found(repo, written, tmp_path):
+    """`add` has already run by then, so bailing out would strand the files
+    staged in a state the caller never created."""
+    install_hook(repo, "exit 1\n")
+    before = git_out(repo, "status", "--porcelain")
+    proc = commit(repo, written, tmp_path)
+    assert proc.returncode != 0
+    assert "commit failed" in proc.stderr
+    assert "unstaged again" in proc.stderr
+    assert git_out(repo, "status", "--porcelain") == before
+
+
+def test_status_refuses_rather_than_calling_everything_clean(repo, written, tmp_path, monkeypatch):
+    """A failing `git status` must not read as 'nothing changed'.
+
+    file_states seeds every path clean, so swallowing the error made `status`
+    emit changed:false and sent the agent to the summary with 'no change' --
+    silently discarding the files this run had just written.
+    """
+    fake = tmp_path / "brokengit"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "status" ]; then echo "fatal: index file corrupt" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written), stubs=fake)
+    assert proc.returncode != 0
+    assert "not a clean result" in proc.stderr
+
+
+@pytest.fixture
+def remote_no_upstream(tmp_path, repo):
+    """A remote exists, but this branch has never been pushed to it."""
+    bare = tmp_path / "fresh.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", "origin", str(bare)], check=True)
+    return bare
+
+
+def test_no_upstream_with_one_remote_pushes_and_sets_it(
+    repo, remote_no_upstream, written, tmp_path
+):
+    commit(repo, written, tmp_path)
+    plan = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert plan["action"] == "no-upstream"
+    assert plan["remote"] == "origin"
+    assert plan["permits_push"] is True
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written)))
+    assert got["pushed"] is True
+    assert git_out(repo, "rev-parse", "HEAD") == git_out(remote_no_upstream, "rev-parse", "main")
+
+
+def test_no_upstream_with_several_remotes_and_no_origin_asks(repo, written, tmp_path):
+    for name in ("alpha", "beta"):
+        bare = tmp_path / f"{name}.git"
+        subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+        subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", name, str(bare)], check=True)
+    commit(repo, written, tmp_path)
+
+    plan = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert plan["action"] == "no-upstream"
+    assert plan["remote"] is None, "nothing may be chosen on the user's behalf"
+    assert set(plan["remote_urls"]) == {"alpha", "beta"}
+    assert "not settled yet" in plan["guidance"]
+
+    proc = run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written))
+    assert proc.returncode == 5
+    assert out_json(proc)["error"] == "ambiguous-remote"
+
+    got = out_json(
+        run("gitwork.py", "--dir", str(repo), "push", "--remote", "beta", "--facts", str(written))
+    )
+    assert got["pushed"] is True
+    assert json.loads(written.read_text())["commit"]["push"]["remote"] == "beta"
+
+
+def test_an_unknown_remote_is_named_not_guessed(repo, remote_no_upstream, written, tmp_path):
+    commit(repo, written, tmp_path)
+    proc = run(
+        "gitwork.py", "--dir", str(repo), "push", "--remote", "nope", "--facts", str(written)
+    )
+    assert proc.returncode == 5
+    assert out_json(proc)["error"] == "unknown-remote"
+
+
+def test_a_detached_head_is_classified_not_crashed_on(repo, remote, written, tmp_path):
+    commit(repo, written, tmp_path)
+    subprocess.run([REAL_GIT, "-C", str(repo), "checkout", "-q", "--detach"], check=True)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] == "stop-detached-head"
+    assert got["permits_push"] is False
+    proc = run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written))
+    assert proc.returncode == 3
+    assert out_json(proc)["pushed"] is False

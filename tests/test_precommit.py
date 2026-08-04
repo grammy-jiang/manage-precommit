@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 import subprocess
 
@@ -278,7 +277,6 @@ def test_verify_calls_a_no_files_run_vacuous(repo, keys_file, facts_path, stubs,
         "exit 0\n"
     )
     pc.chmod(pc.stat().st_mode | stat.S_IEXEC)
-    env_path = f"{fake}{os.pathsep}{stubs}"
     proc = run(
         "precommit.py",
         "--dir",
@@ -293,7 +291,6 @@ def test_verify_calls_a_no_files_run_vacuous(repo, keys_file, facts_path, stubs,
     assert got["run_ok"] is False
     assert proc.returncode != 0
     assert json.loads(facts_path.read_text())["verify"]["vacuous"] is True
-    assert env_path  # PATH composition is exercised by the fixture itself
 
 
 def test_verify_accepts_a_real_pass(repo, keys_file, facts_path, tmp_path, stubs):
@@ -350,3 +347,94 @@ def test_read_only_modes_write_nothing(repo, stubs, mode):
     before = sorted(p.name for p in repo.iterdir())
     run("precommit.py", "--dir", str(repo), mode, stubs=stubs)
     assert sorted(p.name for p in repo.iterdir()) == before
+
+
+# -- guards added after round 1 of the reviewer panel -------------------------
+
+
+def test_an_asset_is_never_written_through_a_symlinked_directory(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """Pins the arbitrary-write hole found in review.
+
+    copy_assets used os.makedirs + shutil.copyfile, which follow a symlink at
+    every component. A repo shipping a `scripts` symlink plus any Markdown file
+    with a mermaid fence (enough for detect_markers to recommend the entry) got
+    lint-mermaid.mjs written wherever that symlink pointed -- in Step 3, before
+    any diff, commit or push confirmation.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "scripts").symlink_to(outside)
+
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid")
+    assert proc.returncode != 0
+    assert "symlink" in proc.stderr
+    assert list(outside.iterdir()) == [], "wrote through the symlink"
+
+
+def test_an_asset_is_never_written_outside_the_repo(repo, keys_file, facts_path, stubs, tmp_path):
+    outside = tmp_path / "escape"
+    outside.mkdir()
+    (repo / "scripts").symlink_to(outside)
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    assert not (outside / "lint-mermaid.mjs").exists()
+
+
+def test_a_failed_dirty_check_is_not_treated_as_clean(repo, keys_file, facts_path, stubs, tmp_path):
+    """`git status` failing is not the same as finding nothing dirty.
+
+    Returning on a non-zero status silently merged into whatever the user had
+    in progress -- the exact thing refuse_if_dirty exists to prevent.
+    """
+    fake = tmp_path / "brokengit"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "status" ]; then echo "fatal: index file corrupt" >&2; exit 128; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then printf \'a\\trefs/tags/v1.0.0\\n\'; exit 0; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 4
+    assert "not a clean result" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_recommend_seeds_the_facts_file(repo, facts_path, stubs):
+    """The worked example documents SCAN detected and HOOKS recommended rows;
+    before this they were unproducible, because --recommend wrote no facts."""
+    run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--recommend",
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    facts = json.loads(facts_path.read_text())
+    assert facts["scan"]["detected"]
+    assert any(r["name"] == "markdownlint" for r in facts["hooks"]["recommended"])
+
+
+def test_generate_merges_into_the_facts_recommend_seeded(repo, keys_file, facts_path, stubs):
+    run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--recommend",
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    facts = json.loads(facts_path.read_text())
+    assert facts["scan"]["detected"], "the scan rows were clobbered by the write step"
+    assert facts["hooks"]["recommended"], "the recommendation rows were clobbered"
+    assert facts["hooks"]["added"], "the write step's own rows are missing"
+    assert facts["internal"]["managed_files"]

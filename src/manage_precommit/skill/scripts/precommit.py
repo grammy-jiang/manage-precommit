@@ -30,7 +30,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -43,6 +42,7 @@ from shared import (
     Recommendation,
     atomic_write_bytes,
     clean,
+    default_file_mode,
     has_suspicious_chars,
     make_git,
     preserved_mode,
@@ -374,9 +374,20 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
     rc, _, _ = git(directory, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
         return  # not a repo: nothing is tracked, so nothing can be pending
-    rc, out, _ = git(directory, "status", "--porcelain", "--no-renames", "--", *paths, strip=False)
+    rc, out, err = git(
+        directory, "status", "--porcelain", "--no-renames", "--", *paths, strip=False
+    )
     if rc != 0:
-        return
+        # NOT the same as "found nothing dirty". A locked or corrupt index makes
+        # this fail transiently, and returning here would merge into whatever
+        # the user had in progress while the whole point of the function is that
+        # it never does. Unknown is not clean.
+        die(
+            f"could not check whether this run's files are already modified "
+            f"(git status exited {rc}: {err or 'no stderr'}). Refusing to continue, "
+            "because a failed check is not a clean result.",
+            code=EXIT_DIRTY,
+        )
     dirty = [ln[3:].strip() for ln in out.splitlines() if ln[:2] != "??" and ln[3:].strip()]
     if dirty:
         listed = ", ".join(clean(d) for d in dirty)
@@ -486,20 +497,81 @@ def merge_same_position(insertions: list[cfgmod.Insertion]) -> list[cfgmod.Inser
     return list(merged.values())
 
 
+def refuse_path_escaping_repo(directory: str, rel: str) -> str:
+    """Resolve an asset destination, refusing anything that leaves the repo.
+
+    This is the one write that does not go to a fixed filename in the repo root:
+    the mermaid asset lands at ``scripts/lint-mermaid.mjs``. `os.makedirs` and
+    `shutil.copyfile` both FOLLOW a symlink -- at the final component and at
+    every intermediate one -- so a repo that ships a ``scripts`` symlink
+    pointing anywhere writable turns this into an arbitrary file write.
+
+    That matters more than it first looks, because the path to it is not
+    exotic: a Markdown file containing a ```mermaid fence is enough for
+    detect_markers to recommend the entry, and the write happens in Step 3 --
+    before any diff, commit or push confirmation. So the check is refuse, not
+    follow, matching read_config's treatment of a symlinked config.
+    """
+    root = os.path.realpath(directory)
+    dest = os.path.join(directory, rel)
+    # Every component from the repo root down, not just the parent: a symlink
+    # anywhere along the way redirects the write just as effectively.
+    walked = directory
+    for part in rel.split(os.sep)[:-1]:
+        walked = os.path.join(walked, part)
+        if os.path.islink(walked):
+            die(
+                f"{os.path.join(rel)}: {part!r} is a symlink -- refusing to write through it. "
+                "Remove or replace it, then run again."
+            )
+    resolved = os.path.realpath(os.path.dirname(dest))
+    if resolved != root and not resolved.startswith(root + os.sep):
+        die(f"{rel} resolves outside the repository -- refusing to write it")
+    return dest
+
+
 def copy_assets(key: str, directory: str) -> tuple[list[str], list[str]]:
-    """Copy a catalog entry's repo-side files, never over one already there."""
+    """Copy a catalog entry's repo-side files, never over one already there.
+
+    Read and written through the same guarded helpers as every other file the
+    skill touches: read_bytes_or_die refuses to follow a symlink or read a
+    FIFO, and atomic_write_bytes replaces the destination rather than writing
+    through it. shutil.copyfile did neither.
+    """
     written, kept = [], []
     for src, rel in CATALOG[key].get("assets", []):
-        dest = os.path.join(directory, rel)
+        dest = refuse_path_escaping_repo(directory, rel)
         parent = os.path.dirname(dest)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        # lexists, not exists: a dangling symlink is still something the user
+        # put there, and following it to write is exactly what is refused.
         if os.path.lexists(dest):
             kept.append(rel)
             continue
-        shutil.copyfile(os.path.join(ASSETS, src), dest)
+        payload = read_bytes_or_die(os.path.join(ASSETS, src), die)
+        atomic_write_bytes(dest, payload, mode=default_file_mode())
         written.append(rel)
     return written, kept
+
+
+def load_facts_if_present(path: str) -> dict:
+    """Whatever is already in the facts file, or {} when there is nothing yet.
+
+    Step 1 may have seeded it with what the scan detected; the write step adds
+    to that rather than replacing it, so a run that skipped --recommend still
+    works and one that used it keeps those rows.
+    """
+    if not os.path.lexists(path):
+        return {}
+    raw = read_bytes_or_die(path, die).decode("utf-8", "replace")
+    try:
+        existing = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        die(f"cannot read facts file {path}: {exc}")
+    if not isinstance(existing, dict):
+        die("facts file must contain a JSON object")
+    return existing
 
 
 def sha256_of(path: str) -> str:
@@ -614,7 +686,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         "internal": {"managed_files": managed},
     }
     if args.facts_out:
-        write_json_or_die(args.facts_out, dict(facts), die)
+        merged = dict(load_facts_if_present(args.facts_out))
+        for section, value in facts.items():
+            if isinstance(value, dict) and isinstance(merged.get(section), dict):
+                merged[section] = {**merged[section], **value}
+            else:
+                merged[section] = value
+        write_json_or_die(args.facts_out, merged, die)
 
     print(f"Wrote {path}  ({'updated' if existing is not None else 'new'})", file=sys.stderr)
     if rewrote_empty:
@@ -661,7 +739,7 @@ def cmd_detect(directory: str) -> int:
     return 0
 
 
-def cmd_recommend(directory: str) -> int:
+def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     cfg = read_config(directory)
     previous = present_keys(cfg)
     recs, markers = detect_markers(directory)
@@ -669,6 +747,15 @@ def cmd_recommend(directory: str) -> int:
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
         r["name"] for r in recs if r["name"] not in ALWAYS_ON
     ]
+    if facts_out:
+        # Seeded here so the summary can show what was detected and what was
+        # recommended, with the file that triggered each. cmd_generate merges
+        # into this rather than replacing it.
+        facts: Facts = {
+            "scan": {"detected": markers},
+            "hooks": {"recommended": recs},
+        }
+        write_json_or_die(facts_out, dict(facts), die)
     emit(
         {
             "always_on": list(ALWAYS_ON),
@@ -820,7 +907,8 @@ def main() -> int:
     if args.detect:
         return cmd_detect(args.dir)
     if args.recommend:
-        return cmd_recommend(args.dir)
+        refuse_facts_inside_repo(args.dir, args.facts_out, die)
+        return cmd_recommend(args.dir, args.facts_out)
     if args.verify:
         return cmd_verify(args)
     return cmd_generate(args)

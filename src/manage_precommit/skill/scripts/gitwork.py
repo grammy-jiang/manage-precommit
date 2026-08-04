@@ -156,8 +156,20 @@ def porcelain(repo: str, paths: list[str]) -> str:
     """`git status --porcelain -- <paths>`, or "" when nothing changed.
 
     Unstripped: the leading column is meaningful (see shared.make_git).
+
+    A non-zero exit is fatal rather than empty. Empty output means "nothing
+    changed", and file_states() seeds every path clean -- so swallowing a
+    failure here (a locked index, an I/O error) would report the whole set as
+    clean, `status` would emit changed:false, and SKILL.md's Step 5 table would
+    send the agent to the summary with "no change: the config already matched",
+    silently discarding work this run had just written.
     """
-    _, out, _ = git(repo, "status", "--porcelain", "--no-renames", "--", *paths, strip=False)
+    rc, out, err = git(repo, "status", "--porcelain", "--no-renames", "--", *paths, strip=False)
+    if rc != 0:
+        die(
+            f"git status failed (exit {rc}): {err or 'no stderr'}. Refusing to report "
+            "the state of this run's files, because a failed check is not a clean result."
+        )
     return out
 
 
