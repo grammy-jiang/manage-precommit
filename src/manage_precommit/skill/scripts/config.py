@@ -193,7 +193,9 @@ def scan(text: str) -> Config:
         if stripped == "..." or stripped.startswith("... "):
             raise ConfigRefused("config holds more than one YAML document", i)
         if _MERGE_KEY.match(line):
-            raise ConfigRefused("config uses a merge key (<<:), which this tool will not guess at", i)
+            raise ConfigRefused(
+                "config uses a merge key (<<:), which this tool will not guess at", i
+            )
         if _ANCHOR.search(line) and not _is_blank_or_comment(line):
             raise ConfigRefused(
                 "config uses a YAML anchor or alias, which this tool will not guess at", i
@@ -314,7 +316,9 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     first = lines[start]
     inline = first.strip()[2:]  # past the "- "
     if inline.lstrip().startswith(("[", "{")):
-        raise ConfigRefused("a repo entry is in flow style; this tool only reads block form", start + 1)
+        raise ConfigRefused(
+            "a repo entry is in flow style; this tool only reads block form", start + 1
+        )
     parsed = _split_key(inline)
     if parsed is None:
         raise ConfigRefused("a repo entry does not start with `repo:`", start + 1)
@@ -371,11 +375,14 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
                 nxt = _next_content(lines, i + 1)
                 if nxt is not None and _indent_of(lines[nxt]) > key_indent:
                     entry.hook_item_indent = _indent_of(lines[nxt])
-                elif nxt is not None and _indent_of(lines[nxt]) == key_indent:
+                elif (
+                    nxt is not None
+                    and _indent_of(lines[nxt]) == key_indent
                     # `hooks:` followed by items at the SAME column as the key:
                     # valid YAML, and how many hand-written configs look.
-                    if lines[nxt].strip().startswith("- "):
-                        entry.hook_item_indent = key_indent
+                    and lines[nxt].strip().startswith("- ")
+                ):
+                    entry.hook_item_indent = key_indent
             i += 1
             continue
         i += 1
@@ -458,7 +465,9 @@ def observed_hook_delta(cfg: Config) -> int | None:
     return None
 
 
-def render_entry(text: str, entry: RepoEntry, seq_indent: int, want_hook_delta: int | None) -> list[str]:
+def render_entry(
+    text: str, entry: RepoEntry, seq_indent: int, want_hook_delta: int | None
+) -> list[str]:
     """A fragment's lines, re-indented to a target file's conventions.
 
     Two shifts, not one: the entry moves to the target's sequence column, and

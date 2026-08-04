@@ -39,6 +39,7 @@ from typing import NoReturn
 import config as cfgmod
 from shared import (
     Facts,
+    ManagedFile,
     Recommendation,
     atomic_write_bytes,
     clean,
@@ -46,6 +47,7 @@ from shared import (
     make_git,
     preserved_mode,
     read_bytes_or_die,
+    refuse_facts_inside_repo,
     refuse_option_like,
     write_json_or_die,
 )
@@ -147,7 +149,7 @@ def latest_tag(repo_url: str) -> str:
 def npm_latest(pkg: str) -> str:
     name = refuse_option_like(pkg, "npm package", die)
     try:
-        out = subprocess.run(  # noqa: S603
+        out = subprocess.run(
             ["npm", "view", name, "version"],
             capture_output=True,
             text=True,
@@ -172,8 +174,21 @@ def npm_latest(pkg: str) -> str:
 # an unbounded walk of someone's monorepo is a hang rather than an answer.
 SKIP_DIRS = frozenset(
     {
-        ".git", ".hg", ".svn", "node_modules", ".venv", "venv", ".tox", ".mypy_cache",
-        ".pytest_cache", ".ruff_cache", "__pycache__", "dist", "build", "target", "vendor",
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+        "dist",
+        "build",
+        "target",
+        "vendor",
     }
 )
 MAX_SCAN_DEPTH = 3
@@ -264,9 +279,9 @@ def present_keys(cfg: cfgmod.Config | None) -> list[str]:
     local_ids = cfg.local_hook_ids()
     have = []
     for key, meta in CATALOG.items():
-        if meta.get("rev_repo") and meta["rev_repo"] in urls:
-            have.append(key)
-        elif key == "mermaid" and "mermaid-lint" in local_ids:
+        if (meta.get("rev_repo") and meta["rev_repo"] in urls) or (
+            key == "mermaid" and "mermaid-lint" in local_ids
+        ):
             have.append(key)
     return have
 
@@ -359,9 +374,7 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
     rc, _, _ = git(directory, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
         return  # not a repo: nothing is tracked, so nothing can be pending
-    rc, out, _ = git(
-        directory, "status", "--porcelain", "--no-renames", "--", *paths, strip=False
-    )
+    rc, out, _ = git(directory, "status", "--porcelain", "--no-renames", "--", *paths, strip=False)
     if rc != 0:
         return
     dirty = [ln[3:].strip() for ln in out.splitlines() if ln[:2] != "??" and ln[3:].strip()]
@@ -520,7 +533,7 @@ def normalise_empty_repos(cfg: cfgmod.Config, lines: list[str]) -> tuple[list[st
     if match is None:
         die("internal check failed: `repos: []` did not match its own pattern")
     baseline[cfg.repos_key_line] = f"{match.group('indent')}repos:"
-    changed = [i for i, (a, b) in enumerate(zip(lines, baseline)) if a != b]
+    changed = [i for i, (a, b) in enumerate(zip(lines, baseline, strict=True)) if a != b]
     if changed != [cfg.repos_key_line] or len(baseline) != len(lines):
         die("internal check failed: normalising `repos: []` changed more than that line")
     return baseline, True
@@ -528,6 +541,7 @@ def normalise_empty_repos(cfg: cfgmod.Config, lines: list[str]) -> tuple[list[st
 
 def cmd_generate(args: argparse.Namespace) -> int:
     directory = args.dir
+    refuse_facts_inside_repo(directory, args.facts_out, die)
     keys = read_templates_file(args.templates_file)
 
     will_write = files_this_run_would_write(directory, keys)
@@ -578,7 +592,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
     verify_written(path, keys, after)
     # Hashed from disk, not from the string in memory: what the commit step
     # stages is the file, so the file is what gets bound to these facts.
-    managed = [{"path": rel, "sha256": sha256_of(os.path.join(directory, rel))} for rel in written]
+    managed: list[ManagedFile] = [
+        {"path": rel, "sha256": sha256_of(os.path.join(directory, rel))} for rel in written
+    ]
 
     added = [line for line in report if ": added" in line or line.startswith("added ")]
     left = [line for line in report if "left as-is" in line]
@@ -674,7 +690,7 @@ HOOK_RESULT_LINE = re.compile(r"\.{3,}.*\b(Passed|Failed|Skipped)\b")
 
 def run_precommit(directory: str, *args: str) -> tuple[int, str]:
     try:
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             ["pre-commit", *args],
             cwd=directory,
             capture_output=True,
@@ -721,6 +737,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     the first exit is not a failure.
     """
     directory = args.dir
+    refuse_facts_inside_repo(directory, args.facts, die)
     rc, install_out = run_precommit(directory, "install")
     if rc != 0:
         die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")

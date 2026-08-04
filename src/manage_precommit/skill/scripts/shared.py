@@ -93,9 +93,7 @@ def clean(value: object) -> str:
 # `clean` neutralises tab/newline/CR because a newline inside a summary *field*
 # forges a row; a newline inside a *file* is just a line ending, so scanning
 # file content must not flag it.
-SUSPICIOUS_CHARS = re.compile(
-    _char_class(_C0_C1_RANGES_KEEPING_WHITESPACE, _INVISIBLE_RANGES)
-)
+SUSPICIOUS_CHARS = re.compile(_char_class(_C0_C1_RANGES_KEEPING_WHITESPACE, _INVISIBLE_RANGES))
 
 
 def refuse_option_like(value: str, what: str, die: Callable[[str], NoReturn]) -> str:
@@ -249,6 +247,29 @@ def write_json_or_die(path: str, payload: dict, die: Callable[[str], NoReturn]) 
         die(f"cannot write facts file {path}: {exc}")
 
 
+def refuse_facts_inside_repo(
+    repo: str, facts_path: str | None, die: Callable[[str], NoReturn]
+) -> None:
+    """The facts file must live outside the repository being worked on.
+
+    Shared, and checked before the file is ever read: the set of files a run may
+    touch is read *from* this file, so a guard needing its contents first could
+    not protect those contents. Outside-the-repo is the stronger and simpler
+    invariant anyway -- a facts file inside the tree turns up in `git status`,
+    lands in the diff the user is about to approve, and, if it aliased a managed
+    path, would be overwritten by the very step meant to commit it.
+    """
+    if facts_path is None:
+        return
+    root = os.path.realpath(repo)
+    target = os.path.realpath(facts_path)
+    if target == root or target.startswith(root + os.sep):
+        die(
+            f"the facts file must be outside the repository ({facts_path} is inside "
+            f"{repo}). Put it in a mktemp path; the run deletes it at the end."
+        )
+
+
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 
 
@@ -293,7 +314,7 @@ def make_git(
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         hardening = ["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user"]
         try:
-            proc = subprocess.run(  # noqa: S603
+            proc = subprocess.run(
                 ["git", "-C", repo, *hardening, *args],
                 env=env,
                 input=stdin,
