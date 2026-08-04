@@ -276,3 +276,37 @@ def test_scan_reports_an_empty_flow_list():
     cfg = C.scan('minimum_pre_commit_version: "4.0.0"\nrepos: []\n')
     assert cfg.empty_repos is True
     assert cfg.repos == []
+
+
+def test_repos_with_a_trailing_comment_is_a_block_sequence():
+    """`repos: # note` has an empty value. Without stripping the comment the
+    value read as "# note", which the block-sequence check refused -- rejecting
+    an ordinary file this tool exists to extend."""
+    cfg = C.scan("repos:  # the hooks we run\n  - repo: local\n    hooks:\n      - id: a\n")
+    assert [e.url for e in cfg.repos] == ["local"]
+    assert cfg.empty_repos is False
+
+
+def test_hooks_with_a_trailing_comment_is_a_block_sequence():
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:  # two of them\n      - id: a\n      - id: b\n"
+    )
+    assert [h.id for h in cfg.repos[0].hooks] == ["a", "b"]
+
+
+def test_a_quoted_hash_is_still_part_of_the_value():
+    """Stripping comments must not eat a # that is inside quotes."""
+    cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        files: '#tagged'\n")
+    assert [h.id for h in cfg.repos[0].hooks] == ["a"]
+
+
+def test_a_crlf_config_records_its_terminator():
+    cfg = C.scan("repos:\r\n  - repo: local\r\n    hooks:\r\n      - id: a\r\n")
+    assert cfg.newline == "\r\n"
+    assert cfg.ends_with_newline is True
+    assert [e.url for e in cfg.repos] == ["local"]
+
+
+def test_a_config_with_no_trailing_newline_records_that():
+    cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a")
+    assert cfg.ends_with_newline is False

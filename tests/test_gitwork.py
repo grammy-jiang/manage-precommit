@@ -680,3 +680,66 @@ def test_an_explicit_choice_still_wins(repo, written, tmp_path):
         "user declined",
     )
     assert json.loads(written.read_text())["commit"]["choice"] == "not committed"
+
+
+# -- the suspicious-character signals, end to end -----------------------------
+
+BIDI = chr(0x202E)  # right-to-left override, built from its codepoint
+
+
+def test_status_flags_a_diff_that_may_not_read_as_it_says(repo, written, tmp_path):
+    """A config is partly upstream- and partly repo-supplied, so a diff can
+    render differently from the bytes it contains. Removing this call would
+    otherwise pass the whole suite."""
+    commit(repo, written, tmp_path)
+    path = repo / ".pre-commit-config.yaml"
+    path.write_text(path.read_text() + f"# note{BIDI} reversed\n")
+    proc = run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written))
+    got = out_json(proc)
+    assert got["suspicious_characters"] is True
+    assert "WARNING" in proc.stderr
+
+
+def test_push_plan_flags_a_remote_whose_name_misrepresents_itself(repo, written, tmp_path):
+    """Remote names come from repository config and are shown as a push
+    destination the user approves."""
+    bare = tmp_path / "sneaky.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "remote", "add", f"ori{BIDI}gin", str(bare)], check=True
+    )
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] == "no-upstream"
+    assert got["suspicious_characters"] is True
+
+
+def test_a_diverged_plan_flags_forged_commit_subjects(repo, remote, written, tmp_path):
+    """These subject lines are what push-safety.md asks the operator to read
+    before approving an irreversible force-push."""
+    commit(repo, written, tmp_path)
+
+    other = tmp_path / "other"
+    subprocess.run([REAL_GIT, "clone", "-q", str(remote), str(other)], check=True)
+    for key, value in (("user.email", "o@example.invalid"), ("user.name", "Other")):
+        subprocess.run([REAL_GIT, "-C", str(other), "config", key, value], check=True)
+    (other / "theirs.txt").write_text("their work\n")
+    subprocess.run([REAL_GIT, "-C", str(other), "add", "-A"], check=True)
+    msg = other / "msg.txt"
+    msg.write_text(f"fix{BIDI} something\n")
+    subprocess.run([REAL_GIT, "-C", str(other), "commit", "-q", "-F", str(msg)], check=True)
+    subprocess.run([REAL_GIT, "-C", str(other), "push", "-q"], check=True)
+
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] == "diverged"
+    assert got["suspicious_characters"] is True
+    assert got["would_drop"], "the operator must still be shown what would be dropped"
+
+
+def test_the_drop_list_names_who_wrote_each_commit(repo, remote, written, tmp_path):
+    """A subject alone cannot say whose work a force-push would delete."""
+    commit(repo, written, tmp_path)
+    _diverge(repo, remote, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] == "diverged"
+    assert any("Other:" in line for line in got["would_drop"]), got["would_drop"]

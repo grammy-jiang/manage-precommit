@@ -116,6 +116,8 @@ def names(items: object, pal: Pal, kind: str | None = None) -> str:
         return ", ".join(pal.add(clean(n)) for n in items)
     if kind == "dim":
         return ", ".join(pal.dim(clean(n)) for n in items)
+    if kind == "rem":
+        return ", ".join(pal.rem(clean(n)) for n in items)
     return ", ".join(clean(n) for n in items)
 
 
@@ -201,6 +203,10 @@ def render(facts: dict, pal: Pal) -> str:
             [
                 ("added", names(hooks.get("added"), pal, "add")),
                 ("left as-is", names(hooks.get("left_as_is"), pal, "dim")),
+                (
+                    "add by hand",
+                    names(hooks["needs_manual"], pal, "rem") if hooks.get("needs_manual") else None,
+                ),
                 ("recommended", rec_value),
                 ("versions", ver_value),
             ],

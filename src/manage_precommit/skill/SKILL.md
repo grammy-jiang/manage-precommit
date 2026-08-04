@@ -152,8 +152,12 @@ AskUserQuestion: **Run the hooks over all files** / **Only this run's files** /
 - *Only this run's files* — pass `--files` with `files.written` from the facts.
   Narrower, and it will not tell you whether the hooks pass on the rest of the
   repo.
-- *Skip* — go to Step 5 and record `--note "verification skipped at user request"`.
-  Say plainly that the hooks are installed but unproven.
+- *Skip* — nothing is installed and nothing is checked. `pre-commit install`,
+  which writes `.git/hooks/pre-commit`, runs only inside this step, so skipping
+  it leaves the config written and **no hook active**: the next `git commit`
+  triggers nothing. Say exactly that, go to Step 5, and record
+  `--note "verification skipped; git hook not installed"`. They can install it
+  later by re-running this step, or by hand with `pre-commit install`.
 
 ```bash
 python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify --facts "<facts.json>"
@@ -227,9 +231,13 @@ change and not an intention:
   the user approves a commit believing their tree is as clean as the diff they
   were shown, and only finds out from the summary, after the fact.
 - **Say the files are already written.** *Don't commit* leaves them on disk; it
-  does not undo them. Name the right discard for each `state` that `status`
-  reported: `modified`/`staged` with history → `git checkout -- <path>`;
-  `untracked` (the common first run) → `rm <path>`.
+  does not undo them. Name the right discard for the `state` that `status`
+  reported for each file, because they differ:
+  - `modified` (unstaged only) → `git checkout -- <path>`
+  - `staged` → `git restore --staged --worktree -- <path>`. Plain
+    `git checkout --` here restores the work tree *from the index*, which for a
+    staged file changes nothing and leaves it staged.
+  - `untracked` (the common first run) → `rm <path>`
 - **Name where a push would go**, from the tool rather than by re-deriving it:
 
   ```bash
@@ -266,8 +274,11 @@ run verified*.
   remedy; **never run it yourself** — discarding a commit that exists is the
   user's call. Do not pass the hash to Step 6.
 
-A non-zero exit with no verdict means nothing was committed and the index is as
-you found it. Report it and stop.
+A non-zero exit with no verdict means nothing was committed. The index is as
+you found it **except** in one case, which the tool says out loud: if stderr
+carries `AND the cleanup reset also failed`, this run's files may still be
+staged. Relay that message verbatim, tell the user to check `git status` before
+doing anything else, and stop. Otherwise report the error and stop.
 
 ### 4. Push
 
@@ -311,9 +322,11 @@ no push recorded.
 
 ## Step 6 — Summary
 
+The ordinary path passes neither `--choice` nor `--hash`:
+
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.json>" \
-  --choice "commit + push" --hash "<hash>" --note "<why, when needed>"
+  --note "<why, when needed>"
 ```
 
 **Do not pass `--choice` for the ordinary path.** The outcome is already
@@ -324,14 +337,17 @@ a prose table, which is exactly what this design exists to avoid.
 Pass it only when nothing was attempted and there is therefore nothing to
 derive:
 
-| situation | pass |
+| situation | add |
 | --- | --- |
 | the user said *Don't commit* | `--choice "not committed"` |
 | a Step 5 item 1 shortcut (not a repo / no change) | `--choice "not committed" --note "<which>"` |
 | a bad commit (`verdict` ≠ `ok`) | the JSON's own `record_choice` and `record_note` |
+| verification was skipped | `--note "verification skipped; git hook not installed"` |
 
-Omit `--hash` unless `verdict` was `ok`; it is verified, not believed. `--note`
-repeats, and appends without touching computed fields — never hand-edit the file.
+`--hash` is never required: `commit` already recorded the hash it verified.
+Pass it only to have the tool re-check a specific commit, and only when
+`verdict` was `ok` — it is verified, not believed. `--note` repeats, and appends
+without touching computed fields — never hand-edit the file.
 
 ```bash
 python3 "<skill-dir>/scripts/summary.py" "<facts.json>"

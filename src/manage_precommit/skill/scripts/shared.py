@@ -290,6 +290,7 @@ def make_git(
         check: bool = False,
         strip: bool = True,
         stdin: str | None = None,
+        isolated: bool = False,
     ) -> tuple[int, str, str]:
         """Run a git command in repo. Returns (rc, stdout, stderr).
 
@@ -313,6 +314,18 @@ def make_git(
         # subject is the repo's pre-commit hooks.
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         hardening = ["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user"]
+        if isolated:
+            # For a lookup that is purely about a hardcoded upstream URL and has
+            # nothing to do with the repository being configured. Local config is
+            # attacker-reachable -- a checkout can ship a .git/config carrying
+            # url.<base>.insteadOf, http.proxy, core.sshCommand or a credential
+            # helper, and the ext:: guard above does nothing about any of them. A
+            # redirected catalog URL would hand back an attacker's tags, which
+            # only get shape-checked, and Step 4 then clones the same URL as a
+            # hook. So: no system config, no global config, and a cwd that is not
+            # inside any repository.
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+            env["GIT_CONFIG_GLOBAL"] = os.devnull
         try:
             proc = subprocess.run(
                 ["git", "-C", repo, *hardening, *args],
@@ -364,6 +377,10 @@ class Recommendation(TypedDict):
 class HooksFacts(TypedDict, total=False):
     added: list[str]
     left_as_is: list[str]
+    # An entry whose `hooks:` list is a shape the writer cannot extend. The
+    # user has to add those hooks by hand, so the summary has to say so --
+    # this used to print to stderr and never reach the facts at all.
+    needs_manual: list[str]
     recommended: list[Recommendation]
     versions: dict[str, str]
 

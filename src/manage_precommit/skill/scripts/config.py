@@ -90,6 +90,12 @@ class Config:
     repos_seq_indent: int | None  # column of the "-" markers under repos:
     repos_end: int | None  # last line index of the repos block, inclusive
     empty_repos: bool  # `repos: []` -- see EMPTY_REPOS_LINE
+    # splitlines() drops the terminator, so reassembling with a hardcoded "\n"
+    # would silently convert a CRLF file and add a trailing newline it never
+    # had -- rewriting every line while verify_additive, which compares the
+    # already-stripped lines, still called the merge purely additive.
+    newline: str = "\n"
+    ends_with_newline: bool = True
 
     def repo(self, url: str) -> RepoEntry | None:
         for entry in self.repos:
@@ -144,7 +150,10 @@ def _split_key(text: str) -> tuple[str, str] | None:
             rest = text[i + 1 :]
             if rest and not rest[0].isspace():
                 continue  # "a:b" is a plain scalar, not a mapping entry
-            return text[:i].strip(), rest.strip()
+            # The trailing comment is not part of the value. Without this,
+            # `repos: # note` yields "# note" rather than "", and the
+            # block-sequence check below refuses a perfectly ordinary file.
+            return text[:i].strip(), _code_only(rest).strip()
     return None
 
 
@@ -197,6 +206,8 @@ def scan(text: str) -> Config:
     if "\x00" in text:
         raise ConfigRefused("config contains a NUL byte")
     lines = text.splitlines()
+    newline = "\r\n" if "\r\n" in text else "\n"
+    ends_with_newline = text.endswith(("\n", "\r"))
 
     seen_content = False
     for i, line in enumerate(lines, start=1):
@@ -270,6 +281,8 @@ def scan(text: str) -> Config:
     return Config(
         text=text,
         lines=lines,
+        newline=newline,
+        ends_with_newline=ends_with_newline,
         top_keys=top_keys,
         repos=repos,
         repos_key_line=repos_key_line,

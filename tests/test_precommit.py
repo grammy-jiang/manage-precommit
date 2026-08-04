@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from conftest import NPM_VERSION, REAL_GIT, out_json, run
+from conftest import NPM_VERSION, REAL_GIT, out_json, run, stub_calls
 
 
 def generate(repo, keys_file, facts_path, stubs, *names, force=False):
@@ -536,3 +536,98 @@ def test_generate_extends_a_user_authored_empty_repos_list(repo, keys_file, fact
     assert "repos: []" not in after
     assert "- id: trailing-whitespace" in after
     assert "normalised" in proc.stderr
+
+
+# -- guards added after round 3 of the reviewer panel -------------------------
+
+BIDI = chr(0x202E)  # right-to-left override, built from its codepoint
+
+
+def test_generate_asks_about_the_right_repo_for_each_catalog_key(
+    repo, keys_file, facts_path, stubs
+):
+    """A stub that answers the same thing for every URL cannot catch a swapped
+    rev_repo, which is precisely what version pinning exists to get right."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene", "gitleaks", "mermaid")
+    calls = stub_calls(stubs)
+    assert "https://github.com/pre-commit/pre-commit-hooks" in calls
+    assert "https://github.com/gitleaks/gitleaks" in calls
+    assert "npm view @mermaid-js/mermaid-cli version" in calls
+    # And the pinned values are the ones that repo offered, not another's.
+    versions = json.loads(facts_path.read_text())["hooks"]["versions"]
+    assert versions["hygiene"] == "v10.0.1"
+    assert versions["gitleaks"] == "v8.30.1"
+
+
+def test_a_crlf_config_keeps_its_line_endings(repo, keys_file, facts_path, stubs):
+    """splitlines() drops the terminator, so rejoining with a hardcoded "\\n"
+    rewrote every line of a CRLF file while verify_additive -- which compares
+    the already-stripped lines -- still called the merge purely additive."""
+    original = "exclude: 'vendor/'\r\nrepos:\r\n- repo: https://github.com/psf/black\r\n  rev: 24.1.0\r\n  hooks:\r\n  - id: black\r\n"
+    (repo / ".pre-commit-config.yaml").write_bytes(original.encode())
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "cfg"], check=True)
+
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    after = (repo / ".pre-commit-config.yaml").read_bytes()
+    assert b"\r\n" in after
+    assert b"\n" not in after.replace(b"\r\n", b""), "a bare LF was introduced"
+    assert b"gitleaks" in after
+
+
+def test_a_config_without_a_trailing_newline_does_not_gain_one(repo, keys_file, facts_path, stubs):
+    (repo / ".pre-commit-config.yaml").write_bytes(b"repos:\n- repo: local\n  hooks:\n  - id: x")
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").read_bytes().endswith(b"\n\n")
+
+
+def test_verify_reports_a_non_utf8_facts_file_cleanly(repo, keys_file, facts_path, stubs):
+    """The decode used to sit outside the try, so this was a raw traceback."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    facts_path.write_bytes(b"\xff\xfe not utf-8")
+    proc = run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path))
+    assert proc.returncode != 0
+    assert "cannot read facts file" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_forged_character_in_the_merged_config_stops_the_write(
+    repo, keys_file, facts_path, stubs
+):
+    """The one guard between a hostile existing config -- carried through
+    byte-for-byte by design -- and a human approving a diff that does not say
+    what the bytes say."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        f"# note{BIDI} reversed\nrepos:\n- repo: local\n  hooks:\n  - id: x\n"
+    )
+    before = (repo / ".pre-commit-config.yaml").read_bytes()
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode != 0
+    assert "text-reordering" in proc.stderr
+    assert (repo / ".pre-commit-config.yaml").read_bytes() == before, "the file was rewritten"
+
+
+def test_a_hooks_list_that_cannot_be_extended_reaches_the_facts(repo, keys_file, facts_path, stubs):
+    """This outcome printed to stderr but never reached facts, so the closing
+    summary silently omitted that a hook needs adding by hand."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n- repo: https://github.com/pre-commit/pre-commit-hooks\n  rev: v4.0.0\n  hooks:\n"
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "hygiene", force=True)
+    assert proc.returncode == 0, proc.stderr
+    needs = json.loads(facts_path.read_text())["hooks"]["needs_manual"]
+    assert needs and "by hand" in needs[0]
+
+
+def test_hooks_added_to_an_existing_entry_reach_the_facts(repo, keys_file, facts_path, stubs):
+    """Classified by substring-matching prose, this outcome matched neither
+    bucket and vanished from the summary."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n- repo: https://github.com/pre-commit/pre-commit-hooks\n"
+        "  rev: v4.0.0\n  hooks:\n  - id: trailing-whitespace\n"
+    )
+    generate(repo, keys_file, facts_path, stubs, "hygiene", force=True)
+    added = json.loads(facts_path.read_text())["hooks"]["added"]
+    assert any("added hooks" in line for line in added)

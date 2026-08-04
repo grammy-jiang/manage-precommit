@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from typing import NoReturn
 
@@ -131,7 +132,11 @@ def latest_tag(repo_url: str) -> str:
     `v2-beta` ref can never be pinned as though it were a release.
     """
     url = refuse_option_like(repo_url, "repo url", die)
-    rc, out, err = git(".", "ls-remote", "--tags", "--refs", url)
+    # In a scratch directory, with no system or global config: see make_git's
+    # `isolated`. Running this under the target repo's config would let that
+    # repo decide which server answers for a catalog URL.
+    with tempfile.TemporaryDirectory() as elsewhere:
+        rc, out, err = git(elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True)
     if rc != 0:
         die(f"git ls-remote failed for {repo_url}: {err}")
     tags = []
@@ -149,15 +154,19 @@ def latest_tag(repo_url: str) -> str:
 
 def npm_latest(pkg: str) -> str:
     name = refuse_option_like(pkg, "npm package", die)
+    # Same reasoning as latest_tag: run somewhere the repository being
+    # configured cannot supply an .npmrc that redirects the registry.
     try:
-        out = subprocess.run(
-            ["npm", "view", name, "version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=90,
-        )
+        with tempfile.TemporaryDirectory() as elsewhere:
+            out = subprocess.run(
+                ["npm", "view", name, "version"],
+                cwd=elsewhere,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+            )
     except FileNotFoundError:
         die(f"npm not found; it is needed to pin {pkg}")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -409,7 +418,7 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
 
 def plan(
     cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool
-) -> tuple[list[cfgmod.Insertion], list[str], dict]:
+) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict]:
     """Work out every insertion, without touching the file.
 
     `pre_existing` says whether the config came from the user or from our own
@@ -417,7 +426,12 @@ def plan(
     .gitignore is not covered" and a note about a line we just wrote ourselves.
     """
     insertions: list[cfgmod.Insertion] = []
-    report: list[str] = []
+    # (tag, prose). The tag is the classification; the prose is for the human.
+    # Deriving one from the other by substring-matching display text is how two
+    # real outcomes -- hooks added to an existing entry, and a hooks: list this
+    # tool cannot extend -- went missing from the facts entirely while still
+    # printing to stderr.
+    report: list[tuple[str, str]] = []
     versions: dict[str, str] = {}
 
     seq_indent = cfg.repos_seq_indent if cfg.repos_seq_indent is not None else 2
@@ -431,11 +445,14 @@ def plan(
             insertions.append(
                 cfgmod.Insertion(at=cfg.repos_key_line, block=[f"{key}: {value}"], what=key)
             )
-            report.append(f"added {key}")
+            report.append(("added", f"added {key}"))
         elif key == "exclude" and pre_existing:
             report.append(
-                "exclude: left as-is (the config already had one) -- .gitignore is NOT "
-                "excluded unless you add it yourself"
+                (
+                    "kept",
+                    "exclude: left as-is (the config already had one) -- .gitignore is NOT "
+                    "excluded unless you add it yourself",
+                )
             )
 
     # Adopt the file's own sequence-indentation convention; see config.hook_delta.
@@ -452,27 +469,31 @@ def plan(
             missing = [h.id for h in entry.hooks if h.id not in have]
             if not missing:
                 ids = ", ".join(h.id for h in entry.hooks)
-                report.append(f"local ({ids}): already present -- left as-is")
+                report.append(("kept", f"local ({ids}): already present"))
                 continue
             insertions.append(cfgmod.Insertion(at=append_at, block=block, what=f"local:{key}"))
-            report.append(f"local: added ({', '.join(missing)})")
+            report.append(("added", f"local: added ({', '.join(missing)})"))
             continue
 
         existing = cfg.repo(entry.url)
         if existing is None:
             insertions.append(cfgmod.Insertion(at=append_at, block=block, what=entry.url))
-            report.append(f"{entry.url}: added (rev {entry.rev})")
+            report.append(("added", f"{entry.url}: added (rev {entry.rev})"))
             continue
 
         have_ids = {h.id for h in existing.hooks}
         missing = [h.id for h in entry.hooks if h.id not in have_ids]
         if not missing:
-            report.append(f"{entry.url}: already present (rev {existing.rev or '?'}) -- left as-is")
+            report.append(("kept", f"{entry.url}: already present (rev {existing.rev or '?'})"))
             continue
         if not existing.hooks or existing.hook_item_indent is None:
             report.append(
-                f"{entry.url}: present (rev {existing.rev or '?'}) but its `hooks:` list is not a "
-                f"shape this tool can extend -- add {', '.join(missing)} by hand"
+                (
+                    "needs-manual",
+                    f"{entry.url}: present (rev {existing.rev or '?'}) but its `hooks:` "
+                    f"list is not a shape this tool can extend -- "
+                    f"add {', '.join(missing)} by hand",
+                )
             )
             continue
         shift = existing.hook_item_indent - (entry.hook_item_indent or 0)
@@ -483,7 +504,11 @@ def plan(
             cfgmod.Insertion(at=existing.hooks[-1].end + 1, block=merged, what=f"{entry.url}:hooks")
         )
         report.append(
-            f"{entry.url}: present (rev {existing.rev or '?'}) -- added hooks {', '.join(missing)}"
+            (
+                "added",
+                f"{entry.url}: present (rev {existing.rev or '?'}) -- added hooks "
+                f"{', '.join(missing)}",
+            )
         )
 
     return insertions, report, versions
@@ -649,7 +674,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     except cfgmod.ConfigRefused as exc:
         die(str(exc))
 
-    text = "\n".join(result) + "\n"
+    text = cfg.newline.join(result) + (cfg.newline if cfg.ends_with_newline else "")
     # Prove the result is still a config this tool can read, BEFORE it is
     # written: a merge that produced something unscannable would otherwise be
     # discovered by the next run, on the user's file.
@@ -676,15 +701,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
         {"path": rel, "sha256": sha256_of(os.path.join(directory, rel))} for rel in written
     ]
 
-    added = [line for line in report if ": added" in line or line.startswith("added ")]
-    left = [line for line in report if "left as-is" in line]
+    added = [text for tag, text in report if tag == "added"]
+    left = [text for tag, text in report if tag == "kept"]
+    needs_manual = [text for tag, text in report if tag == "needs-manual"]
     facts: Facts = {
         "scan": {
             "git_repo": git(directory, "rev-parse", "--is-inside-work-tree")[0] == 0,
             "config": "existing" if existing is not None else "fresh",
             "prev_repos": prev_repos,
         },
-        "hooks": {"added": added, "left_as_is": left, "versions": versions},
+        "hooks": {
+            "added": added,
+            "left_as_is": left,
+            "needs_manual": needs_manual,
+            "versions": versions,
+        },
         "files": {"written": written, "kept": kept},
         "net": {
             "prev_repos": prev_repos,
@@ -705,7 +736,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     print(f"Wrote {path}  ({'updated' if existing is not None else 'new'})", file=sys.stderr)
     if rewrote_empty:
         print("  normalised `repos: []` to an empty block sequence", file=sys.stderr)
-    for line in report:
+    for _tag, line in report:
         print(f"  {line}", file=sys.stderr)
     for rel in written[1:]:
         print(f"  asset {rel}: written", file=sys.stderr)
@@ -718,7 +749,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
         {
             "path": path,
             "mode": "updated" if existing is not None else "new",
-            "report": report,
+            "report": [text for _tag, text in report],
+            "needs_manual": needs_manual,
             "written": written,
             "kept": kept,
             "versions": versions,
@@ -862,10 +894,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         summary = f"failed (exit {rc})"
 
     if args.facts:
-        raw = read_bytes_or_die(args.facts, die).decode("utf-8")
+        raw = read_bytes_or_die(args.facts, die)
         try:
-            facts = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            facts = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # The decode belongs inside the try: a non-UTF-8 facts file is a
+            # bad input, not a crash. gitwork.load_facts already does this.
             die(f"cannot read facts file {args.facts}: {exc}")
         if not isinstance(facts, dict):
             die("facts file must contain a JSON object")

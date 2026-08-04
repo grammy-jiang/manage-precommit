@@ -50,26 +50,58 @@ def _require_git() -> None:
         pytest.skip("git is not installed", allow_module_level=True)
 
 
+# Per-repo tag sets, so a swapped rev_repo shows up as a wrong pinned version
+# rather than passing silently. Every set still exercises the same filtering:
+# a non-version tag to ignore and an out-of-order one to sort.
+REPO_TAGS = {
+    "pre-commit-hooks": "v1.2.0 v10.0.1 nightly v2.30.4",
+    "yamllint": "v1.9.0 v1.38.0 latest",
+    "markdownlint-cli2": "v0.9.0 v0.23.2",
+    "gitleaks": "v8.30.1 v8.9.0",
+}
+
+
 @pytest.fixture
 def stubs(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A PATH directory whose `git` answers ls-remote offline and forwards the rest."""
+    """A PATH dir whose `git` answers ls-remote offline and forwards the rest.
+
+    It answers *per URL* and logs its argv to `<dir>/calls.log`, so a test can
+    assert which repository or package was actually asked about -- a stub that
+    replies the same thing to everything cannot catch a wrong URL.
+    """
     d = tmp_path_factory.mktemp("stubs")
+    log = d / "calls.log"
+    cases = "\n".join(
+        f'    *{name}*) printf "$(tags_for "{tags}")" ;;' for name, tags in REPO_TAGS.items()
+    )
     git = d / "git"
     git.write_text(
         "#!/bin/sh\n"
+        f'echo "git $*" >> "{log}"\n'
+        "tags_for() { for t in $1; do printf '%s\\trefs/tags/%s\\n' 0000000 \"$t\"; done; }\n"
         'for a in "$@"; do\n'
         '  if [ "$a" = "ls-remote" ]; then\n'
-        f"    printf '%s' '{LS_REMOTE_TAGS}'\n"
+        '    url="$(eval echo \\${$#})"\n'
+        '    case "$url" in\n'
+        f"{cases}\n"
+        "    *) exit 0 ;;\n"
+        "    esac\n"
         "    exit 0\n"
         "  fi\n"
         "done\n"
         f'exec {REAL_GIT} "$@"\n'
     )
     npm = d / "npm"
-    npm.write_text(f"#!/bin/sh\necho {NPM_VERSION}\n")
+    npm.write_text(f'#!/bin/sh\necho "npm $*" >> "{log}"\necho {NPM_VERSION}\n')
     for f in (git, npm):
         f.chmod(0o755)
     return d
+
+
+def stub_calls(stubs: Path) -> str:
+    """Everything the stubs were asked, for tests that assert on the argument."""
+    log = stubs / "calls.log"
+    return log.read_text() if log.exists() else ""
 
 
 @pytest.fixture

@@ -275,3 +275,72 @@ def test_a_credential_prompt_is_never_waited_on(tmp_path):
     # An https remote with no credentials available: must fail, not block.
     rc, _, _ = git(str(repo), "ls-remote", "https://localhost:1/nonexistent.git")
     assert rc != 0
+
+
+def test_isolated_lookups_ignore_repository_and_global_config(tmp_path):
+    """A checked-out repo can ship a .git/config that redirects any URL via
+    url.<base>.insteadOf -- and the catalog lookup is about a hardcoded
+    upstream, so it must not run under config that repository controls.
+
+    Tested against real git, because the rewrite happens *inside* git: a stub
+    only ever sees the argv it was handed, which is the URL before rewriting,
+    so a stub-based version of this test could not fail.
+    """
+    import subprocess as sp
+
+    upstream = tmp_path / "upstream.git"
+    sp.run(["git", "init", "-q", "--bare", str(upstream)], check=True)
+
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    sp.run(["git", "init", "-q", str(hostile)], check=True)
+    sp.run(
+        ["git", "-C", str(hostile), "config", f"url.{tmp_path}/nowhere-.insteadOf", f"{tmp_path}/"],
+        check=True,
+    )
+
+    git = _git_for_test(tmp_path)
+
+    # Control: run under the hostile repo's config and the URL is rewritten to
+    # somewhere that does not exist, so the lookup fails.
+    rc_plain, _, _ = git(str(hostile), "ls-remote", "--tags", str(upstream))
+    assert rc_plain != 0, (
+        "the control did not fire -- this git ignored url.insteadOf, so the "
+        "assertion below would prove nothing"
+    )
+
+    # Isolated: no system config, no global config, cwd outside any repository.
+    rc_iso, _, _ = git(str(tmp_path), "ls-remote", "--tags", str(upstream), isolated=True)
+    assert rc_iso == 0, "the isolated lookup was still redirected"
+
+
+def test_isolated_lookups_ignore_a_hostile_global_config(tmp_path, monkeypatch):
+    """Running outside the repository defeats a redirect in *its* config; it
+    does nothing about one in the user's global config, which a compromised
+    dotfile or a shared machine can supply. That is what GIT_CONFIG_NOSYSTEM
+    and GIT_CONFIG_GLOBAL are for, and this is the half that exercises them.
+    """
+    import subprocess as sp
+
+    upstream = tmp_path / "upstream2.git"
+    sp.run(["git", "init", "-q", "--bare", str(upstream)], check=True)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text(f'[url "{tmp_path}/nowhere-"]\n\tinsteadOf = {tmp_path}/\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+
+    git = _git_for_test(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    # Control: outside any repo, but the global config still redirects.
+    rc_plain, _, _ = git(str(outside), "ls-remote", "--tags", str(upstream))
+    assert rc_plain != 0, (
+        "the control did not fire -- this git ignored the global insteadOf, so "
+        "the assertion below would prove nothing"
+    )
+
+    rc_iso, _, _ = git(str(outside), "ls-remote", "--tags", str(upstream), isolated=True)
+    assert rc_iso == 0, "the isolated lookup still read the global config"
