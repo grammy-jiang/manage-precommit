@@ -1,1 +1,1 @@
-../assets/lint-mermaid.mjs
+../src/manage_precommit/skill/assets/lint-mermaid.mjs

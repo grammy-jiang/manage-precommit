@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "manage-precommit"
+version = "0.1.0"
+description = "Build a repository's .pre-commit-config.yaml from a curated catalog, keeping the repo's own hooks — with a Claude Code skill that drives it"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Grammy Jiang", email = "grammy.jiang@gmail.com" }]
+# No third-party runtime dependencies on purpose. The skill is installed by
+# symlink and its scripts run under the *system* python3, so nothing would ever
+# install a dependency on their behalf -- an import outside the standard library
+# is a runtime failure on someone else's machine, not a packaging inconvenience.
+# This is why the ruamel.yaml round-trip was replaced by a scanner and an
+# additive text writer; see skill/scripts/config.py.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=5.0", "pytest-xdist>=3.5", "ruff>=0.5", "mypy>=1.8"]
+
+[tool.hatch.build.targets.wheel]
+# The skill lives at src/manage_precommit/skill/ and ships as ordinary package
+# data. Deliberately no force-include: a build-time path remap would make an
+# installed file's path unresolvable against the checkout. Repository layout and
+# installed layout are the same tree.
+packages = ["src/manage_precommit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Two roots because there are two things under test: the package, imported as a
+# package, and the skill's scripts, which are run by path and so import each
+# other as top-level modules. Putting the scripts directory on the path is what
+# a plain `python3 <skill-dir>/scripts/foo.py` does for free.
+pythonpath = ["src", "src/manage_precommit/skill/scripts"]
+# The suite spends most of its time in subprocesses and throwaway git repos, so
+# it parallelises well. --dist loadfile keeps a module's tests on one worker,
+# which keeps a failure's output contiguous.
+addopts = "-q --strict-markers --strict-config -n auto --dist loadfile"
+markers = ["slow: takes more than a second"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+parallel = true          # subprocess runs each write their own data file
+source = ["src/manage_precommit"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+# The skill's scripts import each other as top-level modules, so name them here
+# or isort files them with the standard library.
+known-first-party = ["manage_precommit", "conftest", "shared", "config", "precommit", "gitwork", "summary"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests build long literal fixtures and reach into module internals on purpose.
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+# Two roots, because there are two programs here: the package, and the skill's
+# scripts, which resolve each other from their own directory the way any script
+# run by path does. Both must be declared as package bases -- given only one,
+# mypy reaches a script under two module names at once
+# ("manage_precommit.skill.scripts.shared" and "shared") and refuses to check
+# anything at all.
+mypy_path = ["src", "src/manage_precommit/skill/scripts"]
+explicit_package_bases = true
+namespace_packages = true
+files = [
+    "src/manage_precommit/__init__.py",
+    "src/manage_precommit/skill/scripts",
+]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
