@@ -251,3 +251,28 @@ def test_render_entry_adopts_the_targets_convention():
 
 def test_reindent_leaves_blank_lines_empty():
     assert C.reindent("a\n\nb", 2) == "  a\n\n  b"
+
+
+def test_an_inline_comment_with_emphasis_is_not_an_anchor():
+    """`# skip *generated* files` is prose, not a YAML alias.
+
+    The anchor guard runs over the whole file before any structural parsing, so
+    a false positive here refuses an ordinary config the tool exists to extend.
+    """
+    cfg = C.scan(
+        "exclude: 'vendor/'  # skip *generated* files\n"
+        "repos:\n  - repo: https://x/y\n    rev: v1\n    hooks:\n      - id: a\n"
+    )
+    assert [e.url for e in cfg.repos] == ["https://x/y"]
+
+
+def test_a_real_alias_after_a_comment_is_still_refused():
+    """Stripping comments must not also blind the guard to real aliases."""
+    with pytest.raises(C.ConfigRefused, match="anchor or alias"):
+        C.scan("repos:\n  - repo: https://x/y  # note\n    hooks: *common\n")
+
+
+def test_scan_reports_an_empty_flow_list():
+    cfg = C.scan('minimum_pre_commit_version: "4.0.0"\nrepos: []\n')
+    assert cfg.empty_repos is True
+    assert cfg.repos == []

@@ -148,3 +148,25 @@ def test_cli_rejects_a_json_scalar(tmp_path):
 def test_no_color_env_disables_colour(monkeypatch, value):
     monkeypatch.setenv("NO_COLOR", value)
     assert summary.use_color("auto") is False
+
+
+def test_cli_refuses_a_symlinked_facts_path(tmp_path):
+    """The facts path is agent-chosen, so it sits inside the same trust
+    boundary every other read in the skill defends. summary.py used a plain
+    open(), which follows the link and has no size bound."""
+    secret = tmp_path / "secret"
+    secret.write_text(json.dumps(FULL))
+    link = tmp_path / "facts.json"
+    link.symlink_to(secret)
+    proc = run_script("summary.py", str(link))
+    assert proc.returncode == 1
+    assert "symlink" in proc.stderr
+    assert "manage-precommit - run summary" not in proc.stdout
+
+
+def test_cli_refuses_an_oversized_facts_file(tmp_path):
+    big = tmp_path / "big.json"
+    big.write_text('{"notes": ["' + "x" * 5_000_000 + '"]}')
+    proc = run_script("summary.py", str(big))
+    assert proc.returncode == 1
+    assert "larger than" in proc.stderr

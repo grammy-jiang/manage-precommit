@@ -166,6 +166,26 @@ def _scalar(raw: str) -> str:
     return raw.strip()
 
 
+def _code_only(line: str) -> str:
+    """The line with any trailing unquoted #-comment removed.
+
+    The anchor and merge-key guards run over the whole file before any
+    structural parsing, so they must not fire on prose. English comment style
+    puts `*emphasis*` in comments, and `# skip *generated* files` matched the
+    anchor pattern -- refusing an ordinary config the tool exists to extend.
+    """
+    quote: str | None = None
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
 def scan(text: str) -> Config:
     """Read a config's structure, or raise ConfigRefused.
 
@@ -192,11 +212,12 @@ def scan(text: str) -> Config:
             continue
         if stripped == "..." or stripped.startswith("... "):
             raise ConfigRefused("config holds more than one YAML document", i)
-        if _MERGE_KEY.match(line):
+        code = _code_only(line)
+        if _MERGE_KEY.match(code):
             raise ConfigRefused(
                 "config uses a merge key (<<:), which this tool will not guess at", i
             )
-        if _ANCHOR.search(line) and not _is_blank_or_comment(line):
+        if _ANCHOR.search(code) and not _is_blank_or_comment(line):
             raise ConfigRefused(
                 "config uses a YAML anchor or alias, which this tool will not guess at", i
             )

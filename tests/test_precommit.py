@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import stat
 import subprocess
 
@@ -438,3 +440,99 @@ def test_generate_merges_into_the_facts_recommend_seeded(repo, keys_file, facts_
     assert facts["hooks"]["recommended"], "the recommendation rows were clobbered"
     assert facts["hooks"]["added"], "the write step's own rows are missing"
     assert facts["internal"]["managed_files"]
+
+
+# -- guards added after round 2 of the reviewer panel -------------------------
+
+
+def test_a_symlinked_markdown_file_is_never_read(repo, stubs, tmp_path):
+    """Pins the read-side twin of the round-1 write hole.
+
+    walk_repo lists symlinks -- git tracks them as ordinary blobs -- and
+    detect_markers opened each candidate with builtin open(), which follows the
+    link. A tracked `notes.md -> ~/.ssh/id_rsa` was read and scanned during
+    --recommend, the first and entirely unconfirmed step of a run.
+    """
+    secret = tmp_path / "id_rsa"
+    secret.write_text("-----BEGIN PRIVATE KEY-----\n```mermaid\ngraph TD;\n```\n")
+    (repo / "notes.md").symlink_to(secret)
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    # The fence exists only inside the symlink's target, so recommending
+    # mermaid would prove the target had been read.
+    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
+def test_a_named_pipe_markdown_file_does_not_hang_the_scan(repo, stubs):
+    """Reading a FIFO with no writer blocks forever -- a one-file denial of
+    service on the first step of a run."""
+    os.mkfifo(repo / "pipe.md")
+    proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+    assert proc.returncode == 0
+    assert out_json(proc)["always_on"]
+
+
+def test_verify_rehashes_files_its_own_hooks_rewrote(repo, keys_file, facts_path, stubs, tmp_path):
+    """Step 4's autofixers act on whole-file content, so this run's own files
+    can be among what they rewrite -- and the commit gate would then refuse a
+    change this run itself caused, indistinguishably from tampering."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    before = json.loads(facts_path.read_text())["internal"]["managed_files"][0]["sha256"]
+
+    fake = tmp_path / "fixer"
+    fake.mkdir()
+    pc = fake / "pre-commit"
+    pc.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        'echo "# autofixed" >> .pre-commit-config.yaml\n'
+        'echo "end-of-file-fixer.....Passed"\n'
+        "exit 0\n"
+    )
+    pc.chmod(pc.stat().st_mode | stat.S_IEXEC)
+    run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+
+    after = json.loads(facts_path.read_text())["internal"]["managed_files"][0]["sha256"]
+    assert after != before, "the recorded hash still describes the pre-autofix file"
+    assert after == hashlib.sha256((repo / ".pre-commit-config.yaml").read_bytes()).hexdigest()
+
+
+def test_verify_is_not_vacuous_when_only_some_hooks_had_no_files(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """A mutant turning all() into any() would otherwise stay green."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = tmp_path / "mixed"
+    fake.mkdir()
+    pc = fake / "pre-commit"
+    pc.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        'echo "trailing-whitespace..........................Passed"\n'
+        'echo "check-json...........(no files to check) Skipped"\n'
+        "exit 0\n"
+    )
+    pc.chmod(pc.stat().st_mode | stat.S_IEXEC)
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert got["vacuous"] is False
+    assert got["run_ok"] is True
+
+
+def test_generate_extends_a_user_authored_empty_repos_list(repo, keys_file, facts_path, stubs):
+    """The one documented exception to never touching a byte outside an
+    inserted block: a flow-style empty list cannot be appended to."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        'minimum_pre_commit_version: "4.0.0"\nrepos: []\n'
+    )
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "cfg"], check=True)
+
+    proc = generate(repo, keys_file, facts_path, stubs, "hygiene", force=True)
+    assert proc.returncode == 0, proc.stderr
+    after = (repo / ".pre-commit-config.yaml").read_text()
+    assert "repos: []" not in after
+    assert "- id: trailing-whitespace" in after
+    assert "normalised" in proc.stderr

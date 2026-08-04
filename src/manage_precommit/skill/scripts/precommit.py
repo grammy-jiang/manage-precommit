@@ -46,6 +46,7 @@ from shared import (
     has_suspicious_chars,
     make_git,
     preserved_mode,
+    read_bytes_nofollow,
     read_bytes_or_die,
     refuse_facts_inside_repo,
     refuse_option_like,
@@ -194,7 +195,7 @@ SKIP_DIRS = frozenset(
 MAX_SCAN_DEPTH = 3
 MAX_SCAN_FILES = 4000
 MAX_MERMAID_PROBES = 200
-MAX_PROBE_BYTES = 200_000
+MAX_PROBE_BYTES = 200_000  # a probe is a look for one fence, not a file read
 MERMAID_FENCE = re.compile(r"^\s*(?:```+|~~~+)\s*mermaid\b", re.MULTILINE)
 
 
@@ -228,11 +229,18 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str]]:
         recs.append({"name": "markdownlint", "reason": markdown[0]})
         markers.append(f"markdown ({markdown[0]})")
         for rel in markdown[:MAX_MERMAID_PROBES]:
+            # Through the same guarded reader as everything else. walk_repo
+            # lists symlinks (git tracks them as ordinary blobs), so a tracked
+            # `notes.md -> ~/.ssh/id_rsa` would otherwise be opened and scanned
+            # during --recommend -- the first, unconfirmed step -- and a named
+            # pipe at a .md path would block forever. SymlinkRefused,
+            # NotARegularFile and TooLarge all subclass OSError, so an
+            # unreadable candidate is skipped exactly as before.
             try:
-                with open(os.path.join(directory, rel), encoding="utf-8", errors="replace") as fh:
-                    text = fh.read(MAX_PROBE_BYTES)
+                raw = read_bytes_nofollow(os.path.join(directory, rel), MAX_PROBE_BYTES)
             except OSError:
                 continue
+            text = raw.decode("utf-8", "replace")
             if MERMAID_FENCE.search(text):
                 recs.append({"name": "mermaid", "reason": rel})
                 markers.append(f"mermaid fence ({rel})")
@@ -861,6 +869,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
             die(f"cannot read facts file {args.facts}: {exc}")
         if not isinstance(facts, dict):
             die("facts file must contain a JSON object")
+        # The autofixing hooks act on whole-file content, so this run's OWN
+        # files can be among what they just rewrote -- and then the commit
+        # gate, which compares against the sha256 Step 3 recorded, refuses a
+        # change this run itself caused, with no way for the caller to tell
+        # that apart from tampering. Re-hash from the settled tree instead.
+        managed = (facts.get("internal") or {}).get("managed_files") or []
+        for entry in managed:
+            full = os.path.join(directory, str(entry.get("path", "")))
+            if os.path.isfile(full) and not os.path.islink(full):
+                entry["sha256"] = sha256_of(full)
         facts["verify"] = {
             "install": "git hook installed",
             "run": summary,

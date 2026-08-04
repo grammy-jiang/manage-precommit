@@ -659,8 +659,12 @@ def push_plan(repo: str) -> PushPlan:
         # contribute none. Never offered.
         base["action"] = "stop-behind-only"
         return base
-    _, drop, _ = git(repo, "log", "--oneline", "HEAD..@{u}")
-    _, add, _ = git(repo, "log", "--oneline", "@{u}..HEAD")
+    # Author included: push-safety.md treats showing these lines as consent,
+    # but on a shared branch with subjects like "wip" a subject alone cannot
+    # tell the operator whose work a force would permanently delete.
+    fmt = "--format=%h %an: %s"
+    _, drop, _ = git(repo, "log", fmt, "HEAD..@{u}")
+    _, add, _ = git(repo, "log", fmt, "@{u}..HEAD")
     base["action"] = "diverged"
     base["would_drop"] = drop.splitlines()
     base["would_add"] = add.splitlines()

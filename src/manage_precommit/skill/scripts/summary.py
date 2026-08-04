@@ -28,7 +28,13 @@ import os
 import re
 import sys
 
-from shared import clean
+from shared import (
+    NotARegularFile,
+    SymlinkRefused,
+    TooLarge,
+    clean,
+    read_bytes_nofollow,
+)
 
 
 def use_color(mode: str) -> bool:
@@ -278,8 +284,16 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.facts:
-        with open(args.facts, encoding="utf-8") as handle:
-            raw = handle.read()
+        # Same guarded reader as the rest of the skill: this path is chosen by
+        # the agent, so it is inside the trust boundary everything else is.
+        try:
+            raw = read_bytes_nofollow(args.facts).decode("utf-8", "replace")
+        except (SymlinkRefused, NotARegularFile, TooLarge) as exc:
+            print(f"summary: {exc}", file=sys.stderr)
+            return 1
+        except OSError as exc:
+            print(f"summary: cannot read {args.facts}: {exc}", file=sys.stderr)
+            return 1
     else:
         raw = sys.stdin.read()
     try:
