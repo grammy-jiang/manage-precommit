@@ -524,3 +524,159 @@ def test_a_detached_head_is_classified_not_crashed_on(repo, remote, written, tmp
     proc = run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written))
     assert proc.returncode == 3
     assert out_json(proc)["pushed"] is False
+
+
+# -- classifier partitions and gates the round-2 panel found untested ---------
+
+
+def stub_git(tmp_path, name: str, intercept: str):
+    """A PATH dir whose `git` fails one subcommand and forwards the rest."""
+    d = tmp_path / name
+    d.mkdir()
+    g = d / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        f"  {intercept}\n"
+        '  prev="$a"\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    return d
+
+
+def test_a_failed_fetch_stops_rather_than_comparing_against_stale_data(
+    repo, remote, written, tmp_path
+):
+    """Classifying ahead/behind against a stale remote-tracking ref would make
+    every push decision after it unsound, so it is a hard stop."""
+    commit(repo, written, tmp_path)
+    fake = stub_git(
+        tmp_path,
+        "nofetch",
+        'if [ "$a" = "fetch" ]; then echo "fatal: unreachable" >&2; exit 128; fi',
+    )
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan", stubs=fake))
+    assert got["action"] == "stop-fetch-failed"
+    assert got["permits_push"] is False
+    assert "could not reach the remote" in got["guidance"]
+
+    proc = run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written), stubs=fake)
+    assert proc.returncode == 3
+    assert out_json(proc)["pushed"] is False
+
+
+def test_an_unreadable_ahead_behind_count_stops_the_decision(repo, remote, written, tmp_path):
+    commit(repo, written, tmp_path)
+    fake = stub_git(
+        tmp_path,
+        "nocount",
+        'if [ "$prev" = "rev-list" ] && [ "$a" = "--left-right" ]; then exit 1; fi',
+    )
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan", stubs=fake))
+    assert got["action"] == "stop-compare-failed"
+    assert got["permits_push"] is False
+
+
+def test_push_plan_and_push_on_a_non_repo(tmp_path, written):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    got = out_json(run("gitwork.py", "--dir", str(plain), "push-plan"))
+    assert got["action"] == "stop-not-a-repo"
+    assert got["permits_push"] is False
+
+    proc = run("gitwork.py", "--dir", str(plain), "push", "--facts", str(written))
+    assert proc.returncode == 3
+    assert out_json(proc)["pushed"] is False
+
+
+@pytest.fixture
+def written_config_only(repo, keys_file, facts_path, stubs):
+    """A run whose only managed file is the config -- hygiene ships no asset."""
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("hygiene")),
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return facts_path
+
+
+def test_a_single_file_run_says_so_in_the_scope(repo, written_config_only, tmp_path):
+    """The plural branch was the only one ever reached."""
+    commit(repo, written_config_only, tmp_path)
+    scope = json.loads(written_config_only.read_text())["commit"]["scope"]
+    assert scope == ".pre-commit-config.yaml only"
+
+
+def test_facts_hash_refuses_content_that_is_not_what_was_verified(
+    repo, written_config_only, tmp_path
+):
+    """cmd_facts has its own blob gate, distinct from the one in cmd_commit:
+    the paths can match exactly while the bytes do not."""
+    commit(repo, written_config_only, tmp_path)
+    # A second commit touching the same single path, with different content.
+    (repo / ".pre-commit-config.yaml").write_text("# replaced wholesale\nrepos: []\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "rewrite"], check=True)
+    bad = git_out(repo, "rev-parse", "--short", "HEAD")
+
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "facts",
+        "--facts",
+        str(written_config_only),
+        "--hash",
+        bad,
+    )
+    assert proc.returncode != 0
+    assert "not what this run wrote and verified" in proc.stderr
+
+
+# -- the recorded outcome is derived, not typed -------------------------------
+
+
+def test_the_choice_is_derived_from_what_was_recorded(repo, remote, written, tmp_path):
+    """Pushed, so the outcome is 'commit + push' without anyone saying so."""
+    got = out_json(commit(repo, written, tmp_path))
+    run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written))
+    run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written), "--hash", got["hash"])
+    assert json.loads(written.read_text())["commit"]["choice"] == "commit + push"
+
+
+def test_a_commit_without_a_push_derives_commit_only(repo, written, tmp_path):
+    got = out_json(commit(repo, written, tmp_path))
+    run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written), "--hash", got["hash"])
+    assert json.loads(written.read_text())["commit"]["choice"] == "commit only"
+
+
+def test_nothing_committed_derives_not_committed(repo, written):
+    run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written))
+    assert json.loads(written.read_text())["commit"]["choice"] == "not committed"
+
+
+def test_an_explicit_choice_still_wins(repo, written, tmp_path):
+    """The user declining is not a repository fact, so it must be passable."""
+    commit(repo, written, tmp_path)
+    run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "facts",
+        "--facts",
+        str(written),
+        "--choice",
+        "not committed",
+        "--note",
+        "user declined",
+    )
+    assert json.loads(written.read_text())["commit"]["choice"] == "not committed"

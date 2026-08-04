@@ -17,7 +17,7 @@ SCAN
 
 HOOKS
   added        https://github.com/gitleaks/gitleaks: added (rev v8.30.1), local: added (mermaid-lint)
-  left as-is   https://github.com/psf/black: already present (rev 24.1.0) -- left as-is
+  left as-is   https://github.com/adrienverge/yamllint: already present (rev v1.38.0)
   recommended  markdownlint  <- README.md
                gitleaks  <- any repo -- secret scan
   versions     gitleaks=v8.30.1, mermaid=11.16.0
@@ -48,17 +48,23 @@ NET
 | --- | --- |
 | `NOTES` | `gitwork.py facts --note` — the only prose field in the file |
 | `SCAN detected` | `precommit.py --recommend`, from markers it actually saw |
-| `HOOKS added` / `left as-is` | the merge report, per catalog entry |
+| `HOOKS added` / `left as-is` | the merge report, per **catalog** entry |
 | `HOOKS recommended` | `--recommend`; the `<-` names the file that triggered it |
 | `HOOKS versions` | fetched live at merge time (`git ls-remote`, `npm view`) |
 | `FILES` | what the write step created versus what it found already there |
 | `VERIFY` | `precommit.py --verify` — `run_ok`, `vacuous` and `autofixed` are its verdict |
-| `COMMIT choice` | `gitwork.py facts --choice`; the one value no repo state supplies |
+| `COMMIT choice` | derived by `gitwork.py facts` from the recorded hash and push |
 | `COMMIT commit` / `scope` / `push` | `gitwork.py commit` and `push`, from verified state |
 | `NET diff` | the diffstat of the commit that exists |
 
 Nothing in that table is assembled by the agent. If a number is wrong, the fix
 is in the script that computed it, not in the wording here.
+
+**`HOOKS` reports on the catalog only.** Both rows iterate the five catalog
+entries, so a hook the user already had that this skill does not manage never
+appears in either. That is not an omission -- it is preserved untouched, and
+saying nothing about it is the honest report. The place to see it is the diff
+in Step 5.
 
 ## The two rows worth reading twice
 

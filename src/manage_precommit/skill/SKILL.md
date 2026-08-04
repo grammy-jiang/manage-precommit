@@ -139,6 +139,22 @@ they add it themselves.
 
 ## Step 4 — Verify
 
+**Ask before running it.** This is the step that changes files, and it is not
+scoped to this run's work: `--all-files` runs *every* hook — including ones the
+user already had — over *every tracked file*, and the autofixing ones rewrite
+what they touch. Step 3's guard covers only the files this run writes, so an
+unrelated file holding uncommitted work can be rewritten here. Say that, then
+AskUserQuestion: **Run the hooks over all files** / **Only this run's files** /
+**Skip verification**.
+
+- *All files* — the full check, and the honest one; autofixes elsewhere are
+  reported in Step 5 and never committed by this skill.
+- *Only this run's files* — pass `--files` with `files.written` from the facts.
+  Narrower, and it will not tell you whether the hooks pass on the rest of the
+  repo.
+- *Skip* — go to Step 5 and record `--note "verification skipped at user request"`.
+  Say plainly that the hooks are installed but unproven.
+
 ```bash
 python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify --facts "<facts.json>"
 ```
@@ -300,21 +316,22 @@ python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.js
   --choice "commit + push" --hash "<hash>" --note "<why, when needed>"
 ```
 
-`--choice` is the one value no repository state can supply. Record what
-*happened*, not what was asked for:
+**Do not pass `--choice` for the ordinary path.** The outcome is already
+recorded — `commit` wrote the hash, `push` wrote where it landed — so the tool
+derives it. Passing a hand-typed value would be re-deriving recorded state from
+a prose table, which is exactly what this design exists to avoid.
 
-| what happened | `--choice` | `--note` |
-| --- | --- | --- |
-| committed and pushed | `commit + push` | — |
-| committed, no push (`permits_push: false`, `pushed: false`, skipped, or a failed push) | `commit only` | the plan's `guidance`, or the reported error |
-| commit refused, or the user said *Don't commit* | `not committed` | the error, when there was one |
-| bad commit (`verdict` ≠ `ok`) | the JSON's `record_choice` | its `record_note` |
-| Step 5 item 1 shortcut | `not committed` | the note given there |
+Pass it only when nothing was attempted and there is therefore nothing to
+derive:
+
+| situation | pass |
+| --- | --- |
+| the user said *Don't commit* | `--choice "not committed"` |
+| a Step 5 item 1 shortcut (not a repo / no change) | `--choice "not committed" --note "<which>"` |
+| a bad commit (`verdict` ≠ `ok`) | the JSON's own `record_choice` and `record_note` |
 
 Omit `--hash` unless `verdict` was `ok`; it is verified, not believed. `--note`
 repeats, and appends without touching computed fields — never hand-edit the file.
-The commit and push lines are already in it: `commit --facts` and `push --facts`
-wrote them.
 
 ```bash
 python3 "<skill-dir>/scripts/summary.py" "<facts.json>"

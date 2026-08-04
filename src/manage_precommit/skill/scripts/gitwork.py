@@ -848,6 +848,15 @@ def diffstat(repo: str, commit_hash: str | None, paths: list[str]) -> str:
     return "; ".join(parts)
 
 
+def derive_choice(commit: Mapping[str, object]) -> str:
+    """What actually happened, from what the tools recorded."""
+    if commit.get("push"):
+        return "commit + push"
+    if commit.get("hash"):
+        return "commit only"
+    return "not committed"
+
+
 def cmd_facts(args: argparse.Namespace) -> int:
     """Merge git-side facts into the JSON precommit.py produced.
 
@@ -869,8 +878,17 @@ def cmd_facts(args: argparse.Namespace) -> int:
     # The choice is the user's answer, not a repository fact: record it even
     # when there is no repo, which is exactly when it says "not committed".
     commit = facts.setdefault("commit", {})
+    # Derived, not looked up. By the time this runs, `commit` already carries
+    # `hash` (written by cmd_commit) and `push` (written by cmd_push) whenever
+    # those happened -- so what happened is a pure function of two recorded
+    # facts. Asking the caller to read a prose table and hand-type the answer
+    # would be re-deriving recorded state from prose, which is the failure this
+    # whole design exists to avoid. --choice stays for the cases no repository
+    # state can supply: the user declining, and the Step 5 shortcuts.
     if args.choice:
         commit["choice"] = args.choice
+    else:
+        commit["choice"] = derive_choice(commit)
     if is_repo(repo):
         if args.hash:
             committed = commit_files(repo, args.hash)  # dies if the hash does not resolve
@@ -956,7 +974,10 @@ def main() -> int:
     p.add_argument(
         "--choice",
         choices=("commit + push", "commit only", "not committed"),
-        help="the user's answer -- the one fact no repo state can supply",
+        help=(
+            "override the derived outcome. Only needed when nothing was attempted "
+            "-- the user declined, or a Step 5 shortcut ended the run early"
+        ),
     )
 
     args = parser.parse_args()

@@ -199,3 +199,79 @@ def test_refuse_facts_inside_repo(tmp_path):
         shared.refuse_facts_inside_repo(str(repo), str(repo / "facts.json"), die)
     with pytest.raises(SystemExit):
         shared.refuse_facts_inside_repo(str(repo), str(repo / "a" / "b" / "facts.json"), die)
+
+
+# -- the git hardening is the security boundary, so it is tested as one -------
+
+
+def _git_for_test(tmp_path):
+    """A make_git bound to a die() that raises instead of exiting."""
+
+    def die(msg):
+        raise AssertionError(f"die: {msg}")
+
+    return shared.make_git(die)
+
+
+def test_ext_remotes_cannot_execute_a_command(tmp_path):
+    """`ext::` remotes run a command named in repository config -- code
+    execution from a checked-out repo.
+
+    Current git refuses ext:: by default, which makes the obvious version of
+    this test unfalsifiable: it passes whether or not our flag is present. So
+    the repo here does what a hostile checkout would do and re-enables the
+    transport in its OWN config. The control below proves that is a live
+    attack; this proves our command-line override beats it, which is the only
+    thing worth asserting.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "hostile"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    sp.run(["git", "-C", str(repo), "config", "protocol.ext.allow", "always"], check=True)
+
+    marker = tmp_path / "pwned"
+    control = tmp_path / "pwned-control"
+
+    # Control: without the hardening the command really does run.
+    sp.run(
+        ["git", "-C", str(repo), "fetch", f"ext::sh -c touch% {control}"],
+        capture_output=True,
+    )
+    assert control.exists(), (
+        "the control did not fire -- this git refuses ext:: even with repo config "
+        "enabling it, so the assertion below would prove nothing"
+    )
+
+    rc, _, _ = _git_for_test(tmp_path)(str(repo), "fetch", f"ext::sh -c touch% {marker}")
+    assert rc != 0, "the ext:: remote was accepted"
+    assert not marker.exists(), "an ext:: remote executed a command"
+
+
+def test_remote_stderr_is_truncated_before_it_is_stored(tmp_path, monkeypatch):
+    """git's stderr can carry arbitrary text straight from a remote server."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text("#!/bin/sh\npython3 -c \"import sys; sys.stderr.write('x'*900)\"\nexit 1\n")
+    g.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+
+    git = _git_for_test(tmp_path)
+    _, _, err = git(str(tmp_path), "status")
+    assert err.endswith("...(truncated)")
+    assert len(err) <= shared.MAX_ERR_LEN + len(" ...(truncated)")
+
+
+def test_a_credential_prompt_is_never_waited_on(tmp_path):
+    """GIT_TERMINAL_PROMPT=0: a prompt would hang a headless run forever."""
+    import subprocess as sp
+
+    repo = tmp_path / "r2"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    git = _git_for_test(tmp_path)
+    # An https remote with no credentials available: must fail, not block.
+    rc, _, _ = git(str(repo), "ls-remote", "https://localhost:1/nonexistent.git")
+    assert rc != 0
