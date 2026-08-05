@@ -42,6 +42,7 @@ from typing import NoReturn, cast
 
 from shared import (
     Facts,
+    PushFacts,
     PushPlan,
     clean,
     has_suspicious_chars,
@@ -701,7 +702,9 @@ def cmd_push_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def record_push(args: argparse.Namespace, plan: PushPlan, sha: str) -> None:
+def record_push(
+    args: argparse.Namespace, plan: PushPlan, sha: str, *, forced: bool = False
+) -> None:
     """Store where the push landed, from verified state -- never from free text.
 
     Kept as its three pieces rather than a sentence: summary.py owns every
@@ -713,12 +716,20 @@ def record_push(args: argparse.Namespace, plan: PushPlan, sha: str) -> None:
     ref = plan.get("merge_ref") or plan.get("branch") or ""
     # removeprefix, not rsplit: "refs/heads/feature/foo" is the branch
     # "feature/foo", and splitting on the last slash would call it "foo".
-    facts.setdefault("commit", {})["push"] = {
+    push: PushFacts = {
         "sha": sha,
         # A push only happens once a remote is settled, so this is never null here.
-        "remote": str(plan["remote"]),
-        "branch": ref.removeprefix("refs/heads/"),
+        "remote": clean(plan["remote"]),
+        "branch": clean(ref.removeprefix("refs/heads/")),
     }
+    if forced:
+        # The durable record of the run's one irreversible act. Consent was
+        # given in the moment; the closing summary is what a teammate -- or the
+        # user next week -- reads, and it could not tell a clean fast-forward
+        # from a history rewrite.
+        push["forced"] = True
+        push["dropped"] = len(plan.get("would_drop") or [])
+    facts.setdefault("commit", {})["push"] = push
     save_facts(args.facts, facts)
 
 
@@ -730,6 +741,15 @@ def cmd_push(args: argparse.Namespace) -> int:
     """
     repo = args.dir
     refuse_facts_inside_repo(repo, args.facts, die)
+    if args.remote_file:
+        if args.remote:
+            die("pass --remote or --remote-file, not both")
+        chosen = read_bytes_or_die(args.remote_file, die).decode("utf-8", "replace").strip()
+        if not chosen:
+            die(f"remote file is empty: {args.remote_file}")
+        if "\n" in chosen:
+            die("remote file must hold exactly one name")
+        args.remote = chosen
     plan = describe(push_plan(repo))
     action = plan["action"]
 
@@ -830,7 +850,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             check=True,
         )
         sha = current_short_sha(repo)
-        record_push(args, plan, sha)
+        record_push(args, plan, sha, forced=True)
         emit({**plan, "pushed": True, "forced": True})
         return 0
 
@@ -930,7 +950,11 @@ def cmd_facts(args: argparse.Namespace) -> int:
             commit.setdefault("hash", args.hash)
             commit.setdefault("subject", clean(raw_subject))
             commit.setdefault("scope", commit_scope(paths))
-        stat = diffstat(repo, args.hash, paths)
+        # The recorded hash, not just an explicitly passed one: the documented
+        # path passes no --hash at all, and diffstat's no-commit branch then
+        # reads a working tree that the commit has already made clean -- so the
+        # NET diff row silently vanished from every ordinary run.
+        stat = diffstat(repo, args.hash or commit.get("hash"), paths)
         if stat:
             facts.setdefault("net", {})["diffstat"] = stat
 
@@ -980,6 +1004,15 @@ def main() -> int:
         help="the approved plan's upstream_sha; the force is leased against it",
     )
     p.add_argument("--remote", help="which remote, when the branch has no upstream")
+    p.add_argument(
+        "--remote-file",
+        help=(
+            "read the remote name from this file instead of the command line. Remote "
+            "names come from repository config and git permits quotes, ; and $ in them, "
+            "so the name must never be interpolated into a shell command -- the same "
+            "reason commit messages and catalog selections go through files"
+        ),
+    )
     p.add_argument("--facts", help="also record the push line into this facts JSON")
 
     p = subcommand("facts", help="merge git facts into the run's facts JSON")

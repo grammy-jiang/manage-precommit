@@ -141,7 +141,13 @@ def push_line(push: object, pal: Pal) -> str | None:
     remote = clean(push.get("remote", ""))
     branch = clean(push.get("branch", ""))
     dest = f"{remote}/{branch}".strip("/")
-    return f"{sha} -> {dest}" if dest else sha
+    line = f"{sha} -> {dest}" if dest else sha
+    if push.get("forced"):
+        dropped = push.get("dropped") or 0
+        line += f"  {pal.rem('FORCED')}"
+        if dropped:
+            line += pal.rem(f" -- dropped {dropped} remote commit(s)")
+    return line
 
 
 def render(facts: dict, pal: Pal) -> str:

@@ -236,17 +236,23 @@ Two outcomes skip the rest of Step 5 — go to Step 6 with
 - `changed: false` → `--note "no change: the config already matched"`
 
 Read the diff for what *the user* should weigh — a hook that will reformat their
-whole tree, a secret scanner about to run over history, an `exclude` that is not
-what they expected.
+whole tree, an `exclude` that is not what they expected. If `gitleaks` is being
+added, say what it actually does: it scans each future **staged commit**, not
+existing history. This catalog installs the staged-diff hook, not
+`gitleaks-full`, so anything already committed is not covered.
 
 ### 2. Ask
 
 Assemble everything the answer depends on first, so the user approves the actual
 change and not an intention:
 
-- **Draft the commit message now, on one line**, and show it. The summary records
-  only the subject, so a body would be approved and never shown back. If the user
-  supplies several lines, say only the first is recorded and confirm it.
+- **Draft the commit message now, on one line**, and show it. The summary
+  records only the subject, so a body would be approved and never shown back —
+  and `commit` **refuses outright** if the message file holds more than one
+  non-blank line. It does not truncate. If the user supplies several lines,
+  take the first, show it back, and write only that line to the file. If a
+  commit does fail citing the line count, rewrite the file with one line and
+  re-run the same command.
 - **Say what else this run touched.** If Step 4 reported a non-empty
   `autofixed`, say so plainly *before* asking: "verifying the hooks also
   modified `<those files>` elsewhere in your tree. This run will not stage or
@@ -324,12 +330,19 @@ python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
   Keep `upstream_sha`; the force needs it.
 - `action: "no-upstream"` **and `remote` is `null`** (several remotes, no
   `origin`) → ask first. Show each candidate **with its URL** from
-  `remote_urls`, then pass the chosen one:
+  `remote_urls`. Then **write the chosen name to a file with the Write tool**,
+  at a `mktemp` path outside the repo, and pass the file:
 
   ```bash
   python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push \
-    --remote "<chosen>" --facts "<facts.json>"
+    --remote-file "<remote.txt>" --facts "<facts.json>"
   ```
+
+  Never interpolate the name into the command instead. Remote names come from
+  repository config and git permits `"`, `;`, `$` and backticks in them, so a
+  crafted name would close the quote and run as a second shell command — the
+  same reason catalog selections and commit messages go through files. Delete
+  the file once the command returns.
 
   Running the plain command here instead returns `error: "ambiguous-remote"` and
   exit 5. That is the tool asking for this question, not a failed push — ask it

@@ -730,3 +730,70 @@ def test_verify_separates_the_file_list_from_pre_commits_own_options(
     )
     invocation = log.read_text()
     assert "run --files -- .pre-commit-config.yaml" in invocation, invocation
+
+
+def test_generate_works_in_a_directory_that_is_not_a_repo(tmp_path, keys_file, facts_path, stubs):
+    """The first step of the documented is_repo:false workflow. refuse_if_dirty's
+    "nothing can be pending" branch had never been taken by a test."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(plain),
+        "--templates-file",
+        str(keys_file("hygiene")),
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (plain / ".pre-commit-config.yaml").exists()
+    assert json.loads(facts_path.read_text())["scan"]["git_repo"] is False
+
+
+@pytest.mark.parametrize("mode", ["--detect", "--recommend"])
+def test_read_only_modes_work_outside_a_repo(tmp_path, stubs, mode):
+    plain = tmp_path / "plain2"
+    plain.mkdir()
+    proc = run("precommit.py", "--dir", str(plain), mode, stubs=stubs)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["/etc/hosts", "../escape.txt", "../../etc/hosts"])
+def test_verify_refuses_a_files_value_outside_the_repo(repo, keys_file, facts_path, stubs, bad):
+    """pre-commit resolves --files against cwd, so an absolute path or a ../
+    traversal points the autofixing hooks at a file outside the tree (which
+    they rewrite) and gitleaks at one it reads and prints."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files",
+        bad,
+        stubs=stubs,
+    )
+    assert proc.returncode != 0
+    assert "outside the repository" in proc.stderr
+
+
+def test_an_asset_destination_that_escapes_the_repo_is_refused(tmp_path):
+    """The containment half of the asset guard, reached directly.
+
+    The symlink test above trips the per-component islink check first, so this
+    branch never ran. No catalog entry has a traversing relative path today --
+    the guard is there so one added later cannot quietly write outside the
+    tree, and an unreachable guard with no test is indistinguishable from one
+    that does not work.
+    """
+    import precommit
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        precommit.refuse_path_escaping_repo(str(repo), "../../escaped.mjs")
+    assert exc.value.code != 0

@@ -319,3 +319,24 @@ def test_a_crlf_config_records_its_terminator():
 def test_a_config_with_no_trailing_newline_records_that():
     cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a")
     assert cfg.ends_with_newline is False
+
+
+@pytest.mark.parametrize(
+    "codepoint",
+    [0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029],
+    ids=["VT", "FF", "FS", "GS", "RS", "NEL", "LS", "PS"],
+)
+def test_refuses_a_line_break_that_is_not_a_newline(codepoint):
+    """str.splitlines() breaks on all of these and DISCARDS the character, so
+    rejoining materialises a plain newline where it used to be -- a silent
+    content change that verify_additive cannot see, because its baseline is
+    already the corrupted line list."""
+    text = "repos:\n  - repo: local" + chr(codepoint) + "\n    hooks:\n      - id: a\n"
+    with pytest.raises(C.ConfigRefused, match="line-breaking character"):
+        C.scan(text)
+
+
+def test_an_ordinary_config_still_scans():
+    """The guard above must not fire on \n or \r\n."""
+    assert C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n").repos
+    assert C.scan("repos:\r\n  - repo: local\r\n    hooks:\r\n      - id: a\r\n").repos

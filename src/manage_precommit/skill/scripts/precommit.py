@@ -880,6 +880,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # whole point is that the user approved its scope.
     for name in args.files:
         refuse_option_like(name, "file", die)
+        # And inside the repo. pre-commit resolves these against cwd, so an
+        # absolute path or a ../ traversal points the autofixing hooks at a
+        # file outside the tree (which they rewrite) and gitleaks at one it
+        # will read and print. Rejecting a leading dash was only half of it.
+        resolved = os.path.realpath(os.path.join(directory, name))
+        root = os.path.realpath(directory)
+        if resolved != root and not resolved.startswith(root + os.sep):
+            die(f"--files {name!r} resolves outside the repository; refusing to check it")
     run_args = ["run", "--files", "--", *args.files] if args.files else ["run", "--all-files"]
     rc, output = run_precommit(directory, *run_args)
     autofixed: list[str] = []

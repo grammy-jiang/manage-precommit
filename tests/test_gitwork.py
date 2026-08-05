@@ -866,3 +866,91 @@ def test_the_consent_lines_are_neutralised_not_merely_flagged(repo, remote, writ
     assert got["suspicious_characters"] is True
     joined = " ".join(got["would_drop"] + got["would_add"]) + got["guidance"]
     assert chr(0x202E) not in joined, "a text-reordering character reached the consent text"
+
+
+def test_a_remote_name_is_taken_from_a_file_not_a_command_line(repo, written, tmp_path):
+    """Git permits quotes, semicolons and $ in a remote name, and the name comes
+    from repository config -- so it must never be interpolated into the shell
+    command the agent runs, exactly like a commit message or a catalog list."""
+    bare = tmp_path / "viaFile.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    for name in ("alpha", "beta"):
+        b = tmp_path / f"{name}2.git"
+        subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(b)], check=True)
+        subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", name, str(b)], check=True)
+    commit(repo, written, tmp_path)
+
+    chosen = tmp_path / "remote.txt"
+    chosen.write_text("beta\n")
+    got = out_json(
+        run(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "push",
+            "--remote-file",
+            str(chosen),
+            "--facts",
+            str(written),
+        )
+    )
+    assert got["pushed"] is True
+    assert json.loads(written.read_text())["commit"]["push"]["remote"] == "beta"
+
+
+def test_remote_and_remote_file_are_mutually_exclusive(repo, written, tmp_path):
+    chosen = tmp_path / "r.txt"
+    chosen.write_text("origin\n")
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "push",
+        "--remote",
+        "origin",
+        "--remote-file",
+        str(chosen),
+        "--facts",
+        str(written),
+    )
+    assert proc.returncode != 0
+    assert "not both" in proc.stderr
+
+
+def test_the_summary_records_that_a_push_was_forced(repo, remote, written, tmp_path):
+    """Consent was given in the moment, but the closing summary is the durable
+    record -- and it read identically whether the push fast-forwarded or
+    rewrote history."""
+    commit(repo, written, tmp_path)
+    _diverge(repo, remote, tmp_path)
+    plan = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "push",
+        "--confirm-force",
+        "--expect-remote",
+        plan["upstream_sha"],
+        "--facts",
+        str(written),
+    )
+    push = json.loads(written.read_text())["commit"]["push"]
+    assert push["forced"] is True
+    assert push["dropped"] == 1
+
+
+def test_an_ordinary_push_is_not_recorded_as_forced(repo, remote, written, tmp_path):
+    commit(repo, written, tmp_path)
+    run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written))
+    assert "forced" not in json.loads(written.read_text())["commit"]["push"]
+
+
+def test_the_net_diffstat_survives_the_documented_no_hash_path(repo, written, tmp_path):
+    """SKILL.md's ordinary path passes no --hash; diffstat then read a working
+    tree the commit had already made clean, so the NET diff row vanished from
+    every ordinary run."""
+    commit(repo, written, tmp_path)
+    run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written))
+    net = json.loads(written.read_text())["net"]
+    assert "files changed" in net["diffstat"], net

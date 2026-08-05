@@ -170,3 +170,21 @@ def test_cli_refuses_an_oversized_facts_file(tmp_path):
     proc = run_script("summary.py", str(big))
     assert proc.returncode == 1
     assert "larger than" in proc.stderr
+
+
+def test_a_forced_push_is_visible_in_the_summary():
+    facts = json.loads(json.dumps(FULL))
+    facts["commit"]["push"] = {
+        "sha": "abc1234",
+        "remote": "origin",
+        "branch": "main",
+        "forced": True,
+        "dropped": 2,
+    }
+    text = render(facts)
+    assert "FORCED" in text
+    assert "dropped 2 remote commit(s)" in text
+
+
+def test_an_ordinary_push_says_nothing_about_forcing():
+    assert "FORCED" not in render(FULL)

@@ -424,6 +424,11 @@ class PushFacts(TypedDict, total=False):
     sha: str
     remote: str
     branch: str
+    # Set only on a force-push. The summary is the durable record of the run,
+    # and without this it read identically whether the push fast-forwarded or
+    # rewrote history over commits that no longer exist anywhere.
+    forced: bool
+    dropped: int
 
 
 class CommitFacts(TypedDict, total=False):

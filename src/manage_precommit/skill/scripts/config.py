@@ -52,6 +52,14 @@ class ConfigRefused(Exception):
 # file. An alias could pull in a repo the scanner never sees, so a config
 # carrying one is refused outright rather than half-understood.
 _ANCHOR = re.compile(r"(?:^|[\s:\[{,])[&*][A-Za-z0-9_][^\s\[\]{},]*")
+
+# Everything str.splitlines() treats as a line boundary except \n and \r, built
+# from codepoints so the bytes never appear as literals here. See scan().
+_EXOTIC_LINE_BREAK = re.compile(
+    "["
+    + "".join(re.escape(chr(c)) for c in (0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029))
+    + "]"
+)
 _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 
 
@@ -205,6 +213,21 @@ def scan(text: str) -> Config:
     """
     if "\x00" in text:
         raise ConfigRefused("config contains a NUL byte")
+    # str.splitlines() breaks on a superset of newline -- VT, FF, the file/group/
+    # record separators, NEL, and U+2028/U+2029 -- and DISCARDS the character it
+    # split on. Rejoining then materialises a plain \n where that byte used to
+    # be: a silent content change, in the one module whose promise is that every
+    # byte outside an inserted block is carried across untouched. verify_additive
+    # cannot see it (its baseline is already the corrupted line list) and the
+    # forged-character check runs after the byte is gone. So it is refused here,
+    # like every other construct this scanner will not guess at.
+    exotic = _EXOTIC_LINE_BREAK.search(text)
+    if exotic:
+        raise ConfigRefused(
+            "config contains a line-breaking character other than newline "
+            f"(U+{ord(exotic.group()):04X}); this tool will not rewrite it",
+            text[: exotic.start()].count("\n") + 1,
+        )
     lines = text.splitlines()
     newline = "\r\n" if "\r\n" in text else "\n"
     ends_with_newline = text.endswith(("\n", "\r"))
