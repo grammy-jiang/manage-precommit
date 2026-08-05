@@ -361,7 +361,11 @@ def native_hooks(repo: str) -> list[str]:
     """
     rc, hooks_dir, _ = git(repo, "rev-parse", "--git-path", "hooks")
     if rc != 0 or not hooks_dir:
-        return []
+        # Not "there are none". This is a consent disclosure, and porcelain()
+        # in this same file already refuses to call a failed check a clean
+        # result; the same rule has to hold here, or an unreviewed pre-push
+        # hook sails through the confirmation in silence.
+        return ["<could not determine: git could not locate the hooks directory>"]
     base = hooks_dir if os.path.isabs(hooks_dir) else os.path.join(repo, hooks_dir)
     found = []
     for name in NATIVE_HOOK_TYPES:
@@ -379,9 +383,10 @@ def risky_local_config(repo: str) -> list[str]:
     is not ordinary is finding out afterwards -- so this is surfaced with the
     destination, before the push is approved.
     """
-    rc, out, _ = git(repo, "config", "--local", "--name-only", "--list")
+    rc, out, err = git(repo, "config", "--local", "--name-only", "--list")
     if rc != 0:
-        return []
+        # Same reasoning as native_hooks: unknown is not empty.
+        return [f"<could not determine: git config failed: {err or f'exit {rc}'}>"]
     return sorted(
         {
             RISKY_LOCAL_CONFIG[key]

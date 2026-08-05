@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from conftest import NPM_VERSION, REAL_GIT, out_json, run, stub_calls
+from conftest import NPM_VERSION, REAL_GIT, SKILL, out_json, run, stub_calls
 
 
 def generate(repo, keys_file, facts_path, stubs, *names, force=False):
@@ -593,20 +593,46 @@ def test_verify_reports_a_non_utf8_facts_file_cleanly(repo, keys_file, facts_pat
     assert "Traceback" not in proc.stderr
 
 
-def test_a_forged_character_in_the_merged_config_stops_the_write(
+def test_a_forged_character_this_run_would_insert_stops_the_write(
     repo, keys_file, facts_path, stubs
 ):
-    """The one guard between a hostile existing config -- carried through
-    byte-for-byte by design -- and a human approving a diff that does not say
-    what the bytes say."""
+    """The check is that WE never introduce one.
+
+    It used to scan the whole merged file, which meant a single pre-existing
+    zero-width joiner -- the character that holds a compound emoji together in
+    an ordinary comment -- refused every future run permanently, with no line
+    number and no entry in the error table. A character the user already had is
+    theirs; `--detect` reports it instead.
+    """
+    import shutil
+
+    fragment = SKILL / "templates" / "gitleaks.yaml"
+    backup = fragment.read_bytes()
+    try:
+        fragment.write_bytes(backup.replace(b"gitleaks\n", "gitleaks\u202e\n".encode(), 1))
+        proc = generate(repo, keys_file, facts_path, stubs, "gitleaks")
+        assert proc.returncode != 0
+        assert "insert" in proc.stderr
+        assert not (repo / ".pre-commit-config.yaml").exists()
+    finally:
+        fragment.write_bytes(backup)
+    assert shutil  # the import is only here to keep the finally obvious
+
+
+def test_a_pre_existing_forged_character_is_reported_not_blocked(
+    repo, keys_file, facts_path, stubs
+):
+    """Refusing here locked the user out of their own repository forever."""
+    zwj = chr(0x200D)
     (repo / ".pre-commit-config.yaml").write_text(
-        f"# note{BIDI} reversed\nrepos:\n- repo: local\n  hooks:\n  - id: x\n"
+        f"# by the maintainer {zwj}\nrepos:\n- repo: local\n  hooks:\n  - id: x\n"
     )
-    before = (repo / ".pre-commit-config.yaml").read_bytes()
     proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
-    assert proc.returncode != 0
-    assert "text-reordering" in proc.stderr
-    assert (repo / ".pre-commit-config.yaml").read_bytes() == before, "the file was rewritten"
+    assert proc.returncode == 0, proc.stderr
+    assert "gitleaks" in (repo / ".pre-commit-config.yaml").read_text()
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert got["suspicious_characters"] is True, "it should still be reported"
 
 
 def test_a_hooks_list_that_cannot_be_extended_reaches_the_facts(repo, keys_file, facts_path, stubs):
@@ -1006,3 +1032,107 @@ def test_detect_reports_no_exclude_when_there_is_none(repo, stubs):
     )
     got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
     assert got["exclude"] is None
+
+
+# -- guards added after round 9 of the reviewer panel -------------------------
+
+
+def test_a_foreign_file_at_the_executed_asset_path_stops_the_run(
+    repo, keys_file, facts_path, stubs
+):
+    """The mermaid fragment hardcodes `entry: node scripts/lint-mermaid.mjs`, so
+    a file already at that path is not data the hook reads -- it is the program
+    the hook runs. Keeping it wires attacker-authored JS into every commit, and
+    because the file is unchanged it shows up in no diff at all."""
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "lint-mermaid.mjs").write_text("// not ours\n")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid")
+    assert proc.returncode != 0
+    assert "NOT the file this skill ships" in proc.stderr
+    assert (repo / "scripts" / "lint-mermaid.mjs").read_text() == "// not ours\n"
+
+
+def test_an_identical_file_at_that_path_is_fine(repo, keys_file, facts_path, stubs):
+    """Re-running must not trip over the asset the previous run wrote."""
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid", force=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_customised_linter_config_is_still_kept(repo, keys_file, facts_path, stubs):
+    """The refusal above is scoped to executed assets. A user's own
+    .yamllint.yaml is data a linter reads, and keeping it is the point."""
+    (repo / ".yamllint.yaml").write_text("# mine, hands off\n")
+    proc = generate(repo, keys_file, facts_path, stubs, "yamllint")
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / ".yamllint.yaml").read_text() == "# mine, hands off\n"
+    assert json.loads(facts_path.read_text())["files"]["kept"] == [".yamllint.yaml"]
+
+
+def test_a_present_but_disabled_hook_is_not_reported_as_coverage(
+    repo, keys_file, facts_path, stubs
+):
+    """`stages: [manual]` keeps a hook off the commit path entirely, so an
+    entry can carry the right id and never fire."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        stages: [manual]\n"
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    kept = json.loads(facts_path.read_text())["hooks"]["left_as_is"]
+    line = next(k for k in kept if "gitleaks" in k)
+    assert "will NOT run on commit" in line, line
+    assert "stages: [manual]" in line
+
+
+def test_recommend_names_a_present_but_disabled_entry(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["previous"]
+    assert "gitleaks" in got["disabled"]
+
+
+def test_an_ordinary_present_entry_is_not_flagged_as_disabled(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}
+
+
+def test_a_bom_survives_the_merge(repo, keys_file, facts_path, stubs):
+    """utf-8-sig decodes the mark away, so without recording it the rebuild
+    writes plain UTF-8 and a byte this run never inserted quietly disappears --
+    which verify_additive cannot see, because it compares decoded lines."""
+    body = "repos:\n- repo: local\n  hooks:\n  - id: mine\n"
+    (repo / ".pre-commit-config.yaml").write_bytes(b"\xef\xbb\xbf" + body.encode())
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    after = (repo / ".pre-commit-config.yaml").read_bytes()
+    assert after.startswith(b"\xef\xbb\xbf"), "the BOM was stripped"
+    assert b"gitleaks" in after
+
+
+def test_a_config_without_a_bom_does_not_gain_one(repo, keys_file, facts_path, stubs):
+    (repo / ".pre-commit-config.yaml").write_text("repos:\n- repo: local\n  hooks:\n  - id: m\n")
+    generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert not (repo / ".pre-commit-config.yaml").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_the_vacuous_remedy_names_the_safe_flag(repo, keys_file, facts_path, stubs, tmp_path):
+    """The tool's own message is printed verbatim by summary.py, so naming
+    --files there told the user to run the command the doc forbids."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = _pre_commit_stub(
+        tmp_path, "vac", ["trailing-whitespace......(no files to check) Skipped"]
+    )
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert "--files-file" in got["run"]
+    assert "with --files." not in got["run"]

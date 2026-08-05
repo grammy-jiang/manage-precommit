@@ -93,6 +93,9 @@ CATALOG: dict[str, dict] = {
         "rev_repo": None,
         "npm": "@mermaid-js/mermaid-cli",
         "assets": [("lint-mermaid.mjs", "scripts/lint-mermaid.mjs")],
+        # The fragment hardcodes `entry: node scripts/lint-mermaid.mjs`, so this
+        # asset is not data the hook reads -- it is the program the hook runs.
+        "executes_assets": True,
         "file_scoped": True,
         "desc": "Mermaid diagram validator (local hook; needs node + a browser)",
     },
@@ -291,14 +294,51 @@ def read_config(directory: str) -> cfgmod.Config | None:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         die(f"{path} is not valid UTF-8: {exc}")
+    had_bom = raw.startswith(b"\xef\xbb\xbf")
     try:
-        return cfgmod.scan(text)
+        scanned = cfgmod.scan(text)
+        scanned.had_bom = had_bom
+        return scanned
     except cfgmod.ConfigRefused as exc:
         die(
             f"{exc}. This tool only extends configs whose shape it can prove it "
             "understands; add the hook by hand, or simplify the construct.",
             code=EXIT_REFUSED,
         )
+
+
+def looks_disabled(hook: cfgmod.Hook) -> str | None:
+    """What would stop this hook running, or None.
+
+    "Already present" was decided on the hook id alone, so an entry could carry
+    the right id and never fire: `stages: [manual]` keeps it off the commit
+    path, and a hook-level `files:`/`exclude:` can match nothing. The tool then
+    counted the catalog entry as covered, stopped offering it, and the user was
+    told a secret scan was in force that was not.
+    """
+    settings = hook.settings
+    stages = settings.get("stages", "")
+    if stages and "commit" not in stages:
+        return f"stages: {stages}"
+    if settings.get("exclude"):
+        return f"exclude: {settings['exclude']}"
+    if settings.get("files"):
+        return f"files: {settings['files']}"
+    return None
+
+
+def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
+    """Present hooks for `key` carrying something that stops them running."""
+    url = CATALOG[key].get("rev_repo") or "local"
+    out = []
+    for entry in cfg.repos:
+        if entry.url != url:
+            continue
+        for hook in entry.hooks:
+            why = looks_disabled(hook)
+            if why:
+                out.append(f"{clean(hook.id)} ({clean(why)})")
+    return out
 
 
 def exclude_pattern(cfg: cfgmod.Config) -> str | None:
@@ -518,7 +558,15 @@ def plan(
         have_ids = {h.id for h in existing.hooks}
         missing = [h.id for h in entry.hooks if h.id not in have_ids]
         if not missing:
-            report.append(("kept", f"{entry.url}: already present (rev {existing.rev or '?'})"))
+            disabled = disabled_hooks(cfg, key)
+            note = (
+                f" -- but {', '.join(disabled)}: present, and looks like it will NOT run on commit"
+                if disabled
+                else ""
+            )
+            report.append(
+                ("kept", f"{entry.url}: already present (rev {existing.rev or '?'}){note}")
+            )
             continue
         if not existing.hooks or existing.hook_item_indent is None:
             report.append(
@@ -597,7 +645,7 @@ def refuse_path_escaping_repo(directory: str, rel: str) -> str:
     return dest
 
 
-def copy_assets(key: str, directory: str) -> tuple[list[str], list[str]]:
+def copy_assets(key: str, directory: str) -> tuple[list[str], list[str], list[str]]:
     """Copy a catalog entry's repo-side files, never over one already there.
 
     Read and written through the same guarded helpers as every other file the
@@ -605,7 +653,7 @@ def copy_assets(key: str, directory: str) -> tuple[list[str], list[str]]:
     FIFO, and atomic_write_bytes replaces the destination rather than writing
     through it. shutil.copyfile did neither.
     """
-    written, kept = [], []
+    written, kept, foreign = [], [], []
     for src, rel in CATALOG[key].get("assets", []):
         dest = refuse_path_escaping_repo(directory, rel)
         parent = os.path.dirname(dest)
@@ -614,12 +662,26 @@ def copy_assets(key: str, directory: str) -> tuple[list[str], list[str]]:
         # lexists, not exists: a dangling symlink is still something the user
         # put there, and following it to write is exactly what is refused.
         if os.path.lexists(dest):
+            # An asset that is already there is NOT automatically ours. The
+            # mermaid fragment hardcodes `entry: node scripts/lint-mermaid.mjs`,
+            # so a repo shipping its own file at that path gets it wired up as
+            # a hook and executed on every commit -- while `kept` files are
+            # unchanged on disk, so git status and the Step 5 diff show
+            # nothing at all. Compare it to what we would have written.
+            # Only for an asset the config will EXECUTE. Keeping a linter
+            # config the user has customised is the documented behaviour and
+            # exactly what they want; keeping a *program* we are about to wire
+            # up as a hook is another matter entirely.
+            if CATALOG[key].get("executes_assets"):
+                existing = read_bytes_or_die(dest, die)
+                if hashlib.sha256(existing).hexdigest() != sha256_of(os.path.join(ASSETS, src)):
+                    foreign.append(rel)
             kept.append(rel)
             continue
         payload = read_bytes_or_die(os.path.join(ASSETS, src), die)
         atomic_write_bytes(dest, payload, mode=default_file_mode())
         written.append(rel)
-    return written, kept
+    return written, kept, foreign
 
 
 def load_facts_if_present(path: str) -> dict:
@@ -709,6 +771,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
         die(str(exc))
 
     text = cfg.newline.join(result) + (cfg.newline if cfg.ends_with_newline else "")
+    if cfg.had_bom:
+        text = "\ufeff" + text
     # Prove the result is still a config this tool can read, BEFORE it is
     # written: a merge that produced something unscannable would otherwise be
     # discovered by the next run, on the user's file.
@@ -716,17 +780,39 @@ def cmd_generate(args: argparse.Namespace) -> int:
         after = cfgmod.scan(text)
     except cfgmod.ConfigRefused as exc:
         die(f"the merged config did not scan back cleanly ({exc}); nothing was written")
-    if has_suspicious_chars(text):
-        die("the merged config holds control or text-reordering characters; nothing was written")
+    # Scoped to the blocks this run inserts. Scanning the whole file made a
+    # single pre-existing character -- a zero-width joiner, which is what holds
+    # a compound emoji together in an ordinary comment -- refuse every future
+    # run permanently, with no line number and no entry in the error table.
+    # What this check is for is that WE never introduce one; a character the
+    # user already had is theirs, and `--detect` reports it rather than
+    # blocking on it.
+    inserted = "\n".join(line for ins in insertions for line in ins.block)
+    if has_suspicious_chars(inserted):
+        die("the blocks this run would insert hold control or text-reordering characters")
 
     path = target_path(directory)
     atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
 
-    written, kept = [TARGET_NAME], []
+    written, kept, foreign = [TARGET_NAME], [], []
     for key in keys:
-        wrote, keep = copy_assets(key, directory)
+        wrote, keep, alien = copy_assets(key, directory)
         written.extend(wrote)
         kept.extend(keep)
+        foreign.extend(alien)
+    if foreign:
+        # Refused rather than reported: this run has just written a config that
+        # tells pre-commit to EXECUTE these files. Reporting a fact the user
+        # has to act on correctly, in a step whose output they may skim, is not
+        # good enough when the failure mode is running someone else's code on
+        # every commit.
+        listed = ", ".join(clean(f) for f in foreign)
+        die(
+            f"{listed} already exists and is NOT the file this skill ships. The config "
+            "would run it as a hook on every commit, and because the file is unchanged "
+            "it would appear in no diff. Move or delete it and run again, or drop the "
+            "entry that needs it."
+        )
 
     verify_written(path, keys, after)
     # Hashed from disk, not from the string in memory: what the commit step
@@ -858,6 +944,11 @@ def cmd_detect(directory: str) -> int:
 def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     cfg = read_config(directory)
     previous = present_keys(cfg)
+    # An entry that is present but switched off is not coverage. Reported
+    # separately so the agent can say so rather than the user being told a
+    # catalog entry is already handled.
+    disabled = {k: disabled_hooks(cfg, k) for k in previous if cfg} if cfg else {}
+    disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths = detect_markers(directory)
     recs = [r for r in recs if r["name"] not in previous]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
@@ -882,6 +973,7 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
             "always_on": list(ALWAYS_ON),
             "recommended": recs,
             "previous": previous,
+            "disabled": disabled,
             "proposed": proposed,
             "detected": markers,
             "detected_paths": trigger_paths,
@@ -1014,7 +1106,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         summary = (
             "vacuous pass -- every hook reported (no files to check). --all-files covers "
             "only tracked files, so nothing was actually checked; re-run naming the paths "
-            "explicitly with --files."
+            "explicitly with --files-file."
         )
     elif unchecked:
         summary = (

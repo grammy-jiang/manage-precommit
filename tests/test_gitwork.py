@@ -1138,3 +1138,26 @@ def test_hooks_path_is_reported_as_a_local_override(repo, remote, written, tmp_p
     commit(repo, written, tmp_path)
     got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
     assert "core.hooksPath" in got["local_overrides"]
+
+
+def test_an_undeterminable_disclosure_is_not_reported_as_nothing(repo, written, tmp_path):
+    """porcelain() in this same file already refuses to call a failed check a
+    clean result; these two consent disclosures did exactly that."""
+    fake = tmp_path / "nocfg"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "config" ] && [ "$a" = "--local" ]; then exit 128; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    got = out_json(
+        run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written), stubs=fake)
+    )
+    assert got["local_overrides"], "a failed check came back as nothing to disclose"
+    assert "could not determine" in got["local_overrides"][0]

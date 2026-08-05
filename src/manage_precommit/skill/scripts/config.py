@@ -63,6 +63,12 @@ _EXOTIC_LINE_BREAK = re.compile(
 _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 
 
+# Hook-level keys that can stop a hook running in the ordinary flow. `stages`
+# can exclude pre-commit; `files`/`exclude` can match nothing; `always_run` is
+# recorded because its absence matters when `files` is restrictive.
+HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run")
+
+
 @dataclass
 class Hook:
     """One ``- id: x`` item inside a repo's ``hooks:`` list."""
@@ -70,6 +76,10 @@ class Hook:
     id: str
     start: int  # index of the "- id:" line
     end: int  # last line index belonging to this hook, inclusive
+    # Fields that decide whether the hook runs at all. Captured because
+    # "already present" was being decided on the id alone: an entry can carry
+    # the right id and still never fire.
+    settings: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -104,6 +114,11 @@ class Config:
     # already-stripped lines, still called the merge purely additive.
     newline: str = "\n"
     ends_with_newline: bool = True
+    # A UTF-8 BOM is decoded away before scan() ever sees the text, so without
+    # recording it here the rebuild writes plain UTF-8 and the mark is gone --
+    # a byte this module never inserted, silently removed, which
+    # verify_additive cannot see because it compares decoded lines.
+    had_bom: bool = False
 
     def repo(self, url: str) -> RepoEntry | None:
         for entry in self.repos:
@@ -495,6 +510,7 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
         raise ConfigRefused("a hook item does not start with `id:`", start + 1)
     _refuse_multiline_scalar(lines, start, item_indent + 2, parsed[1], "id")
     hook = Hook(id=_scalar(parsed[1]), start=start, end=start)
+    key_indent = item_indent + 2
     i = start + 1
     while i < len(lines):
         line = lines[i]
@@ -503,6 +519,10 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
             continue
         if _indent_of(line) <= item_indent:
             break
+        if _indent_of(line) == key_indent:
+            entry = _split_key(line.strip())
+            if entry and entry[0] in HOOK_GATING_KEYS:
+                hook.settings[entry[0]] = _scalar(entry[1])
         hook.end = i
         i += 1
     return i, hook
