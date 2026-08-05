@@ -251,6 +251,10 @@ def render(facts: dict, pal: Pal) -> str:
             [
                 ("install", clean(verify["install"]) if verify.get("install") else None),
                 ("run", run_value),
+                (
+                    "unchecked",
+                    names(verify["unchecked"], pal, "rem") if verify.get("unchecked") else None,
+                ),
                 ("autofixed", names(autofixed, pal, "dim") if autofixed else None),
             ],
             pal,

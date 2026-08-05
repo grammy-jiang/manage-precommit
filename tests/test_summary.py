@@ -188,3 +188,31 @@ def test_a_forced_push_is_visible_in_the_summary():
 
 def test_an_ordinary_push_says_nothing_about_forcing():
     assert "FORCED" not in render(FULL)
+
+
+def test_hooks_needing_manual_addition_are_shown():
+    """SKILL.md makes this a "say so plainly" outcome, and the summary is the
+    durable record -- but nothing asserted it was ever rendered."""
+    facts = json.loads(json.dumps(FULL))
+    facts["hooks"]["needs_manual"] = [
+        "https://github.com/psf/black: present (rev 24.1.0) but its `hooks:` list is not "
+        "a shape this tool can extend -- add black-jupyter by hand"
+    ]
+    text = render(facts)
+    assert "add by hand" in text
+    assert "black-jupyter" in text
+
+
+def test_a_hook_that_never_saw_a_file_is_shown():
+    """verify.unchecked was computed and persisted specifically to catch a
+    green run that exercised nothing -- and then dropped before the summary,
+    so a resumed Step 6 lost the warning entirely."""
+    facts = json.loads(json.dumps(FULL))
+    facts["verify"]["unchecked"] = ["markdownlint-cli2"]
+    text = render(facts)
+    assert "unchecked" in text
+    assert "markdownlint-cli2" in text
+
+
+def test_a_clean_verify_shows_no_unchecked_row():
+    assert "unchecked" not in render(FULL)

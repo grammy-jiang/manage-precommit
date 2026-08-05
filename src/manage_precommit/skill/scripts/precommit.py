@@ -301,6 +301,18 @@ def read_config(directory: str) -> cfgmod.Config | None:
         )
 
 
+def exclude_pattern(cfg: cfgmod.Config) -> str | None:
+    """The config's top-level `exclude:` value, or None when it has none.
+
+    Surfaced because a broad one silently switches every hook off, and being
+    pre-existing it shows up in no diff this run produces.
+    """
+    if "exclude" not in cfg.top_keys:
+        return None
+    parsed = cfgmod._split_key(cfg.lines[cfg.top_keys["exclude"]])
+    return clean(cfgmod._scalar(parsed[1])) if parsed else None
+
+
 def present_keys(cfg: cfgmod.Config | None) -> list[str]:
     """Catalog keys the config already carries."""
     if cfg is None:
@@ -459,11 +471,21 @@ def plan(
             )
             report.append(("added", f"added {key}"))
         elif key == "exclude" and pre_existing:
+            # The VALUE, not just the fact that one exists. A config arriving
+            # with `exclude: '.*'` makes every hook match zero files -- the
+            # newly added gitleaks entry still shows up in the diff, so the run
+            # reads as a success while nothing is actually being scanned. The
+            # line is pre-existing, so it appears in no inserted hunk and the
+            # Step 5 diff never shows it either.
+            line = cfg.lines[cfg.top_keys["exclude"]]
+            parsed = cfgmod._split_key(line)
+            pattern = clean(cfgmod._scalar(parsed[1])) if parsed else ""
             report.append(
                 (
                     "kept",
-                    "exclude: left as-is (the config already had one) -- .gitignore is NOT "
-                    "excluded unless you add it yourself",
+                    f"exclude: left as-is (pattern: {pattern or '?'}) -- .gitignore is NOT "
+                    "excluded unless you add it yourself, and anything this pattern matches "
+                    "is skipped by EVERY hook, including the ones just added",
                 )
             )
 
@@ -826,6 +848,7 @@ def cmd_detect(directory: str) -> int:
             "config": "existing",
             "repos": repos,
             "present": present_keys(cfg),
+            "exclude": exclude_pattern(cfg),
             "suspicious_characters": has_suspicious_chars(cfg.text),
         }
     )

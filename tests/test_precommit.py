@@ -975,3 +975,34 @@ def test_detect_neutralises_what_it_relays(repo, stubs):
     blob = json.dumps(got)
     assert bidi not in blob, "a text-reordering character reached the relayed JSON"
     assert got["suspicious_characters"] is True
+
+
+def test_a_pre_existing_exclude_has_its_pattern_shown(repo, keys_file, facts_path, stubs):
+    """A config arriving with `exclude: '.*'` switches every hook off. The line
+    is pre-existing, so it appears in no inserted hunk and the Step 5 diff never
+    shows it -- if the report does not say it, nobody sees it."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "exclude: '.*'\nrepos:\n  - repo: local\n    hooks:\n      - id: x\n"
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    kept = json.loads(facts_path.read_text())["hooks"]["left_as_is"]
+    line = next(k for k in kept if k.startswith("exclude:"))
+    assert "pattern: .*" in line, line
+    assert "EVERY hook" in line
+
+
+def test_detect_reports_the_exclude_pattern(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "exclude: '^vendor/'\nrepos:\n  - repo: local\n    hooks:\n      - id: x\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert got["exclude"] == "^vendor/"
+
+
+def test_detect_reports_no_exclude_when_there_is_none(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: x\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert got["exclude"] is None

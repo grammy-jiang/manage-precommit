@@ -34,7 +34,8 @@ and it fails closed.
 `~/.claude/skills/manage-precommit`. `<repo>` is the repository being worked on.
 Substitute both; never run a command with the angle brackets still in it.
 
-The scripts need only Python 3.10+, `git`, and — for the `mermaid` entry — `npm`.
+The scripts need Python 3.10+ and `git`; `pre-commit` itself from Step 4
+onward; and `npm` for the `mermaid` entry.
 They import each other from their own directory, so they run from wherever the
 skill is installed, with nothing to install first. If one is missing, say so and
 stop; do not fall back to hand-written git or a hand-written config.
@@ -142,10 +143,15 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   is read as the whole selection with no memory of the previous attempt, so
   writing only the fix silently drops every other hook the user asked for.
   **Retry once.** If that fails, report the near matches and stop.
-- **exit 4, a file already carries an uncommitted change** — that edit is the
-  user's to commit, stash or discard; no rebuild can honestly commit it as this
-  run's work. Relay it and stop. Once they have dealt with it the run starts
-  again from Step 1.
+- **exit 4** — two different causes, and the message says which. **Relay it
+  verbatim rather than narrating either from memory.**
+  - *a file already carries an uncommitted change* — that edit is the user's to
+    commit, stash or discard; no rebuild can honestly commit it as this run's
+    work. Once they have dealt with it the run starts again from Step 1.
+  - *the check itself could not run* ("could not check whether this run's files
+    are already modified") — a locked or corrupt index, not an edit. There is
+    nothing for the user to discard; the run stops because an unknown state is
+    not a clean one. Suggest they resolve the git error and start again.
 - **exit 5, the config uses YAML this tool will not read** — anchors, aliases,
   merge keys, flow sequences, more than one document. It says which line. Tell
   the user the hook has to be added by hand, or the construct simplified. Do not
@@ -153,9 +159,15 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
 - **anything else** — nothing usable was written. Report it and end the run.
 
 On success relay its report: entries **added** vs **already present (left
-as-is)**, assets **written** vs **kept**, and the pinned **versions**. If it says
-`exclude: left as-is`, tell the user `.gitignore` will not be excluded unless
-they add it themselves.
+as-is)**, assets **written** vs **kept**, and the pinned **versions**.
+
+If it says `exclude: left as-is`, **show the pattern it printed**. Two things
+follow from it, and only the first is obvious: `.gitignore` will not be excluded
+unless they add it themselves, and anything the existing pattern matches is
+skipped by *every* hook — including the ones just added. A broad one (`.*`, or
+something matching most of the tree) means the hooks are installed and scanning
+nothing. That line is pre-existing, so it appears in no diff this run produces;
+if you do not say it, nobody sees it.
 
 **If `needs_manual` is non-empty, say so plainly.** That entry exists but its
 `hooks:` list is not a shape this tool can extend, so the hook the user asked
@@ -174,9 +186,10 @@ AskUserQuestion: **Run the hooks over all files** / **Only this run's files** /
 
 - *All files* — the full check, and the honest one; autofixes elsewhere are
   reported in Step 5 and never committed by this skill.
-- *Only this run's files* — pass `--files` with `files.written` from the facts.
-  Narrower, and it will not tell you whether the hooks pass on the rest of the
-  repo.
+- *Only this run's files* — write `files.written` to a `mktemp` file with the
+  Write tool and pass `--files-file`, never `--files` (see the recovery block
+  below for why). Narrower, and it will not tell you whether the hooks pass on
+  the rest of the repo.
 - *Skip* — nothing is installed and nothing is checked. `pre-commit install`,
   which writes `.git/hooks/pre-commit`, runs only inside this step, so skipping
   it leaves the config written and **no hook active**: the next `git commit`
@@ -226,7 +239,7 @@ verbatim and stop.
   reported it had no files to check. `--all-files` covering the whole repo is
   not enough on its own: hygiene's hooks match anything and turn the run green
   while `markdownlint` or `mermaid`, added because a `.md` was detected, sat
-  idle. Re-run with `--files` as above and confirm `unchecked` comes back
+  idle. Re-run with `--files-file` as above and confirm `unchecked` comes back
   empty; it is not a pass until it does.
 - `autofixed` non-empty — the autofixing hooks (trailing-whitespace,
   end-of-file-fixer, mixed-line-ending) rewrote files and exited non-zero on the
@@ -371,8 +384,12 @@ Only if the user chose a push option.
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
 ```
 
-- `permits_push: false` → report `guidance` and go to Step 6. None of these is an
-  error to fix; `stop-up-to-date` is a success.
+- `permits_push: false` → report `guidance` and go to Step 6. Two of these are
+  not problems: `stop-up-to-date` is a success, and `stop-behind-only` says the
+  branch has nothing new to send. The rest each describe something the user must
+  resolve before any push is possible — no remote configured, a detached HEAD, a
+  fetch that failed, an ahead/behind count that could not be read. Say which it
+  is rather than implying nothing is wrong.
 - `action: "diverged"` → [references/push-safety.md](references/push-safety.md).
   Keep `upstream_sha`; the force needs it.
 - `action: "no-upstream"` **and `remote` is `null`** (several remotes, no

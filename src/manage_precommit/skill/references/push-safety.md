@@ -13,8 +13,8 @@ That is irreversible for anyone who has not already fetched them.
 ```text
 behind        how many remote commits a force would DROP
 ahead         how many local commits it would put there instead
-would_drop    the subject line of each commit that would be lost
-would_add     the subject line of each commit that would replace them
+would_drop    short hash, author and subject of each commit that would be lost
+would_add     short hash, author and subject of each commit that would replace them
 upstream_sha  the remote commit the comparison was made against
 ```
 
@@ -24,8 +24,10 @@ All of it, in this order, before asking anything:
 
 1. **The count, first and plainly**: "a force-push would drop N commit(s) from
    `<remote>/<branch>`, permanently."
-2. **`would_drop`, every line.** Never truncate this list. Someone else's work
-   is in it, and a summary of it is not consent.
+2. **`would_drop`, every line, verbatim.** Never truncate or summarise this
+   list. Each line carries the author as well as the subject, and the author is
+   what makes "someone else's work is in it" a fact the operator can check
+   rather than a warning they have to take on trust.
 3. **`would_add`** — what replaces them.
 4. **The destination and its URL**, from `guidance`. A remote's nickname says
    nothing about where the code goes.
