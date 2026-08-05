@@ -204,14 +204,23 @@ verbatim and stop.
   untracked the run passes having checked nothing. Re-run naming the paths
   explicitly, which works on untracked files without touching the index:
 
+  **Write the paths to a file with the Write tool**, one per line, at a
+  `mktemp` path outside the repo, then:
+
   ```bash
   python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify \
-    --facts "<facts.json>" --files <files.written> <scan.detected paths>
+    --facts "<facts.json>" --files-file "<paths.txt>"
   ```
 
-  Pass `files.written` **and** every path in `scan.detected` — those are the
-  files that caused each hook to be recommended, so they are the ones that
-  exercise it. Say which form produced the result you report.
+  The list is `files.written` **plus every entry of `scan.detected_paths`** —
+  the files that caused each hook to be recommended are the ones that exercise
+  it. Use `detected_paths`, never `detected`: `detected` is prose for a human
+  (`markdown (README.md)`), and passing those strings makes pre-commit look for
+  files that do not exist, so the check silently proves nothing. They go through
+  a file rather than the command line because a repository can name a file
+  anything, backticks and semicolons included — the same reason catalog keys,
+  remote names and commit messages do. Delete it once the command returns, and
+  say which form produced the result you report.
 
 - `unchecked` non-empty — the run was green overall but a hook *this run added*
   reported it had no files to check. `--all-files` covering the whole repo is
@@ -246,6 +255,20 @@ python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" status --facts "<facts.j
 picks the right comparison per file and returns the real diff — show it. If
 `suspicious_characters` is true, say so: the terminal may not be rendering what
 the files say.
+
+**Relay `native_hooks` and `local_overrides` if either is non-empty**, before
+the question in item 2:
+
+- `native_hooks` — git hooks *this skill did not install* (`pre-push`,
+  `commit-msg` and friends) that will run during the commit and push you are
+  about to ask about. They execute code that appears in no diff. A repository
+  that arrived with its `.git` intact — a tarball, a zip, a clone of someone
+  else's — can carry them. Name them and say they will run.
+- `local_overrides` — settings in this repository's own config that make git
+  run a program or hand over credentials. Name them too.
+
+Neither is refused: a repo legitimately having its own hooks is ordinary, and
+so is a deploy key. What is not ordinary is finding out afterwards.
 
 Two outcomes skip the rest of Step 5 — go to Step 6 with
 `--choice "not committed"`, no `--hash`, and a `--note` saying which:

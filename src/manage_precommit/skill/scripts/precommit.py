@@ -229,7 +229,7 @@ def walk_repo(directory: str) -> list[str]:
     return found
 
 
-def detect_markers(directory: str) -> tuple[list[Recommendation], list[str]]:
+def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], list[str]]:
     """Which catalog entries the repo's contents call for, and the file that says so.
 
     The `reason` is always a path that was actually seen, never a category. A
@@ -237,12 +237,14 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str]]:
     """
     paths = walk_repo(directory)
     markers: list[str] = []
+    trigger_paths: list[str] = []
     recs: list[Recommendation] = []
 
     markdown = [p for p in paths if p.lower().endswith((".md", ".markdown"))]
     if markdown:
-        recs.append({"name": "markdownlint", "reason": markdown[0]})
-        markers.append(f"markdown ({markdown[0]})")
+        recs.append({"name": "markdownlint", "reason": clean(markdown[0])})
+        markers.append(f"markdown ({clean(markdown[0])})")
+        trigger_paths.append(markdown[0])
         for rel in markdown[:MAX_MERMAID_PROBES]:
             # Through the same guarded reader as everything else. walk_repo
             # lists symlinks (git tracks them as ordinary blobs), so a tracked
@@ -257,14 +259,15 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str]]:
                 continue
             text = raw.decode("utf-8", "replace")
             if MERMAID_FENCE.search(text):
-                recs.append({"name": "mermaid", "reason": rel})
-                markers.append(f"mermaid fence ({rel})")
+                recs.append({"name": "mermaid", "reason": clean(rel)})
+                markers.append(f"mermaid fence ({clean(rel)})")
+                trigger_paths.append(rel)
                 break
 
     # Offered for every repo: a secret scan is not conditional on what the tree
     # happens to contain today.
     recs.append({"name": "gitleaks", "reason": "any repo -- secret scan"})
-    return recs, markers
+    return recs, markers, trigger_paths
 
 
 # -- config helpers ----------------------------------------------------------
@@ -807,15 +810,32 @@ def cmd_detect(directory: str) -> int:
     if cfg is None:
         emit({"config": "none", "repos": [], "present": []})
         return 0
-    repos = [{"repo": e.url, "rev": e.rev, "hooks": [h.id for h in e.hooks]} for e in cfg.repos]
-    emit({"config": "existing", "repos": repos, "present": present_keys(cfg)})
+    # Every one of these comes from the target repo's own config and is relayed
+    # straight to the agent, and from there to the user, before summary.py ever
+    # sees it. describe() and render() already clean their equivalents.
+    repos = [
+        {
+            "repo": clean(e.url),
+            "rev": clean(e.rev) if e.rev else None,
+            "hooks": [clean(h.id) for h in e.hooks],
+        }
+        for e in cfg.repos
+    ]
+    emit(
+        {
+            "config": "existing",
+            "repos": repos,
+            "present": present_keys(cfg),
+            "suspicious_characters": has_suspicious_chars(cfg.text),
+        }
+    )
     return 0
 
 
 def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     cfg = read_config(directory)
     previous = present_keys(cfg)
-    recs, markers = detect_markers(directory)
+    recs, markers, trigger_paths = detect_markers(directory)
     recs = [r for r in recs if r["name"] not in previous]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
         r["name"] for r in recs if r["name"] not in ALWAYS_ON
@@ -825,7 +845,12 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         # recommended, with the file that triggered each. cmd_generate merges
         # into this rather than replacing it.
         facts: Facts = {
-            "scan": {"detected": markers},
+            # `detected` is prose for a human to read; `detected_paths` is the
+            # bare list for anything that has to be passed to a command. One
+            # field cannot be both, and asking the caller to parse the path back
+            # out of "markdown (README.md)" is the re-derive-by-eye this design
+            # exists to prevent.
+            "scan": {"detected": markers, "detected_paths": trigger_paths},
             "hooks": {"recommended": recs},
         }
         write_json_or_die(facts_out, dict(facts), die)
@@ -836,6 +861,7 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
             "previous": previous,
             "proposed": proposed,
             "detected": markers,
+            "detected_paths": trigger_paths,
             "prev_repos": len(cfg.repos) if cfg else 0,
             "config": "existing" if cfg else "none",
         }
@@ -919,12 +945,24 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if rc != 0:
         die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
 
+    files = list(args.files)
+    if args.files_file:
+        # Repo filenames are arbitrary: git permits quotes, `$`, backticks and
+        # semicolons in a path. They must not be typed into the command the
+        # agent runs, for the same reason catalog keys, remote names and commit
+        # messages all go through files.
+        if files:
+            die("pass --files or --files-file, not both")
+        listed = read_bytes_or_die(args.files_file, die).decode("utf-8", "replace")
+        files = [ln.strip() for ln in listed.splitlines() if ln.strip()]
+        if not files:
+            die(f"no paths in {args.files_file}")
     before = dirty_paths(directory)
     # `--` and a per-value check: these come from the caller, and pre-commit
     # reads a leading dash as one of its own options. Without this a value like
     # "--hook-stage" silently changes what the run does, inside a step whose
     # whole point is that the user approved its scope.
-    for name in args.files:
+    for name in files:
         refuse_option_like(name, "file", die)
         # And inside the repo. pre-commit resolves these against cwd, so an
         # absolute path or a ../ traversal points the autofixing hooks at a
@@ -933,8 +971,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         resolved = os.path.realpath(os.path.join(directory, name))
         root = os.path.realpath(directory)
         if resolved != root and not resolved.startswith(root + os.sep):
-            die(f"--files {name!r} resolves outside the repository; refusing to check it")
-    run_args = ["run", "--files", "--", *args.files] if args.files else ["run", "--all-files"]
+            die(f"{name!r} resolves outside the repository; refusing to check it")
+    run_args = ["run", "--files", "--", *files] if files else ["run", "--all-files"]
     rc, output = run_precommit(directory, *run_args)
     autofixed: list[str] = []
 
@@ -959,7 +997,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         summary = (
             f"passed, but {', '.join(unchecked)} had no files to check -- "
             "a hook this run added was never exercised. Re-run naming files it "
-            "matches (the paths in scan.detected are the ones that triggered it)."
+            "matches -- scan.detected_paths holds exactly those."
         )
     elif rc == 0 and autofixed:
         summary = f"passed on the second run; hooks autofixed {len(autofixed)} file(s)"
@@ -1028,6 +1066,10 @@ def main() -> int:
     ap.add_argument("--facts-out", help="write the run's facts JSON here")
     ap.add_argument("--facts", help="the run's facts JSON, to record into")
     ap.add_argument("--files", nargs="*", default=[], help="verify: check these paths explicitly")
+    ap.add_argument(
+        "--files-file",
+        help="verify: read the paths to check from this file, one per line",
+    )
     args = ap.parse_args()
 
     if args.catalog:

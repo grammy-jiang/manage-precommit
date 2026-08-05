@@ -261,6 +261,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         {
             "is_repo": True,
             "files": paths,
+            "native_hooks": native_hooks(repo),
+            "local_overrides": risky_local_config(repo),
             "states": states,
             "diff_commands": commands,
             "diff": diff,
@@ -329,9 +331,44 @@ RISKY_LOCAL_CONFIG = {
     "core.sshcommand": "core.sshCommand",  # runs a program on ssh:// transports
     "core.gitproxy": "core.gitProxy",  # ditto for git://
     "credential.helper": "credential.helper",  # receives the real push credentials
+    "core.hookspath": "core.hooksPath",  # redirects hook lookup to tracked files
     "http.proxy": "http.proxy",
     "https.proxy": "https.proxy",
 }
+
+# Hook types git runs during this tool's own commit and push. `pre-commit`
+# is excluded: installing and running it is the whole point of the skill, and
+# the one this run put there is the user's own.
+NATIVE_HOOK_TYPES = (
+    "pre-push",
+    "commit-msg",
+    "prepare-commit-msg",
+    "post-commit",
+    "pre-merge-commit",
+)
+
+
+def native_hooks(repo: str) -> list[str]:
+    """Executable hooks git will run that this skill did not install.
+
+    make_git deliberately leaves hooks enabled -- a repository's hooks are part
+    of how its owner wants commits made, and disabling them would mean the
+    commit bypassed the very pre-commit hook this run just installed. But a
+    checkout that arrived with .git intact (a tarball, a zip, a clone of a
+    poisoned repo) can carry a pre-push or commit-msg hook that runs during
+    OUR commit and push, appears in no diff, and was never reviewed. Reported
+    so it can be weighed, for the same reason as risky_local_config.
+    """
+    rc, hooks_dir, _ = git(repo, "rev-parse", "--git-path", "hooks")
+    if rc != 0 or not hooks_dir:
+        return []
+    base = hooks_dir if os.path.isabs(hooks_dir) else os.path.join(repo, hooks_dir)
+    found = []
+    for name in NATIVE_HOOK_TYPES:
+        path = os.path.join(base, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            found.append(name)
+    return found
 
 
 def risky_local_config(repo: str) -> list[str]:
@@ -673,6 +710,7 @@ def push_plan(repo: str) -> PushPlan:
             "remotes": remotes,
             "remote_urls": urls,
             "local_overrides": risky_local_config(repo),
+            "native_hooks": native_hooks(repo),
             "remote": remote,  # null => the caller must ask which one
             # Remote and branch names are repo-controlled and are about to be
             # shown as a push destination, so flag them like any other display
@@ -715,6 +753,7 @@ def push_plan(repo: str) -> PushPlan:
         # Read BEFORE the fetch below would have used them, so the report is
         # about the config that was in force.
         "local_overrides": overrides,
+        "native_hooks": native_hooks(repo),
     }
     if behind == 0:
         base["action"] = "stop-up-to-date" if ahead == 0 else "fast-forward"

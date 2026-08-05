@@ -340,3 +340,33 @@ def test_an_ordinary_config_still_scans():
     """The guard above must not fire on \n or \r\n."""
     assert C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n").repos
     assert C.scan("repos:\r\n  - repo: local\r\n    hooks:\r\n      - id: a\r\n").repos
+
+
+def test_a_folded_continuation_that_looks_like_nesting_is_still_refused():
+    """repo:/rev:/id: always carry an inline scalar, so nothing can nest under
+    them -- a deeper following line is a continuation whatever it looks like.
+    Exempting one that parsed as `key: value` let the truncation this guard
+    exists to prevent straight through."""
+    with pytest.raises(C.ConfigRefused, match="continues onto the next line"):
+        C.scan("repos:\n  - repo: https://x/foo\n      note: something\n")
+
+
+def test_a_folded_continuation_shaped_like_a_sequence_item_is_refused():
+    with pytest.raises(C.ConfigRefused, match="continues onto the next line"):
+        C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n          - b\n")
+
+
+def test_an_empty_block_form_repos_key_scans():
+    """Distinct from `repos: []`: a block-form key with no items at all. Never
+    constructed by a fixture, but it feeds plan()'s fallback indents."""
+    cfg = C.scan("repos:\n")
+    assert cfg.repos == []
+    assert cfg.repos_seq_indent is None
+    assert cfg.repos_end is None
+    assert cfg.empty_repos is False
+
+
+def test_a_repos_key_followed_by_another_top_key_scans():
+    cfg = C.scan("repos:\nexclude: 'x'\n")
+    assert cfg.repos == []
+    assert set(cfg.top_keys) == {"repos", "exclude"}

@@ -325,7 +325,18 @@ def make_git(
         # outcome. That matters more here than in most tools: this skill's whole
         # subject is the repo's pre-commit hooks.
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        hardening = ["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user"]
+        hardening = [
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "protocol.file.allow=user",
+            # core.fsmonitor runs a program on the FIRST `git status` this tool
+            # makes, before any question has been asked. Cleared rather than
+            # reported: git falls back to its own implementation, so nothing
+            # legitimate is lost.
+            "-c",
+            "core.fsmonitor=",
+        ]
         if isolated:
             # For a lookup that is purely about a hardcoded upstream URL and has
             # nothing to do with the repository being configured. Local config is
@@ -338,9 +349,19 @@ def make_git(
             # inside any repository.
             env["GIT_CONFIG_NOSYSTEM"] = "1"
             env["GIT_CONFIG_GLOBAL"] = os.devnull
+        # diff.external gets a flag, not a `-c`. Setting it empty does NOT
+        # disable it: git then tries to EXEC the empty string and every diff
+        # dies with "cannot run :". `--no-ext-diff` is the mechanism that works,
+        # and being per-subcommand it is injected here so no call site has to
+        # remember it. It matters because an external differ produces the very
+        # diff the user approves in Step 5 -- it can fabricate one outright,
+        # which inspecting the output afterwards could never detect.
+        argv = list(args)
+        if argv and argv[0] in ("diff", "show", "log", "format-patch"):
+            argv.insert(1, "--no-ext-diff")
         try:
             proc = subprocess.run(
-                ["git", "-C", repo, *hardening, *args],
+                ["git", "-C", repo, *hardening, *argv],
                 env=env,
                 input=stdin,
                 capture_output=True,
@@ -378,7 +399,8 @@ class ScanFacts(TypedDict, total=False):
     git_repo: bool
     config: str  # existing | fresh | none
     prev_repos: int
-    detected: list[str]
+    detected: list[str]  # prose for a human: "markdown (README.md)"
+    detected_paths: list[str]  # the bare paths, for anything passed to a command
 
 
 class Recommendation(TypedDict):
@@ -472,6 +494,9 @@ class PushPlan(TypedDict, total=False):
     # Reported with the destination so it is weighed before a push, not found
     # out afterwards; see gitwork.risky_local_config.
     local_overrides: list[str]
+    # Executable git hooks this skill did not install, which run during its own
+    # commit and push. See gitwork.native_hooks.
+    native_hooks: list[str]
     error: str
     destination: str  # where a push would land, name and URL, with no verdict
     guidance: str  # one sentence to tell the user; see gitwork.ACTION_GUIDANCE

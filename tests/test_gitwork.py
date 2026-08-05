@@ -1005,3 +1005,136 @@ def test_the_destination_is_offered_without_the_verdict(repo, remote, written, t
     assert "nothing to push" not in got["destination"]
     assert "origin/main" in got["destination"]
     assert str(remote) in got["destination"]
+
+
+def test_the_undo_hint_fits_a_first_commit(tmp_path, keys_file, facts_path, stubs):
+    """`<ref>^` does not exist for a first commit -- and setting up pre-commit
+    as the first act in a new repo is exactly when the advice matters."""
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    subprocess.run([REAL_GIT, "init", "-q", "-b", "main", str(fresh)], check=True)
+    for key, value in (("user.email", "t@example.invalid"), ("user.name", "Test")):
+        subprocess.run([REAL_GIT, "-C", str(fresh), "config", key, value], check=True)
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(fresh),
+        "--templates-file",
+        str(keys_file("hygiene")),
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    (fresh / "sneaky.txt").write_text("not ours\n")
+    install_hook(fresh, f"{REAL_GIT} add sneaky.txt\nexit 0\n")
+    got = out_json(commit(fresh, facts_path, tmp_path))
+    assert got["verdict"] == "touched-extra-files"
+    assert "update-ref -d HEAD" in got["remedy"], got["remedy"]
+
+
+def test_several_remotes_with_origin_settles_on_origin(repo, written, tmp_path):
+    """The fork case -- origin plus upstream -- short-circuits neither arm the
+    other two tests cover."""
+    for name in ("origin", "upstream"):
+        bare = tmp_path / f"{name}3.git"
+        subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+        subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", name, str(bare)], check=True)
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] == "no-upstream"
+    assert got["remote"] == "origin"
+    assert got["permits_push"] is True
+
+
+def test_a_staged_managed_file_reads_as_staged(repo, written, tmp_path):
+    commit(repo, written, tmp_path)
+    path = repo / ".pre-commit-config.yaml"
+    path.write_text(path.read_text() + "# staged edit\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", ".pre-commit-config.yaml"], check=True)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["states"][".pre-commit-config.yaml"] == "staged"
+
+
+def test_staged_plus_a_further_edit_still_reads_as_staged(repo, written, tmp_path):
+    """The documented MM case: reported as staged so the diff shown is the one
+    that would be committed."""
+    commit(repo, written, tmp_path)
+    path = repo / ".pre-commit-config.yaml"
+    path.write_text(path.read_text() + "# staged edit\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", ".pre-commit-config.yaml"], check=True)
+    path.write_text(path.read_text() + "# and an unstaged one\n")
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["states"][".pre-commit-config.yaml"] == "staged"
+
+
+def test_hooks_this_skill_did_not_install_are_reported(repo, written, tmp_path):
+    """They run during our own commit and push and appear in no diff."""
+    for name in ("pre-push", "commit-msg"):
+        h = repo / ".git" / "hooks" / name
+        h.write_text("#!/bin/sh\nexit 0\n")
+        h.chmod(0o755)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["native_hooks"] == ["pre-push", "commit-msg"]
+
+
+def test_the_installed_pre_commit_hook_is_not_reported_as_foreign(repo, written):
+    """It is the one this skill puts there; flagging it would be noise."""
+    h = repo / ".git" / "hooks" / "pre-commit"
+    h.write_text("#!/bin/sh\nexit 0\n")
+    h.chmod(0o755)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["native_hooks"] == []
+
+
+def test_an_external_differ_cannot_produce_the_reviewed_diff(repo, written, tmp_path):
+    """diff.external replaces the diff the user approves, so it could fabricate
+    one outright -- which checking the output afterwards would never catch."""
+    subprocess.run([REAL_GIT, "-C", str(repo), "config", "diff.external", "/bin/false"], check=True)
+    commit(repo, written, tmp_path)
+    path = repo / ".pre-commit-config.yaml"
+    path.write_text(path.read_text() + "# a real edit\n")
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert "# a real edit" in got["diff"], "the hostile differ produced the reviewed diff"
+
+
+def test_a_hostile_fsmonitor_never_runs(repo, written, tmp_path):
+    """core.fsmonitor fires on the FIRST git status this tool makes, before any
+    question has been asked.
+
+    The assertion is on a marker the hook would leave behind, not on stderr:
+    git prints its complaint but still exits 0, and gitwork swallows git's
+    stderr on success -- so an stderr assertion could never observe this.
+    What matters is whether the program ran at all.
+    """
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\n: > {marker}\nexit 0\n")
+    hook.chmod(0o755)
+    subprocess.run([REAL_GIT, "-C", str(repo), "config", "core.fsmonitor", str(hook)], check=True)
+
+    proc = run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written))
+    assert proc.returncode == 0, proc.stderr
+    assert not marker.exists(), "core.fsmonitor executed a program"
+
+
+def test_the_fsmonitor_marker_test_can_actually_fail(repo, tmp_path):
+    """The control for the test above: without the hardening, git really does
+    run it -- otherwise that assertion would prove nothing."""
+    marker = tmp_path / "control-ran"
+    hook = tmp_path / "control.sh"
+    hook.write_text(f"#!/bin/sh\n: > {marker}\nexit 0\n")
+    hook.chmod(0o755)
+    subprocess.run([REAL_GIT, "-C", str(repo), "config", "core.fsmonitor", str(hook)], check=True)
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "status", "--porcelain"], capture_output=True, check=False
+    )
+    assert marker.exists(), "plain git did not invoke core.fsmonitor on this version"
+
+
+def test_hooks_path_is_reported_as_a_local_override(repo, remote, written, tmp_path):
+    subprocess.run([REAL_GIT, "-C", str(repo), "config", "core.hooksPath", ".ci/hooks"], check=True)
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert "core.hooksPath" in got["local_overrides"]

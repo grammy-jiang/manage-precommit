@@ -392,11 +392,13 @@ def _refuse_multiline_scalar(
     nxt = _next_content(lines, at + 1)
     if nxt is None or _indent_of(lines[nxt]) <= key_indent:
         return
-    follower = lines[nxt].strip()
-    # A deeper line that is itself a mapping entry or a sequence item is
-    # ordinary nesting. Anything else at that depth is a folded continuation.
-    if follower.startswith(("- ", "-")) or _split_key(follower) is not None:
-        return
+    # No exemption for a deeper line that happens to parse as `key: value` or a
+    # sequence item. These three keys always carry an inline scalar, so nothing
+    # can legitimately nest under them -- a deeper line is a folded continuation
+    # whatever it looks like, and `repo: https://x/foo` followed by an indented
+    # `note: something` folds into the url exactly as any other continuation
+    # would. Exempting it let the truncation this function exists to prevent
+    # straight through.
     raise ConfigRefused(
         f"`{what}:` continues onto the next line; this tool reads single-line values",
         nxt + 1,

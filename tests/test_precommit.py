@@ -861,3 +861,117 @@ def test_generate_records_which_added_hooks_are_file_scoped(repo, keys_file, fac
     hooks = json.loads(facts_path.read_text())["hooks"]
     assert "trailing-whitespace" in hooks["added_ids"]
     assert hooks["scoped_ids"] == ["markdownlint-cli2"]
+
+
+def test_vendored_content_does_not_drive_the_recommendation(repo, stubs):
+    """SKIP_DIRS exists so a vendored .md cannot decide what this repo needs."""
+    for skipped in ("node_modules/pkg", ".venv/lib", "vendor/dep"):
+        d = repo / skipped
+        d.mkdir(parents=True)
+        (d / "README.md").write_text("# vendored\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "README.md").unlink()
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    names = {r["name"] for r in got["recommended"]}
+    assert "markdownlint" not in names
+    assert "mermaid" not in names
+    assert got["detected"] == []
+
+
+def test_a_top_level_markdown_file_still_drives_it(repo, stubs):
+    """The companion to the exclusion above: it must not exclude everything."""
+    (repo / "doc.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    names = {r["name"] for r in got["recommended"]}
+    assert {"markdownlint", "mermaid"} <= names
+
+
+def test_recommend_reports_bare_paths_alongside_the_prose(repo, stubs, facts_path):
+    """`detected` is for a human; `detected_paths` is what can be passed to a
+    command. Passing the prose made pre-commit look for a file called
+    "markdown (README.md)" and quietly check nothing."""
+    (repo / "doc.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    got = out_json(
+        run(
+            "precommit.py",
+            "--dir",
+            str(repo),
+            "--recommend",
+            "--facts-out",
+            str(facts_path),
+            stubs=stubs,
+        )
+    )
+    assert any("(" in m for m in got["detected"]), "detected should stay human-readable"
+    assert all("(" not in p for p in got["detected_paths"])
+    assert set(got["detected_paths"]) <= {"README.md", "doc.md"}
+    for path in got["detected_paths"]:
+        assert (repo / path).exists()
+    assert json.loads(facts_path.read_text())["scan"]["detected_paths"] == got["detected_paths"]
+
+
+def test_verify_reads_the_file_list_from_a_file(repo, keys_file, facts_path, stubs, tmp_path):
+    """Repo filenames can carry backticks and semicolons, so they must not be
+    typed into the command the agent runs."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    listing = tmp_path / "paths.txt"
+    listing.write_text(".pre-commit-config.yaml\nREADME.md\n")
+    fake = tmp_path / "logargs2"
+    fake.mkdir()
+    log = fake / "argv.log"
+    pc_stub = fake / "pre-commit"
+    pc_stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{log}"\n'
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        'echo "trailing-whitespace......Passed"\n'
+        "exit 0\n"
+    )
+    pc_stub.chmod(0o755)
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files-file",
+        str(listing),
+        stubs=fake,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "run --files -- .pre-commit-config.yaml README.md" in log.read_text()
+
+
+def test_files_and_files_file_are_mutually_exclusive(repo, keys_file, facts_path, stubs, tmp_path):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    listing = tmp_path / "p.txt"
+    listing.write_text("README.md\n")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files",
+        "README.md",
+        "--files-file",
+        str(listing),
+        stubs=stubs,
+    )
+    assert proc.returncode != 0
+    assert "not both" in proc.stderr
+
+
+def test_detect_neutralises_what_it_relays(repo, stubs):
+    """Step 0 relays this JSON straight to the user, before summary.py ever
+    sanitises anything."""
+    bidi = chr(0x202E)
+    (repo / ".pre-commit-config.yaml").write_text(
+        f"repos:\n  - repo: 'local{bidi}'\n    hooks:\n      - id: 'x{bidi}y'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    blob = json.dumps(got)
+    assert bidi not in blob, "a text-reordering character reached the relayed JSON"
+    assert got["suspicious_characters"] is True
