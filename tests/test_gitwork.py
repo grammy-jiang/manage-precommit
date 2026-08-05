@@ -954,3 +954,54 @@ def test_the_net_diffstat_survives_the_documented_no_hash_path(repo, written, tm
     run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written))
     net = json.loads(written.read_text())["net"]
     assert "files changed" in net["diffstat"], net
+
+
+def test_the_shown_destination_is_the_url_git_will_actually_use(repo, written, tmp_path):
+    """A literal read of remote.<name>.url does not apply url.insteadOf, so the
+    consent line could name a repository the push never reaches."""
+    real = tmp_path / "real.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(real)], check=True)
+    decoy = f"{tmp_path}/decoy/"
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "remote", "add", "origin", f"{decoy}real.git"], check=True
+    )
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", f"url.{tmp_path}/.insteadOf", decoy], check=True
+    )
+    commit(repo, written, tmp_path)
+
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    url = got["remote_urls"]["origin"]
+    assert "decoy" not in url, f"showed the unrewritten URL: {url}"
+    assert str(real) in url
+
+
+def test_local_config_that_can_run_a_program_is_surfaced(repo, remote, written, tmp_path):
+    """core.sshCommand and credential.helper are settable in a checked-out
+    repo's own config and are not covered by the protocol.* hardening."""
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "core.sshCommand", "/tmp/anything"], check=True
+    )
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "credential.helper", "/tmp/grab"], check=True
+    )
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["local_overrides"] == ["core.sshCommand", "credential.helper"]
+
+
+def test_an_ordinary_repo_reports_no_local_overrides(repo, remote, written, tmp_path):
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["local_overrides"] == []
+
+
+def test_the_destination_is_offered_without_the_verdict(repo, remote, written, tmp_path):
+    """Before a commit exists a synced branch's guidance reads "nothing to
+    push", which must not be what the agent quotes beside Commit + push."""
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] == "stop-up-to-date"
+    assert "nothing to push" in got["guidance"]
+    assert "nothing to push" not in got["destination"]
+    assert "origin/main" in got["destination"]
+    assert str(remote) in got["destination"]

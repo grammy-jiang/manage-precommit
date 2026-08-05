@@ -100,6 +100,13 @@ anything is written, so a missing `npm` means none of the other selected hooks
 get written either. Also say the hook downloads a headless Chromium the first
 time it runs (large, one-off) unless one is already reusable.
 
+**This applies whenever `mermaid` ends up in the final selection**, including
+when the user types it into "Other" after seeing `--catalog`. The catalog line
+says only "needs node + a browser"; it carries no live check and no warning
+that a missing `npm` voids every other hook they chose. Run the check and say
+all of it before accepting the selection, not only when you were the one
+offering it.
+
 The final list is `always_on` plus whatever the user selected. **Write it to a
 file with the Write tool**, **one name per line**, at a `mktemp` path outside
 the repo — free-text names must never reach a command line, for the same reason
@@ -173,9 +180,11 @@ AskUserQuestion: **Run the hooks over all files** / **Only this run's files** /
 - *Skip* — nothing is installed and nothing is checked. `pre-commit install`,
   which writes `.git/hooks/pre-commit`, runs only inside this step, so skipping
   it leaves the config written and **no hook active**: the next `git commit`
-  triggers nothing. Say exactly that, go to Step 5, and record
-  `--note "verification skipped; git hook not installed"`. They can install it
-  later by re-running this step, or by hand with `pre-commit install`.
+  triggers nothing. Say exactly that, then continue to Step 5 as normal; when
+  you reach Step 6, add `--note "verification skipped; git hook not installed"`
+  to the `gitwork.py facts` call — `--note` is a Step 6 flag and no Step 5
+  subcommand accepts it. They can install it later by re-running this step, or
+  by hand with `pre-commit install`.
 
 ```bash
 python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify --facts "<facts.json>"
@@ -197,10 +206,19 @@ verbatim and stop.
 
   ```bash
   python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify \
-    --facts "<facts.json>" --files <the setup files> <other files to check>
+    --facts "<facts.json>" --files <files.written> <scan.detected paths>
   ```
 
-  Say which form produced the result you report.
+  Pass `files.written` **and** every path in `scan.detected` — those are the
+  files that caused each hook to be recommended, so they are the ones that
+  exercise it. Say which form produced the result you report.
+
+- `unchecked` non-empty — the run was green overall but a hook *this run added*
+  reported it had no files to check. `--all-files` covering the whole repo is
+  not enough on its own: hygiene's hooks match anything and turn the run green
+  while `markdownlint` or `mermaid`, added because a `.md` was detected, sat
+  idle. Re-run with `--files` as above and confirm `unchecked` comes back
+  empty; it is not a pass until it does.
 - `autofixed` non-empty — the autofixing hooks (trailing-whitespace,
   end-of-file-fixer, mixed-line-ending) rewrote files and exited non-zero on the
   first run; the tool re-ran once and a clean second pass is the success. Those
@@ -273,9 +291,15 @@ change and not an intention:
   python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
   ```
 
-  Say its `guidance` sentence — it already names the destination *and its URL*,
-  because a remote's nickname says nothing about where code goes. If
-  `suspicious_characters` is true, say that too.
+  Say its **`destination`** — name and URL, because a remote's nickname says
+  nothing about where code goes. Quote `destination`, not `guidance`: before a
+  commit exists a synced branch's guidance literally reads "nothing to push",
+  which is the misleading prediction the next paragraph forbids, and putting it
+  beside a live *Commit + push* option is exactly the confusion to avoid. If
+  `suspicious_characters` is true, say that too. If `local_overrides` is
+  non-empty, name those settings: this repository's own config sets something
+  that makes git run a program or hand over credentials on a push, and the user
+  should weigh that before approving one.
 
   **This plan describes the state before the commit exists.** On a branch level
   with its upstream it returns `stop-up-to-date` — "nothing to push" — which

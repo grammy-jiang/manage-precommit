@@ -68,6 +68,22 @@ Pass the `upstream_sha` **from the plan the user actually saw**. If you re-run
 - exit 4 with no `error` — `--confirm-force` was not passed at all, which is the
   refusal working. Ask first.
 
+## On "Skip push"
+
+Nothing is pushed and nothing is lost — the commit stays local and the remote
+keeps the commits a force would have dropped. Say that plainly, then go to
+Step 6 and record why, so the summary does not simply read `commit only` with
+no explanation:
+
+```bash
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.json>" \
+  --note "push declined: a force-push would have dropped <N> remote commit(s)"
+```
+
+Do not pass `--choice`; with a commit recorded and no push, the tool already
+derives `commit only`. The `--note` is what says it was a decision rather than
+a failure.
+
 ## Never
 
 - Never pass `--confirm-force` on your own initiative, or because a previous

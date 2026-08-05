@@ -82,6 +82,10 @@ CATALOG: dict[str, dict] = {
         "fragment": "markdownlint.yaml",
         "rev_repo": "https://github.com/DavidAnson/markdownlint-cli2",
         "assets": [("markdownlint.yaml", ".markdownlint.yaml")],
+        # Scoped by a `files:` filter, so "no files to check" means the run was
+        # not given a file it matches -- unlike hygiene's hooks, which match
+        # anything and are legitimately quiet in a repo with none of that type.
+        "file_scoped": True,
         "desc": "Markdown linter (config: .markdownlint.yaml)",
     },
     "mermaid": {
@@ -89,6 +93,7 @@ CATALOG: dict[str, dict] = {
         "rev_repo": None,
         "npm": "@mermaid-js/mermaid-cli",
         "assets": [("lint-mermaid.mjs", "scripts/lint-mermaid.mjs")],
+        "file_scoped": True,
         "desc": "Mermaid diagram validator (local hook; needs node + a browser)",
     },
     "gitleaks": {
@@ -705,6 +710,26 @@ def cmd_generate(args: argparse.Namespace) -> int:
         {"path": rel, "sha256": sha256_of(os.path.join(directory, rel))} for rel in written
     ]
 
+    # Exact, and free: the difference between what the file held before and what
+    # it holds now. Re-reading the fragments would fetch every pinned version a
+    # second time.
+    before_ids = {h.id for e in (existing.repos if existing else []) for h in e.hooks}
+    added_ids = sorted({h.id for e in after.repos for h in e.hooks} - before_ids)
+    # Of those, the ones that are scoped by a `files:` filter. A hygiene hook
+    # reporting "no files to check" is ordinary -- there is simply no JSON in
+    # the repo. A markdownlint or mermaid hook doing it means the .md that
+    # caused it to be recommended never reached the run.
+    scoped_ids = sorted(
+        {
+            hook.id
+            for key in keys
+            if CATALOG[key].get("file_scoped")
+            for entry in after.repos
+            if entry.url == (CATALOG[key].get("rev_repo") or "local")
+            for hook in entry.hooks
+        }
+        & set(added_ids)
+    )
     added = [text for tag, text in report if tag == "added"]
     left = [text for tag, text in report if tag == "kept"]
     needs_manual = [text for tag, text in report if tag == "needs-manual"]
@@ -718,6 +743,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
             "added": added,
             "left_as_is": left,
             "needs_manual": needs_manual,
+            # The hook ids this run put in the file, and the subset of those
+            # whose silence would mean they were never exercised.
+            "added_ids": added_ids,
+            "scoped_ids": scoped_ids,
             "versions": versions,
         },
         "files": {"written": written, "kept": kept},
@@ -837,6 +866,22 @@ def run_precommit(directory: str, *args: str) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
+def skipped_hooks(output: str) -> list[str]:
+    r"""Hooks that ran but reported they had no files to check.
+
+    is_vacuous() is all-or-nothing: one hook with something to do flips it off.
+    But hygiene's hooks match any file, so they alone turn a run green while
+    markdownlint and mermaid -- filtered to `\.(md|markdown)$`, and added
+    precisely because a .md was detected -- are still checking nothing. That is
+    a partial vacuity the whole-output verdict cannot express.
+    """
+    names = []
+    for line in output.splitlines():
+        if HOOK_RESULT_LINE.search(line) and SKIPPED_NO_FILES.search(line):
+            names.append(re.split(r"\.{3,}", line, maxsplit=1)[0].strip())
+    return names
+
+
 def is_vacuous(output: str) -> bool:
     """True when every hook that ran reported it had nothing to check.
 
@@ -869,6 +914,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     """
     directory = args.dir
     refuse_facts_inside_repo(directory, args.facts, die)
+    existing_facts = load_facts_if_present(args.facts) if args.facts else {}
     rc, install_out = run_precommit(directory, "install")
     if rc != 0:
         die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
@@ -897,12 +943,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
         rc, output = run_precommit(directory, *run_args)
 
     vacuous = is_vacuous(output)
-    run_ok = rc == 0 and not vacuous
+    skipped = skipped_hooks(output)
+    # Which hook ids this run actually put in the config; anything of ours that
+    # reported no files was not exercised, however green the run looks.
+    scoped_ids = set((existing_facts.get("hooks") or {}).get("scoped_ids") or [])
+    unchecked = sorted(name for name in skipped if name in scoped_ids)
+    run_ok = rc == 0 and not vacuous and not unchecked
     if vacuous:
         summary = (
             "vacuous pass -- every hook reported (no files to check). --all-files covers "
             "only tracked files, so nothing was actually checked; re-run naming the paths "
             "explicitly with --files."
+        )
+    elif unchecked:
+        summary = (
+            f"passed, but {', '.join(unchecked)} had no files to check -- "
+            "a hook this run added was never exercised. Re-run naming files it "
+            "matches (the paths in scan.detected are the ones that triggered it)."
         )
     elif rc == 0 and autofixed:
         summary = f"passed on the second run; hooks autofixed {len(autofixed)} file(s)"
@@ -937,6 +994,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "run_ok": run_ok,
             "vacuous": vacuous,
             "autofixed": autofixed,
+            "unchecked": unchecked,
         }
         write_json_or_die(args.facts, facts, die)
 
@@ -949,6 +1007,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "run_ok": run_ok,
             "vacuous": vacuous,
             "autofixed": autofixed,
+            "unchecked": unchecked,
+            "skipped": skipped,
             "exit": rc,
         }
     )

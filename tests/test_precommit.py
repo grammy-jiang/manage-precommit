@@ -797,3 +797,67 @@ def test_an_asset_destination_that_escapes_the_repo_is_refused(tmp_path):
     with pytest.raises(SystemExit) as exc:
         precommit.refuse_path_escaping_repo(str(repo), "../../escaped.mjs")
     assert exc.value.code != 0
+
+
+# -- guards added after round 6 of the reviewer panel -------------------------
+
+
+def _pre_commit_stub(tmp_path, name, lines, exit_code=0):
+    d = tmp_path / name
+    d.mkdir()
+    exe = d / "pre-commit"
+    body = "".join(f'echo "{ln}"\n' for ln in lines)
+    exe.write_text(f'#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n{body}exit {exit_code}\n')
+    exe.chmod(0o755)
+    return d
+
+
+def test_a_green_run_is_not_a_pass_if_a_file_scoped_hook_saw_nothing(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """is_vacuous is all-or-nothing, so hygiene's hooks alone flip a run green
+    while markdownlint -- added because a .md was detected -- sat idle."""
+    (repo / "doc.md").write_text("# hi\n")
+    generate(repo, keys_file, facts_path, stubs, "hygiene", "markdownlint")
+    fake = _pre_commit_stub(
+        tmp_path,
+        "partial",
+        [
+            "trailing-whitespace..............................Passed",
+            "markdownlint-cli2....(no files to check) Skipped",
+        ],
+    )
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert got["vacuous"] is False, "one hook did run, so the whole output is not vacuous"
+    assert got["unchecked"] == ["markdownlint-cli2"]
+    assert got["run_ok"] is False
+    assert "never exercised" in got["run"]
+
+
+def test_a_quiet_hygiene_hook_is_not_a_coverage_gap(repo, keys_file, facts_path, stubs, tmp_path):
+    """check-json having nothing to do in a repo with no JSON is ordinary --
+    flagging it would make almost every run non-green."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = _pre_commit_stub(
+        tmp_path,
+        "quiet",
+        [
+            "trailing-whitespace..............................Passed",
+            "check-json...........(no files to check) Skipped",
+        ],
+    )
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert got["unchecked"] == []
+    assert got["run_ok"] is True
+
+
+def test_generate_records_which_added_hooks_are_file_scoped(repo, keys_file, facts_path, stubs):
+    (repo / "doc.md").write_text("# hi\n")
+    generate(repo, keys_file, facts_path, stubs, "hygiene", "markdownlint")
+    hooks = json.loads(facts_path.read_text())["hooks"]
+    assert "trailing-whitespace" in hooks["added_ids"]
+    assert hooks["scoped_ids"] == ["markdownlint-cli2"]

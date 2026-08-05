@@ -304,16 +304,54 @@ def undo_hint(repo: str, ref: str = "HEAD") -> str:
 
 
 def remote_push_url(repo: str, name: str) -> str:
-    """Where `git push <name>` actually goes.
+    """Where `git push <name>` actually goes, as git resolves it.
 
-    pushurl when set, else url: git lets them differ, and showing the fetch URL
-    would have the user approve a destination the push never reaches.
+    `git remote get-url --push` rather than reading remote.<name>.pushurl/url
+    directly, because a literal config read does NOT apply url.<base>.insteadOf
+    or pushInsteadOf. Those rewrite the real transport target at push time
+    without touching remote.<name>.url -- so the raw value can name a repository
+    the push never reaches, and the whole consent step (and push-safety.md's
+    force-push flow) rests on this line being where the code actually goes.
     """
-    rc, pushurl, _ = git(repo, "config", "--get", f"remote.{name}.pushurl")
-    if rc == 0 and pushurl:
-        return pushurl
-    _, url, _ = git(repo, "config", "--get", f"remote.{name}.url")
-    return url
+    rc, url, _ = git(repo, "remote", "get-url", "--push", safe_token(name, "remote"))
+    if rc == 0 and url:
+        return url
+    rc, url, _ = git(repo, "remote", "get-url", safe_token(name, "remote"))
+    return url if rc == 0 else ""
+
+
+# Local config that makes git run a program, or hand credentials to one. Every
+# one of these is settable in a checked-out repository's own .git/config, which
+# make_git already treats as attacker-reachable for URLs.
+# git lower-cases key names when it lists them, so the lookup is lower-case and
+# the value is the spelling a human would search for.
+RISKY_LOCAL_CONFIG = {
+    "core.sshcommand": "core.sshCommand",  # runs a program on ssh:// transports
+    "core.gitproxy": "core.gitProxy",  # ditto for git://
+    "credential.helper": "credential.helper",  # receives the real push credentials
+    "http.proxy": "http.proxy",
+    "https.proxy": "https.proxy",
+}
+
+
+def risky_local_config(repo: str) -> list[str]:
+    """Which of RISKY_LOCAL_CONFIG this repository sets at LOCAL scope.
+
+    Reported rather than refused: a deploy key set through core.sshCommand is
+    an ordinary thing for a repository to do, and refusing would break it. What
+    is not ordinary is finding out afterwards -- so this is surfaced with the
+    destination, before the push is approved.
+    """
+    rc, out, _ = git(repo, "config", "--local", "--name-only", "--list")
+    if rc != 0:
+        return []
+    return sorted(
+        {
+            RISKY_LOCAL_CONFIG[key]
+            for k in out.splitlines()
+            if (key := k.strip().lower()) in RISKY_LOCAL_CONFIG
+        }
+    )
 
 
 def safe_merge_ref(ref: str) -> str:
@@ -598,7 +636,14 @@ def destination(plan: PushPlan) -> str:
 def describe(plan: PushPlan) -> PushPlan:
     """Annotate a plan with the sentence to say and whether a push can happen."""
     action = str(plan.get("action", ""))
-    plan["guidance"] = ACTION_GUIDANCE.get(action, action).format(dest=destination(plan))
+    dest = destination(plan)
+    # Exposed separately from `guidance` because the two answer different
+    # questions. Before a commit exists, a synced branch's guidance reads
+    # "nothing to push" -- true of the moment, misleading beside a live
+    # Commit + push option -- while the destination is a fact either way. The
+    # caller quoting one should not have to strip a clause out of the other.
+    plan["destination"] = dest
+    plan["guidance"] = ACTION_GUIDANCE.get(action, action).format(dest=dest)
     plan["permits_push"] = action in PUSH_PERMITTED
     return plan
 
@@ -627,6 +672,7 @@ def push_plan(repo: str) -> PushPlan:
             "branch": branch,
             "remotes": remotes,
             "remote_urls": urls,
+            "local_overrides": risky_local_config(repo),
             "remote": remote,  # null => the caller must ask which one
             # Remote and branch names are repo-controlled and are about to be
             # shown as a push destination, so flag them like any other display
@@ -636,6 +682,7 @@ def push_plan(repo: str) -> PushPlan:
 
     # Upstream exists: refresh, then read ahead/behind. A failed fetch means the
     # comparison would be against stale data, so it is a hard stop.
+    overrides = risky_local_config(repo)
     rc, _, err = git(repo, "fetch")
     if rc != 0:
         return {"action": "stop-fetch-failed", "branch": branch, "error": err}
@@ -665,6 +712,9 @@ def push_plan(repo: str) -> PushPlan:
         "upstream_sha": upstream_sha,
         "ahead": ahead,
         "behind": behind,
+        # Read BEFORE the fetch below would have used them, so the report is
+        # about the config that was in force.
+        "local_overrides": overrides,
     }
     if behind == 0:
         base["action"] = "stop-up-to-date" if ahead == 0 else "fast-forward"

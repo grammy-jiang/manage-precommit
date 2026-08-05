@@ -388,6 +388,8 @@ class Recommendation(TypedDict):
 
 class HooksFacts(TypedDict, total=False):
     added: list[str]
+    added_ids: list[str]  # the hook ids this run put in the config
+    scoped_ids: list[str]  # of those, the ones with a `files:` filter
     left_as_is: list[str]
     # An entry whose `hooks:` list is a shape the writer cannot extend. The
     # user has to add those hooks by hand, so the summary has to say so --
@@ -416,6 +418,9 @@ class VerifyFacts(TypedDict, total=False):
     run_ok: bool
     vacuous: bool
     autofixed: list[str]
+    # Hooks this run ADDED that reported no files to check. A run can be green
+    # overall while these were never exercised -- see precommit.skipped_hooks.
+    unchecked: list[str]
 
 
 class PushFacts(TypedDict, total=False):
@@ -463,7 +468,12 @@ class PushPlan(TypedDict, total=False):
     would_drop: list[str]
     would_add: list[str]
     suspicious_characters: bool
+    # Local git config that can run a program or receive push credentials.
+    # Reported with the destination so it is weighed before a push, not found
+    # out afterwards; see gitwork.risky_local_config.
+    local_overrides: list[str]
     error: str
+    destination: str  # where a push would land, name and URL, with no verdict
     guidance: str  # one sentence to tell the user; see gitwork.ACTION_GUIDANCE
     permits_push: bool  # whether `push` will attempt anything at all
 

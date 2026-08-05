@@ -17,7 +17,8 @@ SCAN
 
 HOOKS
   added        https://github.com/gitleaks/gitleaks: added (rev v8.30.1), local: added (mermaid-lint)
-  left as-is   https://github.com/adrienverge/yamllint: already present (rev v1.38.0)
+  left as-is   https://github.com/pre-commit/pre-commit-hooks: already present (rev v6.0.0),
+               https://github.com/adrienverge/yamllint: already present (rev v1.38.0)
   recommended  markdownlint  <- README.md
                gitleaks  <- any repo -- secret scan
   versions     gitleaks=v8.30.1, mermaid=11.16.0
