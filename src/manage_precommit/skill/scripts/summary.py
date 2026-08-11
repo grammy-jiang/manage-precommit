@@ -220,6 +220,10 @@ def render(facts: dict, pal: Pal) -> str:
                     "add by hand",
                     names(hooks["needs_manual"], pal, "rem") if hooks.get("needs_manual") else None,
                 ),
+                (
+                    "present but off",
+                    names(hooks["disabled"], pal, "rem") if hooks.get("disabled") else None,
+                ),
                 ("recommended", rec_value),
                 ("versions", ver_value),
             ],
@@ -257,6 +261,13 @@ def render(facts: dict, pal: Pal) -> str:
             "VERIFY",
             [
                 ("install", clean(verify["install"]) if verify.get("install") else None),
+                (
+                    "scope",
+                    {
+                        "all-files": "every tracked file",
+                        "these-files": "only this run's files -- says nothing about the rest",
+                    }.get(str(verify.get("scope"))),
+                ),
                 ("run", run_value),
                 (
                     "unchecked",
@@ -320,7 +331,10 @@ def main() -> int:
             print(f"summary: cannot read {args.facts}: {exc}", file=sys.stderr)
             return 1
     else:
-        raw = sys.stdin.read()
+        # Explicit, like every other read of this JSON. Relying on the locale's
+        # text decoding raises an uncaught UnicodeDecodeError in a non-UTF-8
+        # locale, or silently mangles non-ASCII.
+        raw = sys.stdin.buffer.read().decode("utf-8", "replace")
     try:
         facts = json.loads(raw)
     except json.JSONDecodeError as exc:

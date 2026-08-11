@@ -235,6 +235,24 @@ def write_json(path: str, payload: dict) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
 
 
+def read_json_or_die(path: str, die: Callable[[str], NoReturn]) -> dict:
+    """Read the facts JSON, or stop with the caller's die().
+
+    The tools' cross-boundary handshake, and it was implemented three times --
+    twice in one file, three lines apart -- with identical wording. Anything
+    that ever needs to change about how this file is read (BOM tolerance,
+    naming the offending key) has to be changeable in one place.
+    """
+    raw = read_bytes_or_die(path, die)
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        die(f"cannot read facts file {path}: {exc}")
+    if not isinstance(parsed, dict):
+        die("facts file must contain a JSON object")
+    return parsed
+
+
 def write_json_or_die(path: str, payload: dict, die: Callable[[str], NoReturn]) -> None:
     """write_json with the failure turned into a caller's die().
 
@@ -443,6 +461,7 @@ class Recommendation(TypedDict):
 class HooksFacts(TypedDict, total=False):
     added: list[str]
     selected: list[str]  # the catalog keys the user actually chose
+    disabled: list[str]  # present catalog entries that look like they never fire
     added_ids: list[str]  # the hook ids this run put in the config
     scoped_ids: list[str]  # of those, the ones with a `files:` filter
     left_as_is: list[str]
@@ -468,6 +487,7 @@ class VerifyFacts(TypedDict, total=False):
     command exits 0 -- a pass that tested nothing.
     """
 
+    scope: str  # all-files | these-files -- what "passed" actually covers
     install: str
     run: str
     run_ok: bool

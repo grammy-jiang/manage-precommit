@@ -1445,3 +1445,91 @@ def test_generate_records_which_keys_were_selected(repo, keys_file, facts_path, 
     assert hooks["selected"] == ["hygiene", "gitleaks"]
     # markdownlint was recommended by the scan and not chosen.
     assert "markdownlint" not in hooks["selected"]
+
+
+# -- guards added after round 14 of the reviewer panel ------------------------
+
+
+def test_verify_without_facts_is_refused(repo, keys_file, facts_path, stubs):
+    """Without facts there are no scoped_ids, so `unchecked` is always empty and
+    a run whose new hooks saw nothing still reports run_ok -- and the whole
+    VERIFY section never reaches the summary."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    proc = run("precommit.py", "--dir", str(repo), "--verify", stubs=stubs)
+    assert proc.returncode != 0
+    assert "--verify needs --facts" in proc.stderr
+
+
+def test_stages_exclusion_is_not_overridden_by_always_run(repo, stubs):
+    """The order of the two checks is deliberate: always_run makes a hook fire
+    whatever `files:` says, but it cannot put it back on a stage it was
+    excluded from. Swapping the blocks passed every earlier test."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        stages: [manual]\n"
+        "        always_run: true\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+def test_a_hostile_rev_cannot_forge_the_relayed_report(repo, keys_file, facts_path, stubs):
+    """The rev: scalar comes from the target repo's own config, and Step 3 tells
+    the agent to relay this report verbatim -- before summary.py, which cleans,
+    ever runs."""
+    bidi = chr(0x202E)
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n"
+        f"    rev: 'v8.0.0{bidi}forged'\n    hooks:\n      - id: gitleaks\n"
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    assert bidi not in proc.stderr, "a text-reordering character reached the relayed report"
+    assert bidi not in json.dumps(out_json(proc))
+
+
+def test_the_verify_scope_is_recorded(repo, keys_file, facts_path, stubs, tmp_path):
+    """ "passed" means two very different things depending on what ran."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = _pre_commit_stub(tmp_path, "scoped", ["trailing-whitespace......Passed"])
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert got["scope"] == "all-files"
+    assert json.loads(facts_path.read_text())["verify"]["scope"] == "all-files"
+
+    listing = tmp_path / "paths.txt"
+    listing.write_text(".pre-commit-config.yaml\n")
+    got = out_json(
+        run(
+            "precommit.py",
+            "--dir",
+            str(repo),
+            "--verify",
+            "--facts",
+            str(facts_path),
+            "--files-file",
+            str(listing),
+            stubs=fake,
+        )
+    )
+    assert got["scope"] == "these-files"
+
+
+def test_a_disabled_entry_reaches_the_facts(repo, facts_path, stubs):
+    """It was reported live and then forgotten, so the durable summary said
+    nothing about a secret scanner configured never to run."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        stages: [manual]\n"
+    )
+    run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--recommend",
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    assert json.loads(facts_path.read_text())["hooks"]["disabled"] == ["gitleaks"]

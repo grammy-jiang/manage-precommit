@@ -242,3 +242,21 @@ def test_a_declined_recommendation_says_so():
     assert "(declined)" in line
     gitleaks_line = next(ln for ln in text.splitlines() if "gitleaks" in ln and "<-" in ln)
     assert "(declined)" not in gitleaks_line
+
+
+def test_a_present_but_disabled_entry_is_shown():
+    facts = json.loads(json.dumps(FULL))
+    facts["hooks"]["disabled"] = ["gitleaks"]
+    text = render(facts)
+    assert "present but off" in text
+    assert "gitleaks" in text
+
+
+def test_the_verify_scope_qualifies_what_passed():
+    narrow = json.loads(json.dumps(FULL))
+    narrow["verify"]["scope"] = "these-files"
+    assert "says nothing about the rest" in render(narrow)
+
+    wide = json.loads(json.dumps(FULL))
+    wide["verify"]["scope"] = "all-files"
+    assert "every tracked file" in render(wide)

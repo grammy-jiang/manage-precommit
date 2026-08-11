@@ -51,6 +51,7 @@ from shared import (
     porcelain_path,
     read_bytes_nofollow,
     read_bytes_or_die,
+    read_json_or_die,
     refuse_facts_inside_repo,
     refuse_option_like,
     write_json_or_die,
@@ -102,18 +103,9 @@ def has_commits(repo: str) -> bool:
 
 # -- the managed set ---------------------------------------------------------
 def load_facts(path: str) -> Facts:
-    # Through the same no-follow reader as every other file: a facts path is
-    # caller-supplied, so it can be a symlink or a FIFO just as easily.
-    raw = read_bytes_or_die(path, die)
-    try:
-        facts = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        die(f"cannot read facts file {path}: {exc}")
-    if not isinstance(facts, dict):
-        die("facts file must contain a JSON object")
     # The file was written by these same tools, so its shape is Facts; json.load
     # simply cannot say so. Every read site still uses .get() with a default.
-    return cast("Facts", facts)
+    return cast("Facts", read_json_or_die(path, die))
 
 
 def save_facts(path: str, facts: Facts) -> None:
@@ -340,11 +332,16 @@ def remote_push_url(repo: str, name: str) -> str:
     the push never reaches, and the whole consent step (and push-safety.md's
     force-push flow) rests on this line being where the code actually goes.
     """
-    rc, url, _ = git(repo, "remote", "get-url", "--push", safe_token(name, "remote"))
-    if rc == 0 and url:
-        return url
-    rc, url, _ = git(repo, "remote", "get-url", safe_token(name, "remote"))
-    return url if rc == 0 else ""
+    # --all: remote.<name>.pushurl can be set more than once and `git push`
+    # sends the ref update to EVERY one of them, force included. Reading only
+    # the first showed the operator one destination for a push that reaches
+    # several -- and .git/config is the surface this docstring already calls
+    # attacker-reachable.
+    rc, urls, _ = git(repo, "remote", "get-url", "--push", "--all", safe_token(name, "remote"))
+    if rc == 0 and urls:
+        return ", ".join(clean(u) for u in urls.splitlines() if u.strip())
+    rc, urls, _ = git(repo, "remote", "get-url", "--all", safe_token(name, "remote"))
+    return ", ".join(clean(u) for u in urls.splitlines() if u.strip()) if rc == 0 else ""
 
 
 # Local config that makes git run a program, or hand credentials to one. Every

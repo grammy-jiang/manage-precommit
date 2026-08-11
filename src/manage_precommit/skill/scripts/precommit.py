@@ -51,6 +51,7 @@ from shared import (
     preserved_mode,
     read_bytes_nofollow,
     read_bytes_or_die,
+    read_json_or_die,
     refuse_facts_inside_repo,
     refuse_option_like,
     write_json_or_die,
@@ -595,14 +596,19 @@ def plan(
                 else ""
             )
             report.append(
-                ("kept", f"{entry.url}: already present (rev {existing.rev or '?'}){note}")
+                (
+                    "kept",
+                    f"{clean(entry.url)}: already present "
+                    f"(rev {clean(existing.rev) if existing.rev else '?'}){note}",
+                )
             )
             continue
         if not existing.hooks or existing.hook_item_indent is None:
             report.append(
                 (
                     "needs-manual",
-                    f"{entry.url}: present (rev {existing.rev or '?'}) but its `hooks:` "
+                    f"{clean(entry.url)}: present "
+                    f"(rev {clean(existing.rev) if existing.rev else '?'}) but its `hooks:` "
                     f"list is not a shape this tool can extend -- "
                     f"add {', '.join(missing)} by hand",
                 )
@@ -618,7 +624,8 @@ def plan(
         report.append(
             (
                 "added",
-                f"{entry.url}: present (rev {existing.rev or '?'}) -- added hooks "
+                f"{clean(entry.url)}: present "
+                f"(rev {clean(existing.rev) if existing.rev else '?'}) -- added hooks "
                 f"{', '.join(missing)}",
             )
         )
@@ -743,18 +750,7 @@ def load_facts_if_present(path: str) -> dict:
     """
     if not os.path.lexists(path):
         return {}
-    # Strict UTF-8, like the other two readers of this same file. Decoding
-    # with errors="replace" here meant one step silently mangled a facts file
-    # the next two would loudly refuse -- pure drift, with nothing to justify
-    # the difference.
-    raw = read_bytes_or_die(path, die)
-    try:
-        existing = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        die(f"cannot read facts file {path}: {exc}")
-    if not isinstance(existing, dict):
-        die("facts file must contain a JSON object")
-    return existing
+    return read_json_or_die(path, die)
 
 
 def sha256_of(path: str) -> str:
@@ -1043,7 +1039,10 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
             # out of "markdown (README.md)" is the re-derive-by-eye this design
             # exists to prevent.
             "scan": {"detected": markers, "detected_paths": trigger_paths},
-            "hooks": {"recommended": recs},
+            # `disabled` too: a catalog entry that is present but never fires is
+            # exactly what a later reader of the summary needs to know, and it
+            # was being said once, in the moment, and then forgotten.
+            "hooks": {"recommended": recs, "disabled": sorted(disabled)},
         }
         write_json_or_die(facts_out, dict(facts), die)
     emit(
@@ -1215,15 +1214,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         summary = f"failed (exit {rc})"
 
     if args.facts:
-        raw = read_bytes_or_die(args.facts, die)
-        try:
-            facts = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            # The decode belongs inside the try: a non-UTF-8 facts file is a
-            # bad input, not a crash. gitwork.load_facts already does this.
-            die(f"cannot read facts file {args.facts}: {exc}")
-        if not isinstance(facts, dict):
-            die("facts file must contain a JSON object")
+        facts = read_json_or_die(args.facts, die)
         # The autofixing hooks act on whole-file content, so this run's OWN
         # files can be among what they just rewrote -- and then the commit
         # gate, which compares against the sha256 Step 3 recorded, refuses a
@@ -1237,6 +1228,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             if os.path.isfile(full) and not os.path.islink(full):
                 entry["sha256"] = sha256_of(full)
         facts["verify"] = {
+            "scope": "these-files" if files else "all-files",
             "install": "git hook installed",
             "run": summary,
             "run_ok": run_ok,
@@ -1257,6 +1249,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "autofixed": autofixed,
             "unchecked": unchecked,
             "skipped": skipped,
+            "scope": "these-files" if files else "all-files",
             "exit": rc,
         }
     )
@@ -1292,6 +1285,13 @@ def main() -> int:
         refuse_facts_inside_repo(args.dir, args.facts_out, die)
         return cmd_recommend(args.dir, args.facts_out)
     if args.verify:
+        if not args.facts:
+            # Without it there are no scoped_ids, so `unchecked` is always empty
+            # and a run whose new hooks saw nothing still reports run_ok -- and
+            # the VERIFY section never reaches the summary at all. Every gitwork
+            # subcommand that needs facts declares it required; this one only
+            # behaved as though it did not.
+            die("--verify needs --facts: without it nothing can be checked or recorded")
         return cmd_verify(args)
     return cmd_generate(args)
 

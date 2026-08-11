@@ -1352,3 +1352,92 @@ def test_an_ordinary_upstream_ref_passes(ok):
     import gitwork
 
     assert gitwork.safe_merge_ref(ok) == ok
+
+
+@pytest.mark.parametrize("flag", ["--facts", "--message-file"])
+def test_commit_refuses_a_symlinked_input(repo, written, tmp_path, flag):
+    """gitwork is the script that commits and pushes, and its three file inputs
+    had no end-to-end symlink test -- a regression to plain open() at any of
+    them would have passed the whole suite."""
+    secret = tmp_path / "secret"
+    secret.write_text("id_rsa\n")
+    link = tmp_path / f"link-{flag.strip('-')}"
+    link.symlink_to(secret)
+    args = {"--facts": str(written), "--message-file": str(msgfile(tmp_path))}
+    args[flag] = str(link)
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        args["--message-file"],
+        "--facts",
+        args["--facts"],
+    )
+    assert proc.returncode != 0
+    assert "symlink" in proc.stderr
+
+
+def test_push_refuses_a_symlinked_remote_file(repo, written, tmp_path):
+    secret = tmp_path / "secret2"
+    secret.write_text("origin\n")
+    link = tmp_path / "remote-link.txt"
+    link.symlink_to(secret)
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "push",
+        "--remote-file",
+        str(link),
+        "--facts",
+        str(written),
+    )
+    assert proc.returncode != 0
+    assert "symlink" in proc.stderr
+
+
+def test_an_undeterminable_hook_listing_is_not_reported_as_none(repo, written, tmp_path):
+    """The sibling disclosure has this test; this one did not, so reverting its
+    guard to `return []` would have passed."""
+    fake = tmp_path / "nohooksdir"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--git-path" ] && [ "$a" = "hooks" ]; then exit 128; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    got = out_json(
+        run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written), stubs=fake)
+    )
+    assert got["native_hooks"], "a failed check came back as nothing to disclose"
+    assert "could not determine" in got["native_hooks"][0]
+
+
+def test_every_push_url_is_disclosed(repo, written, tmp_path):
+    """remote.<name>.pushurl can be set more than once and git push sends the
+    ref update to every one -- force included."""
+    first = tmp_path / "one.git"
+    second = tmp_path / "two.git"
+    for bare in (first, second):
+        subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", "origin", str(first)], check=True)
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "--add", "remote.origin.pushurl", str(first)],
+        check=True,
+    )
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "--add", "remote.origin.pushurl", str(second)],
+        check=True,
+    )
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    shown = got["remote_urls"]["origin"]
+    assert str(first) in shown and str(second) in shown, shown
