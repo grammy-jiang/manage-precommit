@@ -50,6 +50,16 @@ dev = [
     # somebody decides to move it, not when PyPI publishes.
     "ruff==0.16.1",
     "mypy>=1.8",
+    # Test-only, both of them. SKILL.md's frontmatter is a contract with any
+    # host that reads the Agent Skills format, and those hosts parse it with a
+    # real YAML parser -- so the test that holds it to the spec parses it the
+    # same way. The skill itself still imports nothing outside the standard
+    # library; tests/test_shared.py enforces that separately.
+    "pyyaml>=6.0",
+    "types-PyYAML>=6.0",
+    # tests/test_packaging.py builds a wheel and reads what came out, so the
+    # build backend is declared rather than assumed to be lying around.
+    "build>=1.0",
 ]
 
 # The one job that cannot be done from inside the skill directory: putting the
