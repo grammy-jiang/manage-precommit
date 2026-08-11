@@ -1,4 +1,4 @@
-.PHONY: help test coverage lint format typecheck verify install uninstall clean
+.PHONY: help test coverage lint format typecheck verify build install uninstall clean
 
 # Overridable so the targets work from a bare checkout, a venv, or CI without
 # each caller having to know which interpreter is on PATH.
@@ -12,6 +12,7 @@ help:
 	@echo "typecheck   mypy"
 	@echo "verify      lint + typecheck + test  (run before shipping a change)"
 	@echo "coverage    the same suite under coverage"
+	@echo "build       sdist + wheel into dist/"
 	@echo "install     symlink the skill from this checkout into ~/.claude/skills/"
 	@echo "uninstall   remove that symlink again"
 
@@ -42,6 +43,11 @@ format:
 
 typecheck:
 	$(PYTHON) -m mypy
+
+# tests/test_packaging.py builds one too, and opens it. This is for looking at
+# the artifact by hand.
+build:
+	$(PYTHON) -m build
 
 verify: lint typecheck test
 

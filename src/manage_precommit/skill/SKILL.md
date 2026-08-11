@@ -1,11 +1,11 @@
 ---
 name: manage-precommit
 description: Set up or update a repository's pre-commit hooks from a curated catalog (base hygiene, yamllint, markdownlint, a bundled mermaid-diagram validator, gitleaks), pinning the latest versions and merging into any existing .pre-commit-config.yaml without clobbering the user's own hooks, revs, or comments. Then install, test, review the diff, and — with confirmation — commit and push only the pre-commit files. Use when the user asks to add, set up, configure, refresh, or update pre-commit hooks / a .pre-commit-config.yaml, add a linter/formatter/secret-scan/markdown/mermaid/yaml check, or "set up pre-commit".
-allowed-tools:
-  - Read
-  - Write
-  - Bash
-  - AskUserQuestion
+license: MIT
+compatibility: Needs python3 3.10 or newer, plus git and pre-commit on PATH; the mermaid entry additionally needs node and npm. Writes only the pre-commit setup files of the repository it is pointed at, plus temporary files outside it. Runs in any agent that reads the Agent Skills format, though the questions it asks need a host that can ask them.
+allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Bash(command:*) Read Write AskUserQuestion
+metadata:
+  homepage: https://github.com/grammy-jiang/manage-precommit
 ---
 
 # manage-precommit
