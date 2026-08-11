@@ -254,10 +254,19 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
     recs: list[Recommendation] = []
 
     markdown = [p for p in paths if p.lower().endswith((".md", ".markdown"))]
+    # The FIRST one that is a real regular file, not simply the first one. This
+    # path goes into trigger_paths, which SKILL.md writes to a file and passes
+    # as `--files-file` -- so `pre-commit run --files` points the autofixing
+    # hooks at it. A tracked `notes.md -> ~/.ssh/id_rsa` picked as the trigger
+    # gets that file rewritten, and gitleaks reads and prints it. The mermaid
+    # probe below already refuses to READ through a symlink; naming one as the
+    # target was the same threat with the guard missing.
+    safe_markdown = [p for p in markdown if not os.path.islink(os.path.join(directory, p))]
+    if safe_markdown:
+        recs.append({"name": "markdownlint", "reason": clean(safe_markdown[0])})
+        markers.append(f"markdown ({clean(safe_markdown[0])})")
+        trigger_paths.append(safe_markdown[0])
     if markdown:
-        recs.append({"name": "markdownlint", "reason": clean(markdown[0])})
-        markers.append(f"markdown ({clean(markdown[0])})")
-        trigger_paths.append(markdown[0])
         for rel in markdown[:MAX_MERMAID_PROBES]:
             # Through the same guarded reader as everything else. walk_repo
             # lists symlinks (git tracks them as ordinary blobs), so a tracked
@@ -361,13 +370,25 @@ def looks_disabled(hook: cfgmod.Hook) -> str | None:
 
 
 def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
-    """Present hooks for `key` carrying something that stops them running."""
-    url = CATALOG[key].get("rev_repo") or "local"
+    """Present hooks for `key` carrying something that stops them running.
+
+    For a catalog entry identified by hook id rather than repo URL -- mermaid is
+    the only one -- the id must be matched too. `repo: local` is a bucket
+    anybody's hooks can sit in, so matching the URL alone attributed every
+    disabled local hook in the file to mermaid. That is the mirror image of the
+    false-coverage bug this function exists to catch: instead of calling a dead
+    hook live, it calls somebody else's dead hook ours.
+    """
+    meta = CATALOG[key]
+    url = meta.get("rev_repo") or "local"
+    wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
     out = []
     for entry in cfg.repos:
         if entry.url != url:
             continue
         for hook in entry.hooks:
+            if wanted_id is not None and hook.id != wanted_id:
+                continue
             why = looks_disabled(hook)
             if why:
                 out.append(f"{clean(hook.id)} ({clean(why)})")
@@ -1004,6 +1025,10 @@ def cmd_detect(directory: str) -> int:
             "repos": repos,
             "present": present_keys(cfg),
             "exclude": exclude_pattern(cfg),
+            # Not refused -- a local hook repo is a real workflow -- but never
+            # again carried across in silence: whatever pre-commit clones from
+            # here comes off this disk, not from a named host.
+            "local_repo_sources": [clean(u) for u in cfgmod.local_repo_sources(cfg)],
             "suspicious_characters": has_suspicious_chars(cfg.text),
         }
     )
@@ -1047,6 +1072,7 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         "recommended": recs,
         "previous": previous,
         "disabled": disabled,
+        "local_repo_sources": [clean(u) for u in cfgmod.local_repo_sources(cfg)] if cfg else [],
         "proposed": proposed,
         "detected": markers,
         "detected_paths": trigger_paths,

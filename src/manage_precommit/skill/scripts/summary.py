@@ -122,9 +122,21 @@ def names(items: object, pal: Pal, kind: str | None = None) -> str:
 
 
 def color_diffstat(text: object, pal: Pal) -> str:
+    """Colour the counts in a diffstat line.
+
+    Targeted at the shapes gitwork.diffstat actually produces, which is the
+    whole point: it colours git's summary line
+
+        1 file changed, 4 insertions(+), 2 deletions(-)
+
+    and the hand-built "N new file(s), M lines" for an untracked write. The
+    original patterns looked for `+12` / `-3` -- a sign immediately before the
+    digits -- and neither shape has ever contained one, so the feature was dead
+    on every real invocation while looking implemented.
+    """
     out = clean(text)
-    out = re.sub(r"\+\d+", lambda m: pal.add(m.group()), out)
-    out = re.sub(r"(?<!\w)-\d+", lambda m: pal.rem(m.group()), out)
+    out = re.sub(r"\d+(?= insertion| new file| line)", lambda m: pal.add(m.group()), out)
+    out = re.sub(r"\d+(?= deletion)", lambda m: pal.rem(m.group()), out)
     return out
 
 

@@ -1671,3 +1671,66 @@ def test_a_broad_exclude_is_reported_with_its_pattern(repo, keys_file, facts_pat
     assert proc.returncode == 0, proc.stderr
     assert "pattern: .*" in proc.stderr
     assert "EVERY hook" in proc.stderr
+
+
+# -- round 16 ----------------------------------------------------------------
+
+
+def test_an_unrelated_local_hook_is_not_attributed_to_mermaid(repo, stubs):
+    """`repo: local` is a bucket anybody's hooks sit in. Matching the URL alone
+    reported every disabled local hook as mermaid's -- the mirror of the
+    false-coverage bug: instead of calling a dead hook live, it calls somebody
+    else's dead hook ours."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "      - id: my-custom-hook\n        name: my-custom-hook\n"
+        "        entry: ./x.sh\n        language: script\n        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" not in got["disabled"], got["disabled"]
+
+
+def test_a_disabled_mermaid_hook_is_still_attributed_to_mermaid(repo, stubs):
+    """The narrowing must not silence the real case."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["disabled"], got["disabled"]
+
+
+def test_a_symlinked_markdown_file_is_not_named_as_the_lint_target(repo, stubs, tmp_path):
+    """trigger_paths is written to a file and passed as --files-file, so
+    `pre-commit run --files` points the autofixing hooks at whatever is named --
+    and gitleaks reads and prints it. The mermaid probe already refuses to READ
+    through a symlink; naming one as the target was the same threat unguarded."""
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY\n")
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    # The ONLY markdown in the tree, so the outcome does not depend on walk
+    # order: unguarded it is necessarily the chosen trigger.
+    (repo / "notes.md").symlink_to(secret)
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "notes.md" not in got["detected_paths"], got["detected_paths"]
+    assert "markdownlint" not in [r["name"] for r in got["recommended"]], got["recommended"]
+
+
+def test_a_repo_cloned_off_this_disk_is_disclosed(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: file:///tmp/hooks\n    rev: v1\n    hooks:\n      - id: a\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert got["local_repo_sources"] == ["file:///tmp/hooks"]
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["local_repo_sources"] == ["file:///tmp/hooks"]

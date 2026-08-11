@@ -586,7 +586,12 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # stay aligned and ln[3:] really is the path on every line. --no-renames
     # keeps every line "XY path"; with renames a line reads "R  old -> new" and
     # the comparison would miss.
-    _, all_status, _ = git(repo, "status", "--porcelain", "--no-renames", strip=False)
+    # Through safe_porcelain like every sibling call: a failed check here used
+    # to come back as "" and so as ZERO untouched files, and SKILL.md Step 5
+    # makes this load-bearing ("say what else this run touched ... otherwise the
+    # user finds out from the summary, after the fact"). Silence is the one
+    # answer that must not be produced by an error.
+    all_status = safe_porcelain(git, repo, (), die, what="what else this commit left untouched")
     untouched = [ln for ln in all_status.splitlines() if porcelain_path(ln) not in set(paths)]
 
     # The blob id of exactly the bytes just verified, taken before staging; each

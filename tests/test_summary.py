@@ -382,3 +382,21 @@ def test_an_unreadable_facts_path_fails_loudly(tmp_path):
     proc = run_script("summary.py", str(tmp_path / "never-written.json"))
     assert proc.returncode == 1
     assert "cannot read" in proc.stderr
+
+
+def test_the_diffstat_counts_are_actually_coloured():
+    """The old patterns looked for `+12` / `-3` -- a sign immediately before the
+    digits -- and neither shape gitwork produces has ever contained one, so the
+    feature was dead on every real invocation while looking implemented."""
+    pal = summary.Pal(True)
+    coloured = summary.color_diffstat("1 file changed, 4 insertions(+), 2 deletions(-)", pal)
+    assert "\033[32m4\033[0m" in coloured, coloured
+    assert "\033[31m2\033[0m" in coloured, coloured
+
+    fresh = summary.color_diffstat("2 new file(s), 30 lines", pal)
+    assert "\033[32m2\033[0m" in fresh and "\033[32m30\033[0m" in fresh, fresh
+
+
+def test_colour_off_leaves_the_diffstat_alone():
+    plain = "1 file changed, 4 insertions(+), 2 deletions(-)"
+    assert summary.color_diffstat(plain, summary.Pal(False)) == plain

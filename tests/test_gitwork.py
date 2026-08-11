@@ -1595,3 +1595,46 @@ def test_committed_filenames_are_cleaned_before_they_are_shown(repo, written, tm
     assert "notes" in proc.stderr, "the offending file was not even named"
     assert bidi not in proc.stderr, "a text-reordering character reached the refusal"
     assert bidi not in proc.stdout
+
+
+# -- round 16 ----------------------------------------------------------------
+
+
+def test_a_failed_status_during_commit_is_not_reported_as_nothing_untouched(
+    repo, written, tmp_path
+):
+    """SKILL.md Step 5 makes this load-bearing: "say what else this run touched
+    ... otherwise the user finds out from the summary, after the fact." A failed
+    check used to come back as "" and so as ZERO untouched files. Silence is the
+    one answer that must not be produced by an error."""
+    fake = tmp_path / "failstatus"
+    fake.mkdir()
+    g = fake / "git"
+    # Fails the repo-wide `status` (no pathspec) that builds the untouched list,
+    # and forwards everything else -- including the `status ... -- <paths>` form
+    # the managed-file check uses -- to the real binary.
+    g.write_text(
+        "#!/bin/sh\n"
+        "wide=0\n"
+        'for a in "$@"; do\n'
+        '  [ "$a" = "status" ] && wide=1\n'
+        '  [ "$a" = "--" ] && wide=0\n'
+        "done\n"
+        'if [ "$wide" = "1" ]; then echo "fatal: index file corrupt" >&2; exit 128; fi\n'
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        str(msgfile(tmp_path)),
+        "--facts",
+        str(written),
+        stubs=fake,
+    )
+    assert proc.returncode != 0
+    assert "a failed check is not a clean result" in proc.stderr

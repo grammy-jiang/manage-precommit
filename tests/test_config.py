@@ -550,3 +550,25 @@ def test_top_level_scalar_is_public():
     cfg = C.scan("exclude: '^vendor/'\nrepos:\n  - repo: https://x/y\n    hooks:\n      - id: a\n")
     assert C.top_level_scalar(cfg, "exclude") == "^vendor/"  # unquoted, like every scalar
     assert C.top_level_scalar(cfg, "fail_fast") is None
+
+
+def test_a_local_path_repo_is_disclosed_rather_than_refused():
+    """A bare path and a file:// URL are legitimate -- monorepos do this -- so
+    neither is refused. But neither is a named remote either: what pre-commit
+    clones comes off this disk, and it used to be carried across in total
+    silence while the ext:: shape next door is announced."""
+    cfg = C.scan(
+        "repos:\n"
+        "  - repo: file:///tmp/hooks\n    rev: v1\n    hooks:\n      - id: a\n"
+        "  - repo: ../sibling-hooks\n    rev: v1\n    hooks:\n      - id: b\n"
+        "  - repo: https://github.com/psf/black\n    rev: v1\n    hooks:\n      - id: c\n"
+        "  - repo: local\n    hooks:\n      - id: d\n        name: d\n"
+        "        entry: ./x.sh\n        language: script\n"
+    )
+    assert C.local_repo_sources(cfg) == ["../sibling-hooks", "file:///tmp/hooks"]
+
+
+def test_a_transport_helper_is_still_refused_outright():
+    """Disclosure is for what cannot be adjudicated; `ext::` names a program."""
+    with pytest.raises(C.ConfigRefused, match="transport helper"):
+        C.scan("repos:\n  - repo: ext::sh -c 'id'\n    hooks:\n      - id: a\n")

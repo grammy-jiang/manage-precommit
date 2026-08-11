@@ -96,6 +96,26 @@ def refuse_unsafe_repo(url: str, line_no: int) -> None:
         )
 
 
+def local_repo_sources(cfg: Config) -> list[str]:
+    """`repo:` values that clone from this machine rather than a named host.
+
+    A bare filesystem path and a `file://` URL are both legitimate -- monorepos
+    really do this -- so neither is refused. But neither is a named remote
+    either: the hooks pre-commit ends up running come from somewhere on this
+    disk that a poisoned config could have pre-planted, and until now they were
+    carried across in total silence, while the `ext::` shape next door is
+    announced. Disclosed rather than blocked, which is this repository's
+    standing policy for content it cannot adjudicate.
+    """
+    return sorted(
+        {
+            entry.url
+            for entry in cfg.repos
+            if entry.url not in SPECIAL_REPO_VALUES and not entry.url.startswith(SAFE_REPO_PREFIXES)
+        }
+    )
+
+
 @dataclass
 class Hook:
     """One ``- id: x`` item inside a repo's ``hooks:`` list."""

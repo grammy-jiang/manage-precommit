@@ -226,6 +226,13 @@ happened.
 run's files** / **Skip verification**. Each option has its own command — run the
 one that matches the answer, and nothing else.
 
+Two things belong in the question text itself, not only in the handling below,
+because they are what the answer turns on: the `dirty_elsewhere` files named
+above, and — on the Skip option — that **skipping leaves no git hook installed**,
+so the next `git commit` runs nothing. `pre-commit install` happens only inside
+this step. Someone picking Skip to avoid a slow check is not choosing to leave
+the repo unprotected, and finding that out afterwards is finding out too late.
+
 - *All files* — the full check, and the honest one; autofixes elsewhere are
   reported in Step 5 and never committed by this skill.
 
@@ -364,12 +371,21 @@ change and not an intention:
   second of five — the three items below it are routine mechanics, and burying
   a failing secret scan under them is exactly the outcome the rule exists to
   prevent.
-- **Say what else this run touched.** If Step 4 reported a non-empty
-  `autofixed`, say so plainly *before* asking: "verifying the hooks also
-  modified `<those files>` elsewhere in your tree. This run will not stage or
-  commit them — they are yours to review and commit separately." Without this
-  the user approves a commit believing their tree is as clean as the diff they
-  were shown, and only finds out from the summary, after the fact.
+- **Say what else this run touched — and split the list first.** Step 4's
+  `autofixed` is *everything* the hooks rewrote, not only files outside this
+  run. Partition it against `files.written` + `files.kept`:
+
+  - **This run's own files** (in that set): "the hooks also reformatted
+    `<file>`, one of this run's own files — that is in the diff you saw and it
+    **will** be committed." `--verify` re-hashes the managed files after the
+    run precisely so an autofixed one still passes the commit gate, so saying
+    it will not be committed is simply false.
+  - **Everything else**: "verifying the hooks also modified `<those files>`
+    elsewhere in your tree. This run will not stage or commit them — they are
+    yours to review and commit separately."
+
+  Without this the user approves a commit believing their tree is as clean as
+  the diff they were shown, and only finds out from the summary, after the fact.
 - **Say the files are already written.** *Don't commit* leaves them on disk; it
   does not undo them. `status` returns a `discards` map — the exact command per
   file, derived from the state it reported. Relay those; do not compose them
@@ -412,8 +428,15 @@ STILL FAILING: <hook> — this commit would carry it.
 ```
 
 Nothing goes between that line and the question. If the verify run passed, was
-vacuous, or only autofixed, this line does not appear at all — a marker that
-shows up routinely stops being read.
+vacuous, only autofixed, **or reported `unchecked`**, this line does not appear
+at all — a marker that shows up routinely stops being read.
+
+`unchecked` is the third thing that makes `run_ok` false, and it is not a
+failure: the run passed, but a hook this run just added never saw a file it
+matches. Say that in its own words — "the run passed, but `<hook>` was never
+exercised; nothing here has been checked by it" — and do not dress it as
+STILL FAILING. Reporting a pass as a failure and a non-check as a pass are the
+same mistake in opposite directions.
 
 Then AskUserQuestion — exactly these, never an "also commit other changes"
 option: **Commit + push** / **Commit only** (local) / **Don't commit**.
@@ -443,8 +466,16 @@ run verified*.
 A non-zero exit with no verdict means nothing was committed. The index is as
 you found it **except** in one case, which the tool says out loud: if stderr
 carries `AND the cleanup reset also failed`, this run's files may still be
-staged. Relay that message verbatim, tell the user to check `git status` before
-doing anything else, and stop. Otherwise report the error and stop.
+staged. Relay that message verbatim, and tell the user to check `git status`
+before doing anything else.
+
+Then **go to Step 6 either way**, with `--choice "not committed"` and
+`--note "<the error>"`. This shape — non-zero exit, no JSON — is the same one a
+failed push produces, and §4 already sends that to Step 6; sending this one
+nowhere left the files written, the facts half-recorded, and the `mktemp`
+`facts.json` and message file behind with nothing saying to remove them. A run
+that stops without a summary is the one case where the user gets no account of
+what is now in their tree.
 
 ### 4. Push
 
