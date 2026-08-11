@@ -22,7 +22,7 @@ HOOKS
                skipped by EVERY hook, including the ones just added,
                https://github.com/pre-commit/pre-commit-hooks: already present (rev v6.0.0),
                https://github.com/adrienverge/yamllint: already present (rev v1.38.0)
-  recommended  markdownlint  <- README.md
+  recommended  markdownlint  <- README.md  (declined)
                gitleaks  <- any repo -- secret scan
   versions     hygiene=v6.0.0, yamllint=v1.38.0, gitleaks=v8.30.1, mermaid=11.16.0
 
@@ -60,6 +60,7 @@ NET
 | `VERIFY` | `precommit.py --verify` — `run_ok`, `vacuous` and `autofixed` are its verdict |
 | `COMMIT choice` | derived by `gitwork.py facts` from the recorded hash and push |
 | `COMMIT commit` / `scope` / `push` | `gitwork.py commit` and `push`, from verified state |
+| `(declined)` after a recommendation | it was offered and the user did not select it |
 | `NET diff` | the diffstat of the commit that exists |
 
 Nothing in that table is assembled by the agent. If a number is wrong, the fix
@@ -99,5 +100,8 @@ That is the state a first run lands in when the setup files are still untracked.
   untouched   README.md, a.py, b.py
 ```
 
-The hooks' autofixes routinely touch files elsewhere in the tree. Those are the
-user's to review and commit; this skill never does.
+`untouched` is **every other uncommitted change present when the commit was
+made** — not only files the hooks rewrote. It is an unfiltered `git status` over
+the whole repository, taken just before staging, minus this run's own files. So
+work the user already had in progress appears here alongside any autofixes, and
+both are theirs to review and commit; this skill never does.

@@ -275,10 +275,7 @@ def test_no_arguments_prints_usage_and_fails(capsys):
     assert "manage-precommit install" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    ("command", "script"),
-    [("detect", "precommit.py"), ("commit", "gitwork.py"), ("summary", "summary.py")],
-)
+@pytest.mark.parametrize(("command", "script"), sorted(cli.MOVED_TO_SCRIPTS.items()))
 def test_a_skill_command_says_where_the_work_lives(command, script, capsys):
     """`manage-precommit detect` is the obvious thing to type and has never been
     a command here. "unknown command" would send someone to --help to find out

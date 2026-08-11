@@ -7,6 +7,7 @@ every push goes to a real (local, bare) remote.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 
@@ -1659,3 +1660,93 @@ def test_a_discard_command_is_safe_to_paste():
         G.discards({"a b.txt": "staged"})["a b.txt"]
         == "git restore --staged --worktree -- 'a b.txt'"
     )
+
+
+def test_the_fresh_diffstat_value_is_asserted(repo, written, tmp_path):
+    """The untracked branch ("N new file(s), M lines") ran in the suite but its
+    value was never read -- only that some other field came out right. The line
+    count has a genuine off-by-one in it (a file not ending in a newline still
+    has a last line), so it is worth pinning."""
+    paths = json.loads(written.read_text())["internal"]["managed_files"]
+    expected_lines = 0
+    for entry in paths:
+        body = (repo / entry["path"]).read_bytes()
+        expected_lines += body.count(b"\n") + (1 if body and not body.endswith(b"\n") else 0)
+
+    run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written))
+    stat = json.loads(written.read_text())["net"]["diffstat"]
+    assert stat == f"{len(paths)} new file(s), {expected_lines} lines", stat
+
+
+def test_a_working_tree_file_that_became_unreadable_does_not_fail_the_commit(
+    repo, written, tmp_path
+):
+    """blob_matches_verified compares the COMMITTED object first; if that
+    matches, a working-tree read that then fails is a race, not a mismatch --
+    the commit is already correct.
+
+    This pins the OUTCOME (a commit whose object is right is still accepted when
+    the working-tree copy has since become unreadable) but not the branch: every
+    way of making read_bytes_nofollow fail from the CLI also makes the earlier
+    `git hash-object` fail, which short-circuits first. Mutating the `except
+    OSError` does not fail this test. Recorded rather than dressed up.
+    """
+    commit(repo, written, tmp_path)
+    managed = json.loads(written.read_text())["internal"]["managed_files"]
+    target = repo / managed[0]["path"]
+    target.unlink()
+    target.symlink_to(repo / "does-not-exist")  # O_NOFOLLOW refuses, hash-object still matches
+
+    proc = run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written), "--hash", "HEAD")
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_the_destination_line_never_shows_an_empty_url():
+    """remote_push_url returns "" when both lookups fail, and remote_urls carries
+    a key for every remote name regardless -- so testing membership rendered
+    "origin ()" in the sentence the user approves a push against."""
+    import gitwork as G
+
+    assert G.destination({"remote": "origin", "remote_urls": {"origin": ""}}) == "origin"
+    assert (
+        G.destination({"remote": "origin", "remote_urls": {"origin": "git@h:/r.git"}})
+        == "origin (git@h:/r.git)"
+    )
+    several = G.destination({"remote_urls": {"a": "", "b": "git@h:/b.git"}})
+    assert "a (url unknown)" in several
+    assert "b (git@h:/b.git)" in several
+
+
+def test_a_diff_command_with_a_spaced_path_is_safe_to_paste(repo, written, tmp_path):
+    """diff_commands is emitted verbatim for a caller to relay or paste. A path
+    with a space produced a command that silently diffs two other things."""
+    spaced = repo / "with space.yaml"
+    spaced.write_text("x: 1\n")
+    facts = json.loads(written.read_text())
+    facts["internal"]["managed_files"] = [
+        {"path": "with space.yaml", "sha256": hashlib.sha256(spaced.read_bytes()).hexdigest()}
+    ]
+    written.write_text(json.dumps(facts))
+
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["diff_commands"], got
+    assert any("'with space.yaml'" in c for c in got["diff_commands"]), got["diff_commands"]
+
+
+def test_a_reverified_hash_supersedes_an_already_recorded_one(repo, written, tmp_path):
+    """Reaching the assignment means the hash just passed the extra-files and
+    content checks, so it is the verified answer. setdefault made it a no-op
+    while diffstat below still preferred the NEW hash -- so the summary could
+    show one commit's hash beside another commit's diffstat."""
+    commit(repo, written, tmp_path)
+    facts = json.loads(written.read_text())
+    facts.setdefault("commit", {})["hash"] = "0000000"
+    facts["commit"]["subject"] = "a stale subject"
+    written.write_text(json.dumps(facts))
+
+    real = git_out(repo, "rev-parse", "--short", "HEAD")
+    proc = run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written), "--hash", real)
+    assert proc.returncode == 0, proc.stderr
+    recorded = json.loads(written.read_text())["commit"]
+    assert recorded["hash"] == real, recorded
+    assert recorded["subject"] != "a stale subject"

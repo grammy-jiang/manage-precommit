@@ -65,7 +65,6 @@ pythonpath = ["src", "src/manage_precommit/skill/scripts"]
 # it parallelises well. --dist loadfile keeps a module's tests on one worker,
 # which keeps a failure's output contiguous.
 addopts = "-q --strict-markers --strict-config -n auto --dist loadfile"
-markers = ["slow: takes more than a second"]
 filterwarnings = ["error"]
 
 [tool.coverage.run]
@@ -90,7 +89,17 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 # The skill's scripts import each other as top-level modules, so name them here
 # or isort files them with the standard library.
-known-first-party = ["manage_precommit", "conftest", "shared", "config", "precommit", "gitwork", "summary"]
+known-first-party = [
+    "manage_precommit",
+    "conftest",
+    "shared",
+    "config",
+    "precommit",
+    "gitwork",
+    "summary",
+    "hookoutput",
+    "check_coverage",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests build long literal fixtures and reach into module internals on purpose.

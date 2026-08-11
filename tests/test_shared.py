@@ -13,7 +13,10 @@ import shared
 
 SCRIPTS = Path(shared.__file__).resolve().parent
 STDLIB = set(sys.stdlib_module_names)
-OWN = {"shared", "config", "precommit", "gitwork", "summary"}
+# Derived from the directory, not written out again: a new sibling script would
+# otherwise have to be remembered here, and forgetting looks exactly like the
+# third-party import this test exists to catch.
+OWN = {path.stem for path in SCRIPTS.glob("*.py")}
 
 
 # -- the portability rules ---------------------------------------------------

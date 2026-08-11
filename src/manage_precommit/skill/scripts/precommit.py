@@ -27,17 +27,17 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
-import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
 from typing import NoReturn
 
 import config as cfgmod
+from hookoutput import is_vacuous, skipped_hooks
 from shared import (
+    PRECOMMIT_CONFIG_NAME,
     Facts,
     ManagedFile,
     Recommendation,
@@ -45,6 +45,7 @@ from shared import (
     atomic_write_bytes,
     clean,
     default_file_mode,
+    emit,
     has_suspicious_chars,
     is_work_tree,
     make_git,
@@ -62,7 +63,7 @@ from shared import (
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES = os.path.join(SKILL_DIR, "templates")
 ASSETS = os.path.join(SKILL_DIR, "assets")
-TARGET_NAME = ".pre-commit-config.yaml"
+TARGET_NAME = PRECOMMIT_CONFIG_NAME
 
 EXIT_ERROR = 1
 EXIT_UNKNOWN_KEY = 3
@@ -145,11 +146,6 @@ def die(msg: str, code: int = EXIT_ERROR, **payload: object) -> NoReturn:
 
 
 git = make_git(die)
-
-
-def emit(payload: Mapping[str, object]) -> None:
-    json.dump(dict(payload), sys.stdout, indent=2)
-    sys.stdout.write("\n")
 
 
 # -- versions ----------------------------------------------------------------
@@ -631,7 +627,7 @@ def plan(
             report.append(("added", f"{entry.url}: added (rev {entry.rev})"))
             continue
 
-        have_ids = {h.id for h in existing.hooks}
+        have_ids = cfg.hook_ids(entry.url)
         missing = [h.id for h in entry.hooks if h.id not in have_ids]
         if not missing:
             disabled = disabled_hooks(cfg, key)
@@ -1130,8 +1126,6 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
 
 
 # -- verify ------------------------------------------------------------------
-SKIPPED_NO_FILES = re.compile(r"\(no files to check\)\s*Skipped")
-HOOK_RESULT_LINE = re.compile(r"\.{3,}.*\b(Passed|Failed|Skipped)\b")
 
 
 def run_precommit(directory: str, *args: str) -> tuple[int, str]:
@@ -1150,40 +1144,6 @@ def run_precommit(directory: str, *args: str) -> tuple[int, str]:
     except subprocess.TimeoutExpired:
         die(f"pre-commit {' '.join(args)} timed out after 1800s")
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-
-
-def skipped_hooks(output: str) -> list[str]:
-    r"""Hooks that ran but reported they had no files to check.
-
-    is_vacuous() is all-or-nothing: one hook with something to do flips it off.
-    But hygiene's hooks match any file, so they alone turn a run green while
-    markdownlint and mermaid -- filtered to `\.(md|markdown)$`, and added
-    precisely because a .md was detected -- are still checking nothing. That is
-    a partial vacuity the whole-output verdict cannot express.
-    """
-    names = []
-    for line in output.splitlines():
-        if HOOK_RESULT_LINE.search(line) and SKIPPED_NO_FILES.search(line):
-            names.append(re.split(r"\.{3,}", line, maxsplit=1)[0].strip())
-    return names
-
-
-def is_vacuous(output: str) -> bool:
-    """True when every hook that ran reported it had nothing to check.
-
-    `pre-commit run --all-files` covers only git-*tracked* files, so in a repo
-    where the setup files are still untracked every hook prints "(no files to
-    check) Skipped" and the command exits 0. That is a pass which tested
-    nothing, and reporting it as success is the failure this catches.
-    """
-    results = [ln for ln in output.splitlines() if HOOK_RESULT_LINE.search(ln)]
-    if not results:
-        # No parseable result line at all -- no hooks configured, output in a
-        # shape this cannot read, a wrapper that swallowed it. Whatever the
-        # cause, nothing was observed to run, and reporting that as a clean
-        # pass is precisely the false positive this function exists to catch.
-        return True
-    return all(SKIPPED_NO_FILES.search(ln) for ln in results)
 
 
 def dirty_paths(directory: str) -> set[str]:
