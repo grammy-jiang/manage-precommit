@@ -69,6 +69,33 @@ _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run")
 
 
+# Schemes a `repo:` may use. Everything else -- notably git's transport-helper
+# syntax, `<helper>::<address>` -- names a program git executes. This tool
+# hardens its OWN git calls, but Step 4 runs the separate `pre-commit` binary,
+# which clones every repo: entry with its own ambient git config; nothing this
+# skill does constrains that. A config carrying `repo: ext::sh -c ...` is
+# preserved byte-for-byte by design and would be handed straight to it.
+SAFE_REPO_PREFIXES = ("https://", "http://", "ssh://", "git://", "git+ssh://", "git@")
+SPECIAL_REPO_VALUES = ("local", "meta")
+_TRANSPORT_HELPER = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
+
+
+def refuse_unsafe_repo(url: str, line_no: int) -> None:
+    """Refuse a `repo:` value that names a transport helper.
+
+    Not a general URL policy -- an ordinary filesystem path is fine, and people
+    do use them. What is refused is the one shape that means "run this program".
+    """
+    if url in SPECIAL_REPO_VALUES or url.startswith(SAFE_REPO_PREFIXES):
+        return
+    if _TRANSPORT_HELPER.match(url):
+        raise ConfigRefused(
+            f"`repo: {url[:40]}` names a git transport helper, which runs a program when "
+            "pre-commit clones it; this tool will not carry one across",
+            line_no,
+        )
+
+
 @dataclass
 class Hook:
     """One ``- id: x`` item inside a repo's ``hooks:`` list."""
@@ -478,6 +505,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     if key == "repo":
         _refuse_multiline_scalar(lines, start, key_indent, value, "repo")
         entry.url = _scalar(value)
+        refuse_unsafe_repo(entry.url, start + 1)
     elif key in ("rev", "hooks"):
         raise ConfigRefused("a repo entry lists `repo:` after another key; unsupported", start + 1)
     else:

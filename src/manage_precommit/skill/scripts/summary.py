@@ -192,11 +192,18 @@ def render(facts: dict, pal: Pal) -> str:
         rec_value = None
         if recommended:
             parts = []
+            # Every recommendation needs a visible outcome. Without one a reader
+            # cannot tell "the user said no" from "it was silently dropped" --
+            # in the artefact SKILL.md calls the closing summary.
+            chosen = {clean(n) for n in (hooks.get("selected") or [])}
             for item in recommended:
                 if isinstance(item, dict):
                     name = clean(item.get("name", ""))
                     reason = item.get("reason")
-                    parts.append(f"{name}  {pal.dim('<- ' + clean(reason))}" if reason else name)
+                    part = f"{name}  {pal.dim('<- ' + clean(reason))}" if reason else name
+                    if chosen and name not in chosen:
+                        part += f"  {pal.dim('(declined)')}"
+                    parts.append(part)
                 else:
                     parts.append(clean(item))
             indent = " " * (2 + len("recommended") + 2)

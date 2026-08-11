@@ -48,6 +48,7 @@ from shared import (
     has_suspicious_chars,
     is_work_tree,
     make_git,
+    porcelain_path,
     read_bytes_nofollow,
     read_bytes_or_die,
     refuse_facts_inside_repo,
@@ -208,7 +209,7 @@ def file_states(repo: str, paths: list[str]) -> dict[str, str]:
     for line in porcelain(repo, paths).splitlines():
         if len(line) < 4:
             continue
-        code, path = line[:2], line[3:].strip().strip('"')
+        code, path = line[:2], porcelain_path(line)
         if path not in states:
             continue
         states[path] = "untracked" if code == "??" else ("modified" if code[0] == " " else "staged")
@@ -561,9 +562,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # keeps every line "XY path"; with renames a line reads "R  old -> new" and
     # the comparison would miss.
     _, all_status, _ = git(repo, "status", "--porcelain", "--no-renames", strip=False)
-    untouched = [
-        ln for ln in all_status.splitlines() if ln[3:].strip().strip('"') not in set(paths)
-    ]
+    untouched = [ln for ln in all_status.splitlines() if porcelain_path(ln) not in set(paths)]
 
     # The blob id of exactly the bytes just verified, taken before staging; each
     # committed object is compared against it once the commit exists.
@@ -659,7 +658,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # autofixed by name, and a bare "1 other file" beside that list left the
     # reader unable to tell whether the two describe the same files -- so
     # neither number could be checked.
-    untouched_names = sorted(ln[3:].strip().strip('"') for ln in untouched)
+    untouched_names = sorted(porcelain_path(ln) for ln in untouched)
     n = len(untouched_names)
     phrase = f"{n} other file{'' if n == 1 else 's'}" if n else None
     result = {

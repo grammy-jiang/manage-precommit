@@ -170,10 +170,22 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     nothing for the user to discard; the run stops because an unknown state is
     not a clean one. Suggest they resolve the git error and start again.
 - **exit 5, the config uses YAML this tool will not read** — anchors, aliases,
-  merge keys, flow sequences, more than one document. It says which line. Tell
-  the user the hook has to be added by hand, or the construct simplified. Do not
+  merge keys, flow sequences, more than one document, or a `repo:` naming a git
+  *transport helper* (`ext::`, `fd::` and friends). It says which line. The last
+  of those is not a formatting quibble: such a URL names a program git runs when
+  `pre-commit` clones it, and Step 4 runs `pre-commit`, which uses its own git
+  and none of this skill's hardening. Say plainly that the existing config
+  contains one and that this skill will not carry it forward. Otherwise tell the
+  user the hook has to be added by hand, or the construct simplified. Do not
   edit the file yourself.
-- **anything else** — nothing usable was written. Report it and end the run.
+- **anything else** — report it verbatim and end the run. Two of these happen
+  *after* the config has been written, and the message says so: a foreign
+  executable asset appearing between the pre-check and the copy ("The config has
+  been written and would run it as a hook"), and the post-write verification
+  failing ("was written but `<key>` is not in it"). In those two cases tell the
+  user a live `.pre-commit-config.yaml` is now in their tree, name any file the
+  message named, and say to inspect or delete both before doing anything else.
+  Every other exit here wrote nothing.
 
 On success relay its report: entries **added** vs **already present (left
 as-is)**, assets **written** vs **kept**, and the pinned **versions**.

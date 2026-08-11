@@ -360,3 +360,16 @@ def test_is_work_tree_rejects_a_git_directory(tmp_path):
     assert shared.is_work_tree(git, str(repo)) is True
     assert shared.is_work_tree(git, str(repo / ".git")) is False
     assert shared.is_work_tree(git, str(tmp_path / "not-a-repo-at-all")) is False
+
+
+def test_a_quoted_porcelain_path_is_decoded():
+    """git C-quotes any path with a non-ASCII byte, so the raw field is a
+    quoted string of octal escapes -- a name the user cannot find on disk."""
+    accented = "caf" + chr(0xE9) + ".md"
+    quoted = '"caf\\303\\251.md"'
+    assert shared.porcelain_path(" M " + quoted) == accented
+
+
+def test_an_ordinary_porcelain_path_is_untouched():
+    assert shared.porcelain_path(" M README.md") == "README.md"
+    assert shared.porcelain_path("?? a/b/c.txt") == "a/b/c.txt"

@@ -1319,3 +1319,129 @@ def test_generate_stops_when_the_asset_appears_after_the_pre_check(
         precommit.cmd_generate(args)
     assert exc.value.code != 0
     assert (repo / "scripts" / "lint-mermaid.mjs").read_text() == "// planted\n"
+
+
+def test_an_accented_autofixed_filename_is_reported_readably(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """dirty_paths covers the whole tree, so an accented pre-existing filename
+    the autofixers touch was reported as its escaped form -- unfindable."""
+    accented = "caf" + chr(0xE9) + ".md"
+    (repo / accented).write_text("# hi\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "add"], check=True)
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+
+    fake = tmp_path / "toucher"
+    fake.mkdir()
+    pcs = fake / "pre-commit"
+    pcs.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        f'echo "fixed" >> "{repo}/{accented}"\n'
+        'echo "end-of-file-fixer.....Failed"\n'
+        "exit 1\n"
+    )
+    pcs.chmod(0o755)
+    run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    autofixed = json.loads(facts_path.read_text())["verify"]["autofixed"]
+    assert accented in autofixed, autofixed
+
+
+@pytest.mark.parametrize("missing", ["pre-commit", "npm"])
+def test_a_missing_external_tool_is_reported_cleanly(
+    repo, keys_file, facts_path, stubs, tmp_path, missing
+):
+    """SKILL.md makes "report it verbatim and stop" a contract for these."""
+    empty = tmp_path / f"no-{missing}"
+    empty.mkdir()
+    # git must stay reachable; the point is that the OTHER tool is absent.
+    (empty / "git").symlink_to(stubs / "git")
+    if missing == "npm":
+        proc = run(
+            "precommit.py",
+            "--dir",
+            str(repo),
+            "--templates-file",
+            str(keys_file("mermaid")),
+            "--facts-out",
+            str(facts_path),
+            stubs=empty,
+            only_path=True,
+        )
+        assert "npm not found" in proc.stderr
+    else:
+        generate(repo, keys_file, facts_path, stubs, "hygiene")
+        proc = run(
+            "precommit.py",
+            "--dir",
+            str(repo),
+            "--verify",
+            "--facts",
+            str(facts_path),
+            stubs=empty,
+            only_path=True,
+        )
+        assert "pre-commit not found" in proc.stderr
+    assert proc.returncode != 0
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_failing_install_stops_before_any_json(repo, keys_file, facts_path, stubs, tmp_path):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = tmp_path / "badinstall"
+    fake.mkdir()
+    pcs = fake / "pre-commit"
+    pcs.write_text('#!/bin/sh\necho "cannot write hook" >&2\nexit 1\n')
+    pcs.chmod(0o755)
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert proc.returncode != 0
+    assert "pre-commit install failed" in proc.stderr
+    assert proc.stdout.strip() == "", "no JSON should be emitted on this path"
+
+
+def test_a_failing_ls_remote_is_reported(repo, keys_file, facts_path, tmp_path):
+    fake = tmp_path / "badremote"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "ls-remote" ]; then echo "fatal: unreachable" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode != 0
+    assert "ls-remote failed" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_malformed_managed_entry_does_not_crash_verify(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    facts = json.loads(facts_path.read_text())
+    facts["internal"]["managed_files"] = ["just-a-string"]
+    facts_path.write_text(json.dumps(facts))
+    fake = _pre_commit_stub(tmp_path, "ok13", ["trailing-whitespace......Passed"])
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert proc.returncode != 0
+    assert "not a JSON object" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_generate_records_which_keys_were_selected(repo, keys_file, facts_path, stubs):
+    """The summary marks a declined recommendation from this. Without it every
+    recommendation reads as though it was taken."""
+    (repo / "doc.md").write_text("# hi\n")
+    generate(repo, keys_file, facts_path, stubs, "hygiene", "gitleaks")
+    hooks = json.loads(facts_path.read_text())["hooks"]
+    assert hooks["selected"] == ["hygiene", "gitleaks"]
+    # markdownlint was recommended by the scan and not chosen.
+    assert "markdownlint" not in hooks["selected"]

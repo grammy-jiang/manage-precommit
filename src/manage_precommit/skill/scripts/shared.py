@@ -270,6 +270,32 @@ def refuse_facts_inside_repo(
         )
 
 
+def porcelain_path(line: str) -> str:
+    """The path from one `git status --porcelain --no-renames` line.
+
+    git C-quotes any path carrying a non-ASCII byte, a literal quote, a
+    backslash or a control character (core.quotePath defaults on): an accented
+    filename comes back as a quoted string full of octal escapes. Three parsers
+    already stripped the quotes and a fourth did not, and that fourth builds the
+    autofixed list the user is shown -- a name they then cannot find. One
+    helper, so a future fix cannot miss a sibling again.
+    """
+    path = line[3:].strip()
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        body = path[1:-1]
+        try:
+            # The same escaping C uses, which is what git emits.
+            return (
+                body.encode("latin-1", "backslashreplace")
+                .decode("unicode_escape")
+                .encode("latin-1")
+                .decode("utf-8", "replace")
+            )
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return body
+    return path
+
+
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 
 
@@ -416,6 +442,7 @@ class Recommendation(TypedDict):
 
 class HooksFacts(TypedDict, total=False):
     added: list[str]
+    selected: list[str]  # the catalog keys the user actually chose
     added_ids: list[str]  # the hook ids this run put in the config
     scoped_ids: list[str]  # of those, the ones with a `files:` filter
     left_as_is: list[str]

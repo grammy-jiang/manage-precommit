@@ -47,6 +47,7 @@ from shared import (
     has_suspicious_chars,
     is_work_tree,
     make_git,
+    porcelain_path,
     preserved_mode,
     read_bytes_nofollow,
     read_bytes_or_die,
@@ -927,6 +928,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
         "hooks": {
             "added": added,
             "left_as_is": left,
+            # What the user picked, so a recommendation they turned down can be
+            # shown as declined rather than simply vanishing.
+            "selected": keys,
             "needs_manual": needs_manual,
             # The hook ids this run put in the file, and the subset of those
             # whose silence would mean they were never exercised.
@@ -1130,7 +1134,7 @@ def dirty_paths(directory: str) -> set[str]:
             f"git status failed (exit {rc}): {err or 'no stderr'}. Refusing to report "
             "what the hooks changed, because a failed check is not a clean result."
         )
-    return {ln[3:].strip() for ln in out.splitlines() if ln[3:].strip()}
+    return {p for ln in out.splitlines() if (p := porcelain_path(ln))}
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -1227,6 +1231,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # that apart from tampering. Re-hash from the settled tree instead.
         managed = (facts.get("internal") or {}).get("managed_files") or []
         for entry in managed:
+            if not isinstance(entry, dict):
+                die("a managed_files entry is not a JSON object")
             full = os.path.join(directory, str(entry.get("path", "")))
             if os.path.isfile(full) and not os.path.islink(full):
                 entry["sha256"] = sha256_of(full)

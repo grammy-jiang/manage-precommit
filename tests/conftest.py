@@ -123,12 +123,23 @@ def no_tags_stub(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return d
 
 
-def run(script: str, *args: str, stubs: Path | None = None, cwd: Path | None = None):
-    """Run one of the skill's scripts exactly as SKILL.md does."""
+def run(
+    script: str,
+    *args: str,
+    stubs: Path | None = None,
+    cwd: Path | None = None,
+    only_path: bool = False,
+):
+    """Run one of the skill's scripts exactly as SKILL.md does.
+
+    `only_path` REPLACES PATH with the stub directory instead of prepending to
+    it -- the only way to test what happens when an external tool is genuinely
+    absent, since prepending leaves the real one still findable behind it.
+    """
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)  # prove the scripts resolve each other unaided
     if stubs is not None:
-        env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
+        env["PATH"] = str(stubs) if only_path else f"{stubs}{os.pathsep}{env['PATH']}"
     env["NO_COLOR"] = "1"
     return subprocess.run(
         [sys.executable, str(SCRIPTS / script), *args],

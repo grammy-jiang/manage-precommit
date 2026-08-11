@@ -1326,3 +1326,29 @@ def test_a_file_whose_hash_cannot_be_taken_is_not_silently_unverified(repo, writ
     )
     assert proc.returncode != 0
     assert "refusing to commit unverified" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [":evil", "+refs/heads/other", "refs/heads/a b", "--upload-pack=x", "refs/heads/a:b"],
+)
+def test_a_hostile_upstream_ref_never_builds_a_refspec(hostile):
+    """branch.<name>.merge comes from repository config and is interpolated into
+    `HEAD:<ref>` and into the --force-with-lease bound push-safety.md relies on.
+
+    Driven directly: a value this malformed also stops git resolving `@{u}`, so
+    push_plan falls to the no-upstream branch and the guard is never reached
+    through the CLI -- which is why it is defence in depth, and why it still has
+    to hold.
+    """
+    import gitwork
+
+    with pytest.raises(SystemExit):
+        gitwork.safe_merge_ref(hostile)
+
+
+@pytest.mark.parametrize("ok", ["refs/heads/main", "refs/heads/feature/x"])
+def test_an_ordinary_upstream_ref_passes(ok):
+    import gitwork
+
+    assert gitwork.safe_merge_ref(ok) == ok

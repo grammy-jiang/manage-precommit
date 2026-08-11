@@ -224,3 +224,21 @@ def test_the_untouched_files_appear_in_the_summary():
     text = render(facts)
     assert "untouched" in text
     assert "a.txt, b.txt" in text
+
+
+def test_a_declined_recommendation_says_so():
+    """Without a disposition a reader cannot tell "the user said no" from
+    "silently dropped" in the artefact that IS the closing summary."""
+    facts = json.loads(json.dumps(FULL))
+    facts["hooks"]["recommended"] = [
+        {"name": "markdownlint", "reason": "README.md"},
+        {"name": "gitleaks", "reason": "any repo -- secret scan"},
+    ]
+    facts["hooks"]["selected"] = ["gitleaks"]
+    text = render(facts)
+    assert "markdownlint" in text
+    assert "(declined)" in text
+    line = next(ln for ln in text.splitlines() if "markdownlint" in ln)
+    assert "(declined)" in line
+    gitleaks_line = next(ln for ln in text.splitlines() if "gitleaks" in ln and "<-" in ln)
+    assert "(declined)" not in gitleaks_line
