@@ -400,3 +400,24 @@ def test_the_diffstat_counts_are_actually_coloured():
 def test_colour_off_leaves_the_diffstat_alone():
     plain = "1 file changed, 4 insertions(+), 2 deletions(-)"
     assert summary.color_diffstat(plain, summary.Pal(False)) == plain
+
+
+def test_a_wrapped_recommended_list_lines_up_with_the_value_column():
+    """emit_section sets the label width from whichever rows survived, so only
+    it can know the value column. The caller hardcoded 2 + len("recommended")
+    + 2 = 15, and "present but off" is 15 characters -- four longer -- so a run
+    reporting a disabled entry alongside two recommendations wrapped four
+    columns short of where the values start."""
+    facts = json.loads(json.dumps(FULL))
+    facts["hooks"]["disabled"] = ["gitleaks"]
+    facts["hooks"]["recommended"] = [
+        {"name": "markdownlint", "reason": "README.md"},
+        {"name": "mermaid", "reason": "docs/arch.md"},
+    ]
+    lines = render(facts).splitlines()
+    label_line = next(ln for ln in lines if ln.lstrip().startswith("recommended"))
+    value_col = label_line.index("markdownlint")
+    continuation = next(ln for ln in lines if "mermaid" in ln and "recommended" not in ln)
+    assert continuation.index("mermaid") == value_col, (
+        f"wrapped at {continuation.index('mermaid')}, values start at {value_col}"
+    )

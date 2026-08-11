@@ -1734,3 +1734,82 @@ def test_a_repo_cloned_off_this_disk_is_disclosed(repo, stubs):
     assert got["local_repo_sources"] == ["file:///tmp/hooks"]
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     assert got["local_repo_sources"] == ["file:///tmp/hooks"]
+
+
+# -- round 17 ----------------------------------------------------------------
+
+
+def test_verify_written_checks_hook_ids_not_just_the_repo_url():
+    """The commonest merge inserts missing hook IDS into a repo entry whose URL
+    the file already carries -- hygiene has seven ids under one URL. Checking
+    the URL alone passed trivially in exactly that case, so a splice that
+    dropped the new hook block still reported success, while SKILL.md Step 3
+    promises the merged file is re-scanned and every entry confirmed present."""
+    import config as C
+    import precommit as P
+
+    after = C.scan(
+        "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n"
+        "    rev: v6.0.0\n    hooks:\n      - id: trailing-whitespace\n"
+    )
+    # The URL is present, so the old check passed. One declared id is not.
+    with pytest.raises(SystemExit) as exit_info:
+        P.verify_written(
+            "cfg", ["hygiene"], after, {"hygiene": {"trailing-whitespace", "end-of-file-fixer"}}
+        )
+    assert exit_info.value.code != 0
+
+    # And it does not cry wolf when everything declared really is there.
+    P.verify_written("cfg", ["hygiene"], after, {"hygiene": {"trailing-whitespace"}})
+
+
+@pytest.mark.parametrize(
+    ("reason", "setup"),
+    [
+        ("unknown-key", "unknown"),
+        ("dirty", "dirty"),
+        ("config-refused", "refused"),
+    ],
+)
+def test_a_classified_exit_says_why_in_json(repo, keys_file, facts_path, stubs, reason, setup):
+    """gitwork's non-1 exits always carry a machine-checkable object; this
+    file's 3/4/5 handed the caller an English sentence and nothing else -- and
+    EXIT_DIRTY covers two different causes that could only be told apart by
+    reading the prose."""
+    if setup == "unknown":
+        args = ["--templates-file", str(keys_file("nosuchkey"))]
+    elif setup == "dirty":
+        (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+        subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+        (repo / ".pre-commit-config.yaml").write_text("repos: []\n# my edit\n")
+        args = ["--templates-file", str(keys_file("gitleaks"))]
+    else:
+        (repo / ".pre-commit-config.yaml").write_text("repos:\n  - repo: local\n    hooks: *x\n")
+        args = ["--templates-file", str(keys_file("gitleaks"))]
+
+    proc = run(
+        "precommit.py", "--dir", str(repo), *args, "--facts-out", str(facts_path), stubs=stubs
+    )
+    assert proc.returncode != 0
+    got = out_json(proc)
+    assert got["ok"] is False
+    assert got["reason"] == reason, got
+    assert got["exit"] == proc.returncode
+
+
+def test_hook_output_is_neutralised_before_the_agent_reads_it(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """The hooks echo the paths they check, gitleaks prints match context, and a
+    `repo: local` block supplies its own hook name -- so this is a channel from
+    the repository straight to the agent, and it was the one that skipped
+    clean()."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    bidi = chr(0x202E)
+    fake = _pre_commit_stub(tmp_path, "hostile", [f"trailing-whitespace{bidi}......Passed"])
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert bidi not in proc.stderr, "a text-reordering character reached the agent"
+    assert "WARNING" in proc.stderr

@@ -1638,3 +1638,24 @@ def test_a_failed_status_during_commit_is_not_reported_as_nothing_untouched(
     )
     assert proc.returncode != 0
     assert "a failed check is not a clean result" in proc.stderr
+
+
+# -- round 17 ----------------------------------------------------------------
+
+
+def test_a_discard_command_is_safe_to_paste():
+    """SKILL.md relays these as literal, copy-pasteable shell commands. Today's
+    managed names are tame, but the set grows with the catalog, and a filename
+    with a space turns `rm -- my file.yaml` into two arguments: data loss for
+    the rm, a silent no-op for the git ones."""
+    import gitwork as G
+
+    out = G.discards({"my file.yaml": "modified", "plain.yaml": "modified"})
+    assert out["my file.yaml"] == "git checkout -- 'my file.yaml'"
+    assert out["plain.yaml"] == "git checkout -- plain.yaml", "no needless quoting"
+
+    assert G.discards({"a b.txt": "untracked"})["a b.txt"] == "rm -- 'a b.txt'"
+    assert (
+        G.discards({"a b.txt": "staged"})["a b.txt"]
+        == "git restore --staged --worktree -- 'a b.txt'"
+    )

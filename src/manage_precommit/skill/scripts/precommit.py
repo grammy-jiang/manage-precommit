@@ -69,6 +69,11 @@ EXIT_UNKNOWN_KEY = 3
 EXIT_DIRTY = 4
 EXIT_REFUSED = 5
 
+# A hook can print a whole file -- gitleaks echoes match context, markdownlint
+# lists every violation. The agent reads this to judge the run, so it is bounded
+# the way git's stderr is bounded in shared.make_git.
+MAX_HOOK_OUTPUT = 20000
+
 CATALOG: dict[str, dict] = {
     "hygiene": {
         "fragment": "hygiene.yaml",
@@ -123,7 +128,18 @@ CATALOG: dict[str, dict] = {
 ALWAYS_ON = ("hygiene", "yamllint")
 
 
-def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
+def die(msg: str, code: int = EXIT_ERROR, **payload: object) -> NoReturn:
+    """Stop, and for a CLASSIFIED exit say why in JSON as well as in English.
+
+    gitwork.py's non-1 exits always emit a machine-checkable object; this file's
+    exits 3/4/5 handed the caller a stderr sentence and nothing else -- and
+    EXIT_DIRTY covers two different causes (the check itself failed, versus a
+    file genuinely being dirty) that SKILL.md could only tell apart by reading
+    the prose. A `reason` discriminant is something a program can branch on;
+    an English sentence is something an agent has to interpret.
+    """
+    if payload:
+        emit({"ok": False, "exit": code, **payload})
     print(f"precommit: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -323,6 +339,8 @@ def read_config(directory: str) -> cfgmod.Config | None:
             f"{exc}. This tool only extends configs whose shape it can prove it "
             "understands; add the hook by hand, or simplify the construct.",
             code=EXIT_REFUSED,
+            reason="config-refused",
+            line=exc.line_no,
         )
 
 
@@ -483,6 +501,8 @@ def read_templates_file(path: str) -> list[str]:
         die(
             f"unknown catalog key(s): {', '.join(clean(u) for u in unknown)}",
             code=EXIT_UNKNOWN_KEY,
+            reason="unknown-key",
+            unknown=[clean(u) for u in unknown],
         )
     return keys
 
@@ -515,7 +535,7 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
         git,
         directory,
         paths,
-        lambda msg: die(msg, code=EXIT_DIRTY),
+        lambda msg: die(msg, code=EXIT_DIRTY, reason="check-failed"),
         what="whether this run's files are already modified",
     )
     dirty = [ln[3:].strip() for ln in out.splitlines() if ln[:2] != "??" and ln[3:].strip()]
@@ -526,12 +546,14 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
             "commit your edit along with its own work, so it stops here. Commit, stash "
             "or discard that change, then start again from the scan.",
             code=EXIT_DIRTY,
+            reason="dirty",
+            paths=[clean(d) for d in dirty],
         )
 
 
 def plan(
     cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool
-) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict]:
+) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict, dict[str, set[str]]]:
     """Work out every insertion, without touching the file.
 
     `pre_existing` says whether the config came from the user or from our own
@@ -539,6 +561,11 @@ def plan(
     .gitignore is not covered" and a note about a line we just wrote ourselves.
     """
     insertions: list[cfgmod.Insertion] = []
+    # Per key, the hook ids this run intends to put in the file. verify_written
+    # checks exactly these afterwards: the ids already present need no proving,
+    # and a needs-manual key deliberately inserts nothing, so demanding its ids
+    # would fail a documented exit-0 outcome.
+    intended: dict[str, set[str]] = {}
     # (tag, prose). The tag is the classification; the prose is for the human.
     # Deriving one from the other by substring-matching display text is how two
     # real outcomes -- hooks added to an existing entry, and a hooks: list this
@@ -593,12 +620,14 @@ def plan(
                 report.append(("kept", f"local ({ids}): already present"))
                 continue
             insertions.append(cfgmod.Insertion(at=append_at, block=block, what=f"local:{key}"))
+            intended[key] = set(missing)
             report.append(("added", f"local: added ({', '.join(missing)})"))
             continue
 
         existing = cfg.repo(entry.url)
         if existing is None:
             insertions.append(cfgmod.Insertion(at=append_at, block=block, what=entry.url))
+            intended[key] = {h.id for h in entry.hooks}
             report.append(("added", f"{entry.url}: added (rev {entry.rev})"))
             continue
 
@@ -637,6 +666,7 @@ def plan(
         insertions.append(
             cfgmod.Insertion(at=existing.hooks[-1].end + 1, block=merged, what=f"{entry.url}:hooks")
         )
+        intended[key] = set(missing)
         report.append(
             (
                 "added",
@@ -646,7 +676,7 @@ def plan(
             )
         )
 
-    return insertions, report, versions
+    return insertions, report, versions, intended
 
 
 def merge_same_position(insertions: list[cfgmod.Insertion]) -> list[cfgmod.Insertion]:
@@ -773,17 +803,33 @@ def sha256_of(path: str) -> str:
     return hashlib.sha256(read_bytes_or_die(path, die)).hexdigest()
 
 
-def verify_written(path: str, keys: list[str], after: cfgmod.Config) -> None:
-    """Every selected catalog entry really is in the file that was just written."""
+def verify_written(
+    path: str, keys: list[str], after: cfgmod.Config, expected_ids: dict[str, set[str]]
+) -> None:
+    """Every selected catalog entry really is in the file that was just written.
+
+    The HOOK IDS, not just the repo URL. The commonest merge is inserting a few
+    missing hook ids into a repo entry whose URL the file already carries --
+    hygiene has seven ids under one URL, and a repo already using a subset hits
+    this every time. Checking the URL alone passed trivially in exactly that
+    case, so a splice that dropped or misplaced the new hook block still
+    reported success, and SKILL.md Step 3 promises the opposite: the merged file
+    is re-scanned and every selected entry confirmed present.
+    """
     urls = {e.url for e in after.repos}
-    local_ids = after.local_hook_ids()
     for key in keys:
         meta = CATALOG[key]
-        if meta.get("rev_repo"):
-            if meta["rev_repo"] not in urls:
-                die(f"{path} was written but {key} is not in it; refusing to report success")
-        elif meta.get("local_hook_id") and meta["local_hook_id"] not in local_ids:
-            die(f"{path} was written but {key} is not in it; refusing to report success")
+        url = meta.get("rev_repo")
+        # mermaid is the one entry with no rev_repo: it lives under `repo:
+        # local`, so its ids come from the local bucket rather than a URL.
+        present = (after.hook_ids(url) if url in urls else set()) if url else after.local_hook_ids()
+        missing = sorted(expected_ids.get(key, set()) - present)
+        if missing:
+            die(
+                f"{path} was written but {key} is not in it "
+                f"(missing: {', '.join(clean(m) for m in missing)}); "
+                "refusing to report success"
+            )
 
 
 def normalise_empty_repos(cfg: cfgmod.Config, lines: list[str]) -> tuple[list[str], bool]:
@@ -828,7 +874,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
-    planned, report, versions = plan(cfg, keys, pre_existing=existing is not None)
+    planned, report, versions, intended = plan(cfg, keys, pre_existing=existing is not None)
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)
     try:
@@ -901,7 +947,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             "hook; remove that file and re-run before committing anything."
         )
 
-    verify_written(path, keys, after)
+    verify_written(path, keys, after, intended)
     # Hashed from disk, not from the string in memory: what the commit step
     # stages is the file, so the file is what gets bound to these facts.
     managed: list[ManagedFile] = [
@@ -1264,7 +1310,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
         write_json_or_die(args.facts, facts, die)
 
     if output.strip():
-        print(output, file=sys.stderr)
+        # Repo-controlled text, like every other string this file relays. The
+        # hooks echo the paths they check, gitleaks prints match context, and a
+        # `repo: local` block supplies its own hook `name:` -- so this is a
+        # channel from the repository straight to the agent, and it was the one
+        # that skipped clean(). Bounded too: a hook can print a whole file, and
+        # the agent has to read this to judge the run.
+        shown = clean(output)
+        if len(shown) > MAX_HOOK_OUTPUT:
+            shown = shown[:MAX_HOOK_OUTPUT] + "\n...(truncated; re-run pre-commit to see it all)"
+        if has_suspicious_chars(output):
+            print(
+                "precommit: WARNING - the hook output contained control or "
+                "text-reordering characters; they have been neutralised, and what "
+                "a hook printed may not be what its files say.",
+                file=sys.stderr,
+            )
+        print(shown, file=sys.stderr)
     emit(
         {
             "install": "git hook installed",

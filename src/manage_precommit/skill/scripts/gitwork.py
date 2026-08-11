@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from collections.abc import Mapping
 from typing import NoReturn, cast
@@ -162,9 +163,16 @@ DISCARD_COMMAND = {
 
 
 def discards(states: dict[str, str]) -> dict[str, str]:
-    """The command that would discard each managed file's change."""
+    """The command that would discard each managed file's change.
+
+    shlex.quote, because SKILL.md relays these as literal, copy-pasteable shell
+    commands. Today's managed names are tame, but a filename with a space turns
+    `rm -- my file.yaml` into two arguments -- data loss for the rm, a silent
+    no-op for the git ones -- and the set of managed files is not a constant
+    here: it grows with the catalog.
+    """
     return {
-        path: DISCARD_COMMAND.get(state, "").format(path=path)
+        path: DISCARD_COMMAND.get(state, "").format(path=shlex.quote(path))
         for path, state in states.items()
         if DISCARD_COMMAND.get(state)
     }
