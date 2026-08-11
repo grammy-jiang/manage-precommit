@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  # Callable, so `release.yml` gates a tag on these exact jobs rather than on a
+  # copy of them. A copy drifts, and the copy is the one a release trusts.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every version the package claims in `requires-python` and in its
+        # classifiers. A claim nothing runs against is a guess.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      - name: Configure git
+        # The suite drives real repositories -- it commits, pushes to bare
+        # remotes, and reads back what git actually recorded. git needs an
+        # identity and a default branch to do any of that.
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "CI"
+          git config --global init.defaultBranch main
+
+      - name: Test
+        # No network: the suite puts a stub `git ls-remote` and a stub `npm` on
+        # PATH, so a green run here proves the offline fixtures still exercise
+        # the real version-pinning path.
+        run: pytest
+
+  quality:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # The oldest supported version, so a construct newer than 3.10 is
+          # caught by the type-checker here rather than by a user on 3.10.
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Type-check
+        run: mypy
+
+  hooks:
+    # Every hook in .pre-commit-config.yaml -- gitleaks, yamllint,
+    # markdownlint-cli2, the local mermaid linter, and the base hygiene set --
+    # is configured nowhere else. Without this job they run only on a machine
+    # where somebody had run `pre-commit install`, so a change made through the
+    # GitHub web editor would never meet any of them. This repository ships a
+    # tool for managing exactly this file; it has to hold itself to it.
+    name: Hooks (pre-commit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # The hooks build their own environments -- Go for gitleaks, Node for
+      # markdownlint and mermaid -- which is most of the runtime. Keyed on the
+      # config, so a rev bump rebuilds and nothing else does.
+      - name: Cache hook environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install pre-commit pyyaml
+
+      # --show-diff-on-failure: the fixer hooks rewrite files, and the diff is
+      # the actionable part. Without it a failure says only that something
+      # changed.
+      - name: Run every hook
+        # The mermaid hook renders each diagram with headless Chromium, whose
+        # sandbox cannot start on a runner with unprivileged user namespaces
+        # restricted. Without this the hook fails on a valid diagram. It is
+        # opt-in precisely so it stays a deliberate choice per environment.
+        env:
+          MERMAID_LINT_NO_SANDBOX: "1"
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      # The gitleaks *hook* is `gitleaks git --pre-commit --staged`, which is
+      # right locally -- it stops a secret becoming a commit -- and inert here:
+      # a fresh checkout stages nothing, so it inspects an empty diff and passes
+      # whatever is in the tree. So CI scans the content the pull request would
+      # actually merge, at the version .pre-commit-config.yaml pins -- read from
+      # that file rather than written down again, so the two cannot drift into
+      # different rule sets.
+      - name: Scan the checked-out tree for secrets
+        run: |
+          rev=$(python -c "
+          import yaml
+          config = yaml.safe_load(open('.pre-commit-config.yaml'))
+          print(next(r['rev'] for r in config['repos'] if 'gitleaks' in r['repo']))
+          ")
+          echo "gitleaks $rev, the version .pre-commit-config.yaml pins"
+          base=https://github.com/gitleaks/gitleaks/releases/download
+          curl -sSfL "$base/${rev}/gitleaks_${rev#v}_linux_x64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" dir . --redact --no-banner
+
+  coverage:
+    name: Coverage (every file >= 90%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "CI"
+          git config --global init.defaultBranch main
+
+      - name: Measure
+        # MP_COVER_SUBPROCESS makes the suite run each script under coverage as
+        # well. Most of it drives them as subprocesses, which a plain run cannot
+        # see -- without this the report understates them by roughly two thirds.
+        env:
+          MP_COVER_SUBPROCESS: "1"
+        run: pytest --cov --cov-report=
+
+      - name: Report
+        run: coverage report
+
+      - name: Gate
+        # A project total hides a hole, so the floor is per file. This is the
+        # same script `make coverage` runs, so local and CI cannot drift.
+        run: python tests/check_coverage.py --min 90
