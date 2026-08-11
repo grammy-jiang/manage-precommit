@@ -136,6 +136,8 @@ def managed(facts: Facts) -> list[tuple[str, str]]:
         )
     out: list[tuple[str, str]] = []
     for item in entries:
+        if not isinstance(item, dict):
+            die("a managed_files entry is not a JSON object")
         path = str(item.get("path", ""))
         digest = str(item.get("sha256", ""))
         if not path or not digest:
@@ -151,6 +153,27 @@ def managed(facts: Facts) -> list[tuple[str, str]]:
 
 def managed_paths(facts: Facts) -> list[str]:
     return [p for p, _ in managed(facts)]
+
+
+# What discards a change, per state. A pure function of something the program
+# already computes, so it is not left as a prose table for the caller to carry.
+DISCARD_COMMAND = {
+    "untracked": "rm -- {path}",
+    "modified": "git checkout -- {path}",
+    # `git checkout --` restores the work tree FROM the index here, so it would
+    # leave the file staged and discard nothing.
+    "staged": "git restore --staged --worktree -- {path}",
+    "clean": "",
+}
+
+
+def discards(states: dict[str, str]) -> dict[str, str]:
+    """The command that would discard each managed file's change."""
+    return {
+        path: DISCARD_COMMAND.get(state, "").format(path=path)
+        for path, state in states.items()
+        if DISCARD_COMMAND.get(state)
+    }
 
 
 def porcelain(repo: str, paths: list[str]) -> str:
@@ -264,6 +287,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "native_hooks": native_hooks(repo),
             "local_overrides": risky_local_config(repo),
             "states": states,
+            "discards": discards(states),
             "diff_commands": commands,
             "diff": diff,
             "changed": any(s != "clean" for s in states.values()),
@@ -345,6 +369,13 @@ NATIVE_HOOK_TYPES = (
     "prepare-commit-msg",
     "post-commit",
     "pre-merge-commit",
+    # Fires on EVERY ref update since git 2.28 -- including the `git fetch`
+    # push_plan makes just to describe the destination, which happens in Step 5
+    # before the commit question and therefore even on a run the user ends with
+    # "Don't commit".
+    "reference-transaction",
+    "post-checkout",
+    "post-rewrite",
 )
 
 
@@ -725,10 +756,20 @@ def push_plan(repo: str) -> PushPlan:
 
     # Upstream exists: refresh, then read ahead/behind. A failed fetch means the
     # comparison would be against stale data, so it is a hard stop.
+    # Read before the fetch, because fetch itself updates remote-tracking refs
+    # and so runs the reference-transaction hook. Disclosure has to be gathered
+    # before the thing it discloses.
     overrides = risky_local_config(repo)
+    hooks_present = native_hooks(repo)
     rc, _, err = git(repo, "fetch")
     if rc != 0:
-        return {"action": "stop-fetch-failed", "branch": branch, "error": err}
+        return {
+            "action": "stop-fetch-failed",
+            "branch": branch,
+            "error": err,
+            "local_overrides": overrides,
+            "native_hooks": hooks_present,
+        }
     _, remote, _ = git(repo, "config", "--get", f"branch.{branch}.remote")
     _, merge_ref, _ = git(repo, "config", "--get", f"branch.{branch}.merge")
     _, upstream_sha, _ = git(repo, "rev-parse", "@{u}")
@@ -758,7 +799,7 @@ def push_plan(repo: str) -> PushPlan:
         # Read BEFORE the fetch below would have used them, so the report is
         # about the config that was in force.
         "local_overrides": overrides,
-        "native_hooks": native_hooks(repo),
+        "native_hooks": hooks_present,
     }
     if behind == 0:
         base["action"] = "stop-up-to-date" if ahead == 0 else "fast-forward"

@@ -76,7 +76,7 @@ VERIFY
   install  git hook installed
   run      vacuous pass -- every hook reported (no files to check). --all-files
            covers only tracked files, so nothing was actually checked; re-run
-           naming the paths explicitly with --files.
+           naming the paths explicitly with --files-file.
 ```
 
 That is the state a first run lands in when the setup files are still untracked.

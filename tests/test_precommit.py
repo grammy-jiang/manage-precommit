@@ -1136,3 +1136,82 @@ def test_the_vacuous_remedy_names_the_safe_flag(repo, keys_file, facts_path, stu
     )
     assert "--files-file" in got["run"]
     assert "with --files." not in got["run"]
+
+
+# -- guards added after round 10 of the reviewer panel ------------------------
+
+
+def test_a_foreign_executed_asset_is_caught_before_anything_is_written(
+    repo, keys_file, facts_path, stubs
+):
+    """The config being produced wires `entry: node scripts/lint-mermaid.mjs`,
+    so discovering the collision after the write left a live config pointing at
+    someone else's program on a run that reported failure."""
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "lint-mermaid.mjs").write_text("// not ours\n")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid")
+    assert proc.returncode != 0
+    assert "Nothing has been written" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists(), "a half-applied config was left"
+    assert not facts_path.exists()
+
+
+def test_a_corrupt_facts_file_is_caught_before_anything_is_written(
+    repo, keys_file, facts_path, stubs
+):
+    """Reading it only at merge time meant the run died after mutating the repo."""
+    facts_path.write_text("{not json")
+    proc = generate(repo, keys_file, facts_path, stubs, "hygiene")
+    assert proc.returncode != 0
+    assert "cannot read facts file" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists(), "the config was written anyway"
+
+
+def test_always_run_overrides_a_narrow_files_filter(repo, stubs):
+    """config.py captures always_run precisely because it decides this, and
+    looks_disabled was ignoring it -- so a hook that does run was reported as
+    one that does not."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.txt$'\n"
+        "        always_run: true\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_narrow_files_filter_without_always_run_is_flagged(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.txt$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"]
+
+
+def test_a_failed_status_does_not_become_an_empty_autofix_list(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """Step 5 promises to disclose what the hooks rewrote. A failed check
+    returning "nothing dirty" either invents autofixes or drops the disclosure
+    entirely, and the user approves believing their tree is cleaner than it is."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = tmp_path / "brokenstatus"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "status" ]; then echo "fatal: index corrupt" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    pc_stub = fake / "pre-commit"
+    pc_stub.write_text('#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\nexit 0\n')
+    pc_stub.chmod(0o755)
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert proc.returncode != 0
+    assert "not a clean result" in proc.stderr

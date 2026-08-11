@@ -73,8 +73,10 @@ summary can show them. Later steps add to that file rather than replacing it.
 
 Returns JSON: `always_on` (fixed policy), `recommended` (`[{name, reason}]`, where
 `reason` is the file that triggered it), `previous` (catalog entries the config
-already has), `proposed` (the starting set for Step 2), and `detected` (the
-markers actually seen). Do not scan the tree yourself or second-guess a `reason`.
+already has), `disabled` (of those, the ones that look switched off, with why),
+`proposed` (the starting set for Step 2), `detected` (the markers, as prose) and
+`detected_paths` (the same files as bare paths). Do not scan the tree yourself
+or second-guess a `reason`.
 
 ## Step 2 — Ask
 
@@ -84,7 +86,12 @@ markers turn up whatever this project is written in, and the config file itself
 is YAML): `<the names Step 1 returned>`."
 
 Ask about `recommended`, each with its `reason` — `markdownlint ← README.md`.
-Anything already in `previous` is not offered again; say it is already there.
+Anything already in `previous` is not offered again; say it is already there —
+**unless it also appears in `disabled`**. That means the entry exists but looks
+like it will not run: `stages` that exclude the commit, or a `files`/`exclude`
+that matches nothing. Say which, say it is not the coverage it appears to be,
+and offer to add a working one. Being told "gitleaks is already there" about a
+scanner configured never to run is worse than not being told at all.
 Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-miss is
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.
@@ -314,13 +321,11 @@ change and not an intention:
   the user approves a commit believing their tree is as clean as the diff they
   were shown, and only finds out from the summary, after the fact.
 - **Say the files are already written.** *Don't commit* leaves them on disk; it
-  does not undo them. Name the right discard for the `state` that `status`
-  reported for each file, because they differ:
-  - `modified` (unstaged only) → `git checkout -- <path>`
-  - `staged` → `git restore --staged --worktree -- <path>`. Plain
-    `git checkout --` here restores the work tree *from the index*, which for a
-    staged file changes nothing and leaves it staged.
-  - `untracked` (the common first run) → `rm <path>`
+  does not undo them. `status` returns a `discards` map — the exact command per
+  file, derived from the state it reported. Relay those; do not compose them
+  from the state yourself. (They differ in ways that are easy to get wrong:
+  `git checkout --` on a *staged* file restores the work tree from the index,
+  which discards nothing and leaves it staged.)
 - **Name where a push would go**, from the tool rather than by re-deriving it:
 
   ```bash
@@ -337,13 +342,17 @@ change and not an intention:
   that makes git run a program or hand over credentials on a push, and the user
   should weigh that before approving one.
 
-  **This plan describes the state before the commit exists.** On a branch level
-  with its upstream it returns `stop-up-to-date` — "nothing to push" — which
-  stops being true the moment item 3 commits. So use it to name the
-  *destination*, not to predict whether a push will happen: never tell the user
-  a push looks unlikely on the strength of `permits_push` here. Step 5.4
-  recomputes it after the commit, and that is the one that decides. The three
-  options below never change either way.
+  **This plan describes the state before the commit exists**, and that matters
+  for two of its answers only. `stop-up-to-date` and `stop-behind-only` stop
+  being true the moment item 3 commits, so do not repeat them as a prediction —
+  Step 5.4 recomputes after the commit and that is the one that decides.
+
+  Every other `permits_push: false` answer is a stable fact about the
+  repository that committing will not change: `stop-no-remote`,
+  `stop-detached-head`, `stop-fetch-failed`, `stop-compare-failed`. **Say those
+  plainly, before the question.** Offering *Commit + push* with no warning to
+  someone whose repo has no remote gets them a commit and a failed push they
+  were not warned about. The three options below stay the same either way.
 
 Then AskUserQuestion — exactly these, never an "also commit other changes"
 option: **Commit + push** / **Commit only** (local) / **Don't commit**.

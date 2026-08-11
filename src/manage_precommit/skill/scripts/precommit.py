@@ -320,6 +320,12 @@ def looks_disabled(hook: cfgmod.Hook) -> str | None:
     stages = settings.get("stages", "")
     if stages and "commit" not in stages:
         return f"stages: {stages}"
+    # always_run: true makes the hook fire whatever files: and exclude: say,
+    # which is exactly why config.py captures it. Reading stages first is
+    # deliberate -- always_run does not put a hook back on a stage it was
+    # excluded from.
+    if settings.get("always_run", "").lower() in ("true", "yes", "on"):
+        return None
     if settings.get("exclude"):
         return f"exclude: {settings['exclude']}"
     if settings.get("files"):
@@ -645,6 +651,26 @@ def refuse_path_escaping_repo(directory: str, rel: str) -> str:
     return dest
 
 
+def foreign_assets(keys: list[str], directory: str) -> list[str]:
+    """Executed assets already present whose content is not what we ship.
+
+    Separated from copy_assets so it can run before anything is written: the
+    answer decides whether the run may proceed at all.
+    """
+    found = []
+    for key in keys:
+        if not CATALOG[key].get("executes_assets"):
+            continue
+        for src, rel in CATALOG[key].get("assets", []):
+            dest = refuse_path_escaping_repo(directory, rel)
+            if not os.path.lexists(dest):
+                continue
+            existing = read_bytes_or_die(dest, die)
+            if hashlib.sha256(existing).hexdigest() != sha256_of(os.path.join(ASSETS, src)):
+                found.append(rel)
+    return found
+
+
 def copy_assets(key: str, directory: str) -> tuple[list[str], list[str], list[str]]:
     """Copy a catalog entry's repo-side files, never over one already there.
 
@@ -791,15 +817,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if has_suspicious_chars(inserted):
         die("the blocks this run would insert hold control or text-reordering characters")
 
-    path = target_path(directory)
-    atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
-
-    written, kept, foreign = [TARGET_NAME], [], []
-    for key in keys:
-        wrote, keep, alien = copy_assets(key, directory)
-        written.extend(wrote)
-        kept.extend(keep)
-        foreign.extend(alien)
+    # Everything that can still refuse runs BEFORE the write. The config being
+    # produced here wires `entry: node scripts/lint-mermaid.mjs`, so discovering
+    # a foreign file at that path *after* writing would leave exactly the
+    # half-applied state this skill otherwise refuses: a live config pointing at
+    # someone else's program, on a run that reported failure.
+    foreign = foreign_assets(keys, directory)
     if foreign:
         # Refused rather than reported: this run has just written a config that
         # tells pre-commit to EXECUTE these files. Reporting a fact the user
@@ -811,8 +834,19 @@ def cmd_generate(args: argparse.Namespace) -> int:
             f"{listed} already exists and is NOT the file this skill ships. The config "
             "would run it as a hook on every commit, and because the file is unchanged "
             "it would appear in no diff. Move or delete it and run again, or drop the "
-            "entry that needs it."
+            "entry that needs it. Nothing has been written."
         )
+    # A corrupt one would otherwise be discovered after the repo was mutated.
+    existing_out = load_facts_if_present(args.facts_out) if args.facts_out else {}
+
+    path = target_path(directory)
+    atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
+
+    written, kept = [TARGET_NAME], []
+    for key in keys:
+        wrote, keep, _alien = copy_assets(key, directory)
+        written.extend(wrote)
+        kept.extend(keep)
 
     verify_written(path, keys, after)
     # Hashed from disk, not from the string in memory: what the commit step
@@ -869,7 +903,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         "internal": {"managed_files": managed},
     }
     if args.facts_out:
-        merged = dict(load_facts_if_present(args.facts_out))
+        merged = dict(existing_out)
         for section, value in facts.items():
             if isinstance(value, dict) and isinstance(merged.get(section), dict):
                 merged[section] = {**merged[section], **value}
@@ -1038,9 +1072,20 @@ def is_vacuous(output: str) -> bool:
 
 
 def dirty_paths(directory: str) -> set[str]:
-    rc, out, _ = git(directory, "status", "--porcelain", "--no-renames", strip=False)
+    """Everything dirty right now, or a hard stop.
+
+    Used twice around the hook run to work out what the autofixers rewrote --
+    and Step 5 promises to disclose that list before the commit question. A
+    failed check returning an empty set would either invent autofixes (if the
+    BEFORE call failed) or silently drop the disclosure entirely (if the AFTER
+    one did), which is the failure porcelain() in gitwork already refuses.
+    """
+    rc, out, err = git(directory, "status", "--porcelain", "--no-renames", strip=False)
     if rc != 0:
-        return set()
+        die(
+            f"git status failed (exit {rc}): {err or 'no stderr'}. Refusing to report "
+            "what the hooks changed, because a failed check is not a clean result."
+        )
     return {ln[3:].strip() for ln in out.splitlines() if ln[3:].strip()}
 
 

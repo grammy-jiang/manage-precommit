@@ -1161,3 +1161,68 @@ def test_an_undeterminable_disclosure_is_not_reported_as_nothing(repo, written, 
     )
     assert got["local_overrides"], "a failed check came back as nothing to disclose"
     assert "could not determine" in got["local_overrides"][0]
+
+
+def test_a_ref_update_hook_is_disclosed(repo, remote, written, tmp_path):
+    """reference-transaction fires on every ref update since git 2.28 --
+    including push-plan's own fetch, which runs in Step 5 to describe the
+    destination, before the commit question and even on a run that ends in
+    "Don't commit"."""
+    h = repo / ".git" / "hooks" / "reference-transaction"
+    h.write_text("#!/bin/sh\nexit 0\n")
+    h.chmod(0o755)
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert "reference-transaction" in got["native_hooks"]
+
+
+def test_status_says_how_to_discard_each_file(repo, written, tmp_path):
+    """A pure function of the state the program already computed, so the doc
+    does not carry a table that can drift from it."""
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["states"][".pre-commit-config.yaml"] == "untracked"
+    assert got["discards"][".pre-commit-config.yaml"] == "rm -- .pre-commit-config.yaml"
+
+    commit(repo, written, tmp_path)
+    path = repo / ".pre-commit-config.yaml"
+    path.write_text(path.read_text() + "# edit\n")
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["discards"][".pre-commit-config.yaml"] == ("git checkout -- .pre-commit-config.yaml")
+
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["discards"][".pre-commit-config.yaml"] == (
+        "git restore --staged --worktree -- .pre-commit-config.yaml"
+    )
+
+
+def test_a_malformed_managed_files_entry_is_reported_not_crashed_on(repo, written, tmp_path):
+    facts = json.loads(written.read_text())
+    facts["internal"]["managed_files"] = ["just-a-string"]
+    written.write_text(json.dumps(facts))
+    proc = commit(repo, written, tmp_path)
+    assert proc.returncode != 0
+    assert "not a JSON object" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_push_the_server_rejects_is_not_recorded_as_landed(repo, remote, written, tmp_path):
+    """push-plan and push are two round-trips, so a rejection between them is
+    ordinary. A failed push must not leave a commit.push behind for summary.py
+    to render as though it landed."""
+    commit(repo, written, tmp_path)
+    fake = tmp_path / "nopush"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "push" ]; then echo "remote: rejected" >&2; exit 1; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written), stubs=fake)
+    assert proc.returncode != 0
+    assert "push" in proc.stderr
+    assert "push" not in json.loads(written.read_text()).get("commit", {})
