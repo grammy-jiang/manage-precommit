@@ -74,9 +74,13 @@ summary can show them. Later steps add to that file rather than replacing it.
 Returns JSON: `always_on` (fixed policy), `recommended` (`[{name, reason}]`, where
 `reason` is the file that triggered it), `previous` (catalog entries the config
 already has), `disabled` (of those, the ones that look switched off, with why),
-`proposed` (the starting set for Step 2), `detected` (the markers, as prose) and
-`detected_paths` (the same files as bare paths). Do not scan the tree yourself
-or second-guess a `reason`.
+`detected` (the markers, as prose) and `detected_paths` (the same files as bare
+paths). Do not scan the tree yourself or second-guess a `reason`.
+
+The payload also carries `proposed`. **Ignore it here.** It is the union Step 2
+would arrive at if the user accepted everything, and reading it as a default is
+the one way to get Step 2 wrong: nothing is pre-selected, and every recommended
+item starts unchosen.
 
 ## Step 2 — Ask
 
@@ -359,7 +363,10 @@ change and not an intention:
   records only the subject, so a body would be approved and never shown back —
   and `commit` **refuses outright** if the message file holds more than one
   non-blank line. It does not truncate. If the user supplies several lines,
-  take the first, show it back, and write only that line to the file. If a
+  take the first, show it back, and write only that line to the file -- and
+  **say that the rest was dropped**: "only the first line becomes the commit
+  subject; the rest of what you wrote is not included". Shown a tidy one-liner
+  with no such note, a user has no signal that the body they wrote is gone. If a
   commit does fail citing the line count, rewrite the file with one line and
   re-run the same command.
 - **Note an unresolved Step 4 failure**, if the verify run was not a clean pass

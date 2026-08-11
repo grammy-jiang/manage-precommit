@@ -22,8 +22,9 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import NoReturn, TypedDict
 
 # Character ranges are declared as integers and the pattern is built at import,
@@ -315,6 +316,23 @@ def porcelain_path(line: str) -> str:
 
 
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
+
+
+# The file this whole skill is about. Declared once: precommit.py and gitwork.py
+# each had their own literal under a different name (TARGET_NAME, CONFIG_NAME),
+# which is two places to change one fact.
+PRECOMMIT_CONFIG_NAME = ".pre-commit-config.yaml"
+
+
+def emit(payload: Mapping[str, object]) -> None:
+    """The scripts' one output channel: a JSON object on stdout.
+
+    Was three identical lines in two files. Anything that ever needs to change
+    about how these tools talk to the agent -- a trailing newline, sort_keys,
+    a schema version -- has to be changeable in one place.
+    """
+    json.dump(dict(payload), sys.stdout, indent=2)
+    sys.stdout.write("\n")
 
 
 def is_work_tree(git: Callable[..., tuple[int, str, str]], repo: str) -> bool:

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import shlex
@@ -42,10 +41,12 @@ from collections.abc import Mapping
 from typing import NoReturn, cast
 
 from shared import (
+    PRECOMMIT_CONFIG_NAME,
     Facts,
     PushFacts,
     PushPlan,
     clean,
+    emit,
     has_suspicious_chars,
     is_work_tree,
     make_git,
@@ -59,7 +60,7 @@ from shared import (
     write_json_or_die,
 )
 
-CONFIG_NAME = ".pre-commit-config.yaml"
+CONFIG_NAME = PRECOMMIT_CONFIG_NAME
 
 # Exit codes. Callers are told to branch on the JSON, but a distinct status per
 # refusal keeps a shell wrapper honest too.
@@ -77,11 +78,6 @@ def die(msg: str) -> NoReturn:
 
 
 git = make_git(die)
-
-
-def emit(payload: Mapping[str, object]) -> None:
-    json.dump(dict(payload), sys.stdout, indent=2)
-    sys.stdout.write("\n")
 
 
 def is_repo(repo: str) -> bool:
@@ -250,7 +246,7 @@ def build_diff(repo: str, states: dict[str, str]) -> tuple[str, list[str]]:
         rc, out, err = git(repo, *cmd)
         if rc != 0:
             die(f"git {' '.join(cmd)} failed: {err}")
-        commands.append("git " + " ".join(cmd))
+        commands.append("git " + shlex.join(cmd))
         if out:
             chunks.append(out)
     elif tracked:
@@ -263,7 +259,7 @@ def build_diff(repo: str, states: dict[str, str]) -> tuple[str, list[str]]:
         # for a new file, not a failure.
         if rc not in (0, 1):
             die(f"git {' '.join(cmd)} failed: {err}")
-        commands.append("git " + " ".join(cmd))
+        commands.append("git " + shlex.join(cmd))
         if out:
             chunks.append(out)
     return "\n".join(chunks), commands
@@ -764,9 +760,16 @@ def destination(plan: PushPlan) -> str:
         url = clean(plan["remote_url"]) if plan.get("remote_url") else ""
         return f"{remote}/{branch}" + (f" ({url})" if url else "")
     if remote:  # first push, remote already settled
-        return f"{remote}" + (f" ({urls[remote]})" if remote in urls else "")
+        # The VALUE, not the key: remote_push_url returns "" when both lookups
+        # fail, and urls carries an entry for every remote name regardless -- so
+        # testing membership rendered "origin ()" in the sentence the user
+        # approves a push against.
+        single = urls.get(remote) or ""
+        return f"{remote}" + (f" ({single})" if single else "")
     if urls:  # several candidates and no origin: nothing is settled yet
-        listed = ", ".join(f"{n} ({u})" for n, u in sorted(urls.items()))
+        listed = ", ".join(
+            f"{n} ({u})" if u else f"{n} (url unknown)" for n, u in sorted(urls.items())
+        )
         return f"one of {listed} -- not settled yet, a follow-up question will confirm"
     return "the remote"
 
@@ -1077,7 +1080,14 @@ def cmd_push(args: argparse.Namespace) -> int:
 def diffstat(repo: str, commit_hash: str | None, paths: list[str]) -> str:
     """The diffstat for whichever end state this run's files are actually in."""
     if commit_hash:
-        _, out, _ = git(repo, "show", "--stat", "--format=", safe_ref(commit_hash), "--", *paths)
+        cmd = ["show", "--stat", "--format=", safe_ref(commit_hash), "--", *paths]
+        rc, out, err = git(repo, *cmd)
+        # Loud, like build_diff next door. Swallowing rc made a failed comparison
+        # (a locked index, a bad ref) indistinguishable from "nothing changed":
+        # the NET row simply vanished from the closing summary, and a row that is
+        # absent reads as a fact about the repository rather than a failure.
+        if rc != 0:
+            die(f"git {' '.join(cmd)} failed: {err or f'exit {rc}'}")
         # The summary line only ("N files changed, ..."): the summary renders one
         # row, and the per-file breakdown is already in the diff the user saw.
         return out.strip().splitlines()[-1].strip() if out.strip() else ""
@@ -1086,7 +1096,10 @@ def diffstat(repo: str, commit_hash: str | None, paths: list[str]) -> str:
     fresh = sorted(p for p, s in states.items() if s == "untracked")
     parts = []
     if tracked and has_commits(repo):
-        _, out, _ = git(repo, "diff", "HEAD", "--stat", "--", *tracked)
+        cmd = ["diff", "HEAD", "--stat", "--", *tracked]
+        rc, out, err = git(repo, *cmd)
+        if rc != 0:
+            die(f"git {' '.join(cmd)} failed: {err or f'exit {rc}'}")
         if out:
             parts.append(out.strip().splitlines()[-1].strip())
     if fresh:
@@ -1163,9 +1176,15 @@ def cmd_facts(args: argparse.Namespace) -> int:
                         "what this run wrote and verified; refusing to record it"
                     )
             _, raw_subject, _ = git(repo, "log", "-1", "--format=%s", safe_ref(args.hash))
-            commit.setdefault("hash", args.hash)
-            commit.setdefault("subject", clean(raw_subject))
-            commit.setdefault("scope", commit_scope(paths))
+            # Assigned, not setdefault: reaching this line means args.hash just
+            # passed the extra-files and content checks above, so it is the
+            # verified answer and must supersede whatever an earlier call or an
+            # aborted run left behind. setdefault made all three no-ops while
+            # diffstat below still preferred the NEW hash -- so the summary could
+            # show one commit's hash and another commit's diffstat.
+            commit["hash"] = args.hash
+            commit["subject"] = clean(raw_subject)
+            commit["scope"] = commit_scope(paths)
         # The recorded hash, not just an explicitly passed one: the documented
         # path passes no --hash at all, and diffstat's no-commit branch then
         # reads a working tree that the commit has already made clean -- so the

@@ -136,10 +136,8 @@ class RepoEntry:
     url: str
     rev: str | None
     hooks: list[Hook] = field(default_factory=list)
-    start: int = 0
     end: int = 0  # last line index of this entry, inclusive
     item_indent: int = 0  # column of the "-" marker
-    hooks_key_line: int | None = None
     hook_item_indent: int | None = None  # column of the "-" of a hook item
 
 
@@ -520,7 +518,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     # the mapping it introduces start two past the marker.
     key_indent = item_indent + 2
 
-    entry = RepoEntry(url="", rev=None, start=start, end=start, item_indent=item_indent)
+    entry = RepoEntry(url="", rev=None, end=start, item_indent=item_indent)
     key, value = parsed
     if key == "repo":
         _refuse_multiline_scalar(lines, start, key_indent, value, "repo")
@@ -568,7 +566,6 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
                     )
                 if value:
                     raise ConfigRefused("`hooks:` is not a block sequence", i + 1)
-                entry.hooks_key_line = i
                 nxt = _next_content(lines, i + 1)
                 if nxt is not None and _indent_of(lines[nxt]) > key_indent:
                     entry.hook_item_indent = _indent_of(lines[nxt])

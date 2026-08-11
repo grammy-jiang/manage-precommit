@@ -1352,45 +1352,6 @@ def test_an_accented_autofixed_filename_is_reported_readably(
     assert accented in autofixed, autofixed
 
 
-@pytest.mark.parametrize("missing", ["pre-commit", "npm"])
-def test_a_missing_external_tool_is_reported_cleanly(
-    repo, keys_file, facts_path, stubs, tmp_path, missing
-):
-    """SKILL.md makes "report it verbatim and stop" a contract for these."""
-    empty = tmp_path / f"no-{missing}"
-    empty.mkdir()
-    # git must stay reachable; the point is that the OTHER tool is absent.
-    (empty / "git").symlink_to(stubs / "git")
-    if missing == "npm":
-        proc = run(
-            "precommit.py",
-            "--dir",
-            str(repo),
-            "--templates-file",
-            str(keys_file("mermaid")),
-            "--facts-out",
-            str(facts_path),
-            stubs=empty,
-            only_path=True,
-        )
-        assert "npm not found" in proc.stderr
-    else:
-        generate(repo, keys_file, facts_path, stubs, "hygiene")
-        proc = run(
-            "precommit.py",
-            "--dir",
-            str(repo),
-            "--verify",
-            "--facts",
-            str(facts_path),
-            stubs=empty,
-            only_path=True,
-        )
-        assert "pre-commit not found" in proc.stderr
-    assert proc.returncode != 0
-    assert "Traceback" not in proc.stderr
-
-
 def test_a_failing_install_stops_before_any_json(repo, keys_file, facts_path, stubs, tmp_path):
     generate(repo, keys_file, facts_path, stubs, "hygiene")
     fake = tmp_path / "badinstall"
@@ -1644,19 +1605,15 @@ def test_a_manual_only_hook_written_at_its_key_s_column_is_still_seen_as_disable
 
 def test_the_recommend_payload_carries_every_field_its_type_declares(repo, stubs):
     """RecommendReport was declared and never applied, and had already drifted
-    two fields behind the payload while reading as though mypy were watching."""
+    two fields behind the payload while reading as though mypy were watching.
+
+    The expected set is READ FROM the TypedDict rather than written out again --
+    a hand-listed tuple is a second copy of the same fact, and it had already
+    fallen a field behind (local_repo_sources) by the next round."""
+    import shared
+
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
-    for field in (
-        "always_on",
-        "recommended",
-        "previous",
-        "disabled",
-        "proposed",
-        "detected",
-        "detected_paths",
-        "prev_repos",
-        "config",
-    ):
+    for field in shared.RecommendReport.__annotations__:
         assert field in got, field
 
 
@@ -1813,3 +1770,113 @@ def test_hook_output_is_neutralised_before_the_agent_reads_it(
     )
     assert bidi not in proc.stderr, "a text-reordering character reached the agent"
     assert "WARNING" in proc.stderr
+
+
+# -- round 17 remainder ------------------------------------------------------
+
+
+def test_a_hook_level_exclude_is_reported_as_disabled(repo, stubs):
+    """Every sibling gating key had a regression test; hook-level `exclude:`
+    did not, so deleting its branch failed nothing."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        exclude: '.*'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "exclude" in got["disabled"]["gitleaks"][0]
+
+
+def test_verify_written_covers_the_local_branch_too():
+    """verify_written picks its haystack two ways: hook ids under a repo URL,
+    or the `repo: local` bucket. The rev_repo side had a test; the local side
+    (mermaid, the only entry with no rev_repo) had none."""
+    import config as C
+    import precommit as P
+
+    after = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: something-else\n"
+        "        name: x\n        entry: ./x.sh\n        language: script\n"
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        P.verify_written("cfg", ["mermaid"], after, {"mermaid": {"mermaid-lint"}})
+    assert exit_info.value.code != 0
+
+    after_ok = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: mermaid-lint\n"
+        "        name: x\n        entry: ./x.sh\n        language: node\n"
+    )
+    P.verify_written("cfg", ["mermaid"], after_ok, {"mermaid": {"mermaid-lint"}})
+
+
+def test_the_scan_stops_at_the_depth_bound(repo, stubs):
+    """The walk is depth-bounded so a monorepo hangs rather than answers.
+    Nothing tested the bound, so widening or losing it was invisible."""
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    deep = repo / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "buried.md").write_text("# buried\n")
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    joined = " ".join(got["detected"]) + " ".join(got["detected_paths"])
+    assert "buried.md" not in joined, "the depth bound did not hold"
+    assert "markdownlint" not in [r["name"] for r in got["recommended"]]
+
+    # And the bound is a bound, not a blanket refusal: a shallow one is seen.
+    (repo / "shallow.md").write_text("# shallow\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "shallow.md" in " ".join(got["detected_paths"])
+
+
+def test_both_top_matter_lines_are_inserted_in_order(repo, keys_file, facts_path, stubs):
+    """minimum_pre_commit_version and exclude land at the same line, so
+    merge_same_position folds them into one block -- in list order. Several
+    tests drove the fold incidentally; none asserted what came out."""
+    (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    text = (repo / ".pre-commit-config.yaml").read_text()
+    assert "minimum_pre_commit_version" in text
+    assert "exclude:" in text
+    assert text.index("minimum_pre_commit_version") < text.index("exclude:"), text
+
+
+def test_missing_npm_is_reported_cleanly(repo, keys_file, facts_path, stubs, tmp_path):
+    """Split from a parametrized test that branched on its own parameter and ran
+    a different arrange/act per branch -- two scenarios sharing one docstring,
+    so a failure trace could not say which was being exercised."""
+    empty = tmp_path / "no-npm"
+    empty.mkdir()
+    (empty / "git").symlink_to(stubs / "git")  # git stays reachable; npm does not
+    # only_path REPLACES PATH: prepending would leave the real npm findable
+    # behind the stub, and the test would prove nothing.
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=empty,
+        only_path=True,
+    )
+    assert proc.returncode != 0
+    assert "npm not found" in proc.stderr
+
+
+def test_missing_pre_commit_is_reported_cleanly(repo, keys_file, facts_path, stubs):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        stubs=stubs,
+        only_path=True,
+    )
+    assert proc.returncode != 0
+    assert "pre-commit not found on PATH" in proc.stderr
