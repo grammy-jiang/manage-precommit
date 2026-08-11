@@ -216,3 +216,11 @@ def test_a_hook_that_never_saw_a_file_is_shown():
 
 def test_a_clean_verify_shows_no_unchecked_row():
     assert "unchecked" not in render(FULL)
+
+
+def test_the_untouched_files_appear_in_the_summary():
+    facts = json.loads(json.dumps(FULL))
+    facts["commit"]["untouched_files"] = ["a.txt", "b.txt"]
+    text = render(facts)
+    assert "untouched" in text
+    assert "a.txt, b.txt" in text

@@ -92,6 +92,12 @@ CATALOG: dict[str, dict] = {
         "fragment": "mermaid.yaml",
         "rev_repo": None,
         "npm": "@mermaid-js/mermaid-cli",
+        # The one catalog entry with no rev_repo, so presence is decided by hook
+        # id. Named here rather than spelled out at each use: three separate
+        # literals meant renaming it in the template would leave present_keys
+        # re-offering mermaid forever and verify_written failing every
+        # successful write.
+        "local_hook_id": "mermaid-lint",
         "assets": [("lint-mermaid.mjs", "scripts/lint-mermaid.mjs")],
         # The fragment hardcodes `entry: node scripts/lint-mermaid.mjs`, so this
         # asset is not data the hook reads -- it is the program the hook runs.
@@ -307,6 +313,23 @@ def read_config(directory: str) -> cfgmod.Config | None:
         )
 
 
+# The stages at which `pre-commit run` fires a hook in the ordinary flow.
+# `commit` is the pre-3.0 spelling of `pre-commit`. Everything else -- push,
+# manual, commit-msg, post-commit -- means the hook does not scan content on an
+# ordinary commit, however much its presence suggests otherwise.
+RUNS_ON_COMMIT = frozenset({"commit", "pre-commit"})
+
+
+def parse_stages(raw: str) -> set[str]:
+    """The stage names in a `stages:` value, flow or block form.
+
+    Membership, not a substring test: "commit" is a substring of "commit-msg",
+    so a hook restricted to commit-msg -- which never scans content on an
+    ordinary commit -- read as running on every one.
+    """
+    return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
+
+
 def looks_disabled(hook: cfgmod.Hook) -> str | None:
     """What would stop this hook running, or None.
 
@@ -318,7 +341,7 @@ def looks_disabled(hook: cfgmod.Hook) -> str | None:
     """
     settings = hook.settings
     stages = settings.get("stages", "")
-    if stages and "commit" not in stages:
+    if stages and not (parse_stages(stages) & RUNS_ON_COMMIT):
         return f"stages: {stages}"
     # always_run: true makes the hook fire whatever files: and exclude: say,
     # which is exactly why config.py captures it. Reading stages first is
@@ -368,7 +391,7 @@ def present_keys(cfg: cfgmod.Config | None) -> list[str]:
     have = []
     for key, meta in CATALOG.items():
         if (meta.get("rev_repo") and meta["rev_repo"] in urls) or (
-            key == "mermaid" and "mermaid-lint" in local_ids
+            meta.get("local_hook_id") and meta["local_hook_id"] in local_ids
         ):
             have.append(key)
     return have
@@ -742,7 +765,7 @@ def verify_written(path: str, keys: list[str], after: cfgmod.Config) -> None:
         if meta.get("rev_repo"):
             if meta["rev_repo"] not in urls:
                 die(f"{path} was written but {key} is not in it; refusing to report success")
-        elif key == "mermaid" and "mermaid-lint" not in local_ids:
+        elif meta.get("local_hook_id") and meta["local_hook_id"] not in local_ids:
             die(f"{path} was written but {key} is not in it; refusing to report success")
 
 

@@ -213,7 +213,13 @@ def _code_only(line: str) -> str:
                 quote = None
         elif ch in "\"'":
             quote = ch
-        elif ch == "#":
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            # YAML opens a comment only at an unquoted # preceded by whitespace
+            # (or at the start of the line). Cutting at any # truncated ordinary
+            # values -- `id: check-todo#123`, `exclude: vendor/.*#generated$` --
+            # silently, which is the outcome this module says is worse than a
+            # refusal. _scalar had the rule right; _code_only ran first and
+            # never let it see the value.
             return line[:i]
     return line
 
@@ -500,6 +506,26 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     return i, entry
 
 
+def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
+    """The items of a block sequence under `key_line`, as "[a, b]".
+
+    Rendered in the flow shape so a caller reading `settings` does not have to
+    care which form the file used.
+    """
+    items = []
+    for j in range(key_line + 1, len(lines)):
+        line = lines[j]
+        if _is_blank_or_comment(line):
+            continue
+        if _indent_of(line) <= key_indent:
+            break
+        body = line.strip()
+        if not body.startswith("- "):
+            break
+        items.append(_scalar(body[2:]))
+    return "[" + ", ".join(items) + "]" if items else ""
+
+
 def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hook]:
     """Parse one ``- id: x`` hook item and its indented body."""
     body = lines[start].strip()[2:]
@@ -522,7 +548,15 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
         if _indent_of(line) == key_indent:
             entry = _split_key(line.strip())
             if entry and entry[0] in HOOK_GATING_KEYS:
-                hook.settings[entry[0]] = _scalar(entry[1])
+                value = _scalar(entry[1])
+                if not value:
+                    # `stages:` followed by an indented block sequence is the
+                    # everyday way to write this, and reading only the inline
+                    # scalar left it as "" -- which every caller then treats as
+                    # "not set". A hook confined to the manual stage was
+                    # reported as active coverage.
+                    value = _block_sequence(lines, i, key_indent)
+                hook.settings[entry[0]] = value
         hook.end = i
         i += 1
     return i, hook

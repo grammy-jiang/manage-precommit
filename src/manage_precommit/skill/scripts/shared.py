@@ -463,7 +463,8 @@ class CommitFacts(TypedDict, total=False):
     hash: str
     subject: str
     scope: str
-    untouched: str
+    untouched: str  # "2 other files"
+    untouched_files: list[str]  # and which ones -- a count alone cannot be checked
     push: PushFacts
 
 

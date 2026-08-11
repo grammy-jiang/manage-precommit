@@ -636,7 +636,12 @@ def cmd_commit(args: argparse.Namespace) -> int:
 
     _, raw_subject, _ = git(repo, "log", "-1", "--format=%s")
     subject = clean(raw_subject)
-    n = len(untouched)
+    # Named, not counted. The summary already lists the files the hooks
+    # autofixed by name, and a bare "1 other file" beside that list left the
+    # reader unable to tell whether the two describe the same files -- so
+    # neither number could be checked.
+    untouched_names = sorted(ln[3:].strip().strip('"') for ln in untouched)
+    n = len(untouched_names)
     phrase = f"{n} other file{'' if n == 1 else 's'}" if n else None
     result = {
         "hash": sha,
@@ -654,6 +659,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
     commit.update({"hash": sha, "subject": subject, "scope": commit_scope(paths)})
     if phrase:
         commit["untouched"] = phrase
+        commit["untouched_files"] = untouched_names
     save_facts(args.facts, facts)
     result["facts"] = args.facts
     emit(result)
@@ -813,8 +819,16 @@ def push_plan(repo: str) -> PushPlan:
     # but on a shared branch with subjects like "wip" a subject alone cannot
     # tell the operator whose work a force would permanently delete.
     fmt = "--format=%h %an: %s"
-    _, drop, _ = git(repo, "log", fmt, "HEAD..@{u}")
-    _, add, _ = git(repo, "log", fmt, "@{u}..HEAD")
+    rc_drop, drop, err_drop = git(repo, "log", fmt, "HEAD..@{u}")
+    rc_add, add, err_add = git(repo, "log", fmt, "@{u}..HEAD")
+    if rc_drop != 0 or rc_add != 0:
+        # push-safety.md rests the whole force-push consent on these lines.
+        # Discarding the exit status meant a transient failure produced an
+        # EMPTY list beside a non-zero "would drop N commit(s)" -- the operator
+        # asked to approve destroying work they were shown nothing about.
+        base["action"] = "stop-compare-failed"
+        base["error"] = err_drop or err_add or "git log failed"
+        return base
     base["action"] = "diverged"
     # Neutralised, not merely flagged. push-safety.md asks the operator to read
     # every one of these lines and treats that as consent for an irreversible

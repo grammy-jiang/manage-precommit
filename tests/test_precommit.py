@@ -1215,3 +1215,42 @@ def test_a_failed_status_does_not_become_an_empty_autofix_list(
     )
     assert proc.returncode != 0
     assert "not a clean result" in proc.stderr
+
+
+def _disabled_for(repo, stubs, hook_body):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n" + hook_body
+    )
+    return out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+
+
+def test_a_block_list_stage_restriction_is_seen(repo, stubs):
+    """The flow form was caught; the everyday block form was blind, so the user
+    was told the secret scanner was already there while it never fires."""
+    got = _disabled_for(repo, stubs, "        stages:\n          - manual\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+def test_a_commit_msg_only_hook_is_not_mistaken_for_coverage(repo, stubs):
+    """ "commit" is a substring of "commit-msg", so a substring test read a hook
+    that never scans content on an ordinary commit as running on every one."""
+    got = _disabled_for(repo, stubs, "        stages: [commit-msg]\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+@pytest.mark.parametrize("stages", ["[commit]", "[pre-commit]", "[pre-commit, manual]"])
+def test_a_hook_that_does_run_on_commit_is_not_flagged(repo, stubs, stages):
+    got = _disabled_for(repo, stubs, f"        stages: {stages}\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_renaming_the_local_hook_id_stays_consistent(repo, keys_file, facts_path, stubs):
+    """Three separate literals meant a rename left present_keys re-offering
+    mermaid forever and verify_written failing every successful write."""
+    import precommit
+
+    assert precommit.CATALOG["mermaid"]["local_hook_id"] == "mermaid-lint"
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert "mermaid" in got["present"]

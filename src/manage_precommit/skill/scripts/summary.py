@@ -272,6 +272,8 @@ def render(facts: dict, pal: Pal) -> str:
             if untouched:
                 scope += f"  {pal.dim('(' + clean(untouched) + ' untouched)')}"
             rows.append(("scope", scope))
+            if commit.get("untouched_files"):
+                rows.append(("untouched", names(commit["untouched_files"], pal, "dim")))
         rows.append(("push", push_line(commit.get("push"), pal) or pal.dim("not pushed")))
         emit_section(lines, "COMMIT", rows, pal)
 

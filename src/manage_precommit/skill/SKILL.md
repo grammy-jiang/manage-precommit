@@ -86,6 +86,11 @@ markers turn up whatever this project is written in, and the config file itself
 is YAML): `<the names Step 1 returned>`."
 
 Ask about `recommended`, each with its `reason` — `markdownlint ← README.md`.
+**For `gitleaks`, say what it actually covers as part of the offer**: it scans
+each future *staged commit*, not existing history, so anything already
+committed is not covered (that is `gitleaks-full`, which this catalog does not
+install). Someone who wanted history scanned has to learn that before they say
+yes, not at Step 5 with the config already written.
 Anything already in `previous` is not offered again; say it is already there —
 **unless it also appears in `disabled`**. That means the entry exists but looks
 like it will not run: `stages` that exclude the commit, or a `files`/`exclude`
@@ -298,9 +303,8 @@ Two outcomes skip the rest of Step 5 — go to Step 6 with
 
 Read the diff for what *the user* should weigh — a hook that will reformat their
 whole tree, an `exclude` that is not what they expected. If `gitleaks` is being
-added, say what it actually does: it scans each future **staged commit**, not
-existing history. This catalog installs the staged-diff hook, not
-`gitleaks-full`, so anything already committed is not covered.
+added, repeat the scope you gave at Step 2 as a reminder: it scans each future
+**staged commit**, not existing history.
 
 ### 2. Ask
 

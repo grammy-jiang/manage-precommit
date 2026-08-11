@@ -370,3 +370,40 @@ def test_a_repos_key_followed_by_another_top_key_scans():
     cfg = C.scan("repos:\nexclude: 'x'\n")
     assert cfg.repos == []
     assert set(cfg.top_keys) == {"repos", "exclude"}
+
+
+# -- guards added after round 11 of the reviewer panel ------------------------
+
+
+def test_a_gating_key_written_as_a_block_list_is_captured():
+    """The everyday form. Reading only the inline scalar left settings["stages"]
+    as "", which every caller then treats as "not set" -- so a hook confined to
+    the manual stage was reported as active coverage."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+        "        stages:\n          - manual\n          - push\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["stages"] == "[manual, push]"
+
+
+def test_the_flow_form_of_a_gating_key_still_works():
+    cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages: [manual]\n")
+    assert cfg.repos[0].hooks[0].settings["stages"] == "[manual]"
+
+
+def test_a_hash_without_preceding_whitespace_is_part_of_the_value():
+    """YAML opens a comment only at an unquoted # preceded by whitespace.
+    Cutting at any # truncated ordinary values silently -- the outcome this
+    module says is worse than a refusal."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: check-todo#123\n"
+        "        exclude: vendor/.*#generated$\n"
+    )
+    hook = cfg.repos[0].hooks[0]
+    assert hook.id == "check-todo#123"
+    assert hook.settings["exclude"] == "vendor/.*#generated$"
+
+
+def test_a_real_trailing_comment_is_still_dropped():
+    cfg = C.scan("repos:\n  - repo: local  # the local block\n    hooks:\n      - id: a\n")
+    assert cfg.repos[0].url == "local"

@@ -1226,3 +1226,36 @@ def test_a_push_the_server_rejects_is_not_recorded_as_landed(repo, remote, writt
     assert proc.returncode != 0
     assert "push" in proc.stderr
     assert "push" not in json.loads(written.read_text()).get("commit", {})
+
+
+def test_a_failed_log_does_not_produce_an_empty_consent_list(repo, remote, written, tmp_path):
+    """push-safety.md rests the whole force-push consent on would_drop. An
+    unchecked git log meant a transient failure showed "would drop N commits"
+    beside zero lines -- approval asked for destroying work never shown."""
+    commit(repo, written, tmp_path)
+    _diverge(repo, remote, tmp_path)
+    fake = tmp_path / "nolog"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "log" ]; then echo "fatal: bad revision" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan", stubs=fake))
+    assert got["action"] != "diverged", "a force-push was offered with no evidence"
+    assert got["permits_push"] is False
+
+
+def test_the_untouched_files_are_named_not_just_counted(repo, written, tmp_path):
+    """A bare count beside VERIFY's named autofix list left the reader unable
+    to tell whether the two describe the same files."""
+    (repo / "a.txt").write_text("a\n")
+    (repo / "b.txt").write_text("b\n")
+    commit(repo, written, tmp_path)
+    recorded = json.loads(written.read_text())["commit"]
+    assert recorded["untouched"] == "2 other files"
+    assert recorded["untouched_files"] == ["a.txt", "b.txt"]
