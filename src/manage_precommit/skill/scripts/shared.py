@@ -358,7 +358,13 @@ def make_git(
         # which inspecting the output afterwards could never detect.
         argv = list(args)
         if argv and argv[0] in ("diff", "show", "log", "format-patch"):
-            argv.insert(1, "--no-ext-diff")
+            # --no-textconv as well: textconv is a DIFFERENT mechanism from
+            # diff.external, driven by a .gitattributes `diff=<name>` mapping
+            # plus a local `diff.<name>.textconv` command. git runs that command
+            # and substitutes its output as the file's content -- so it forges
+            # the very diff Step 5 asks the operator to approve, and executes
+            # code doing it. --no-ext-diff does nothing against it.
+            argv[1:1] = ["--no-ext-diff", "--no-textconv"]
         try:
             proc = subprocess.run(
                 ["git", "-C", repo, *hardening, *argv],

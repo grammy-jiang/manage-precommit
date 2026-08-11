@@ -742,10 +742,14 @@ def load_facts_if_present(path: str) -> dict:
     """
     if not os.path.lexists(path):
         return {}
-    raw = read_bytes_or_die(path, die).decode("utf-8", "replace")
+    # Strict UTF-8, like the other two readers of this same file. Decoding
+    # with errors="replace" here meant one step silently mangled a facts file
+    # the next two would loudly refuse -- pure drift, with nothing to justify
+    # the difference.
+    raw = read_bytes_or_die(path, die)
     try:
-        existing = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        existing = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         die(f"cannot read facts file {path}: {exc}")
     if not isinstance(existing, dict):
         die("facts file must contain a JSON object")
@@ -865,11 +869,24 @@ def cmd_generate(args: argparse.Namespace) -> int:
     path = target_path(directory)
     atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
 
-    written, kept = [TARGET_NAME], []
+    written, kept, late_foreign = [TARGET_NAME], [], []
     for key in keys:
-        wrote, keep, _alien = copy_assets(key, directory)
+        wrote, keep, alien = copy_assets(key, directory)
         written.extend(wrote)
         kept.extend(keep)
+        late_foreign.extend(alien)
+    if late_foreign:
+        # foreign_assets() gates the write, but the file can be planted in the
+        # window between that check and this one -- and the `kept` branch would
+        # then leave it wired as `entry: node ...` on a run reporting success.
+        # copy_assets already computes the answer; discarding it reopened
+        # exactly the hole the pre-check closed.
+        listed = ", ".join(clean(f) for f in late_foreign)
+        die(
+            f"{listed} appeared between the pre-check and the write, and is NOT the "
+            "file this skill ships. The config has been written and would run it as a "
+            "hook; remove that file and re-run before committing anything."
+        )
 
     verify_written(path, keys, after)
     # Hashed from disk, not from the string in memory: what the commit step
@@ -1090,7 +1107,11 @@ def is_vacuous(output: str) -> bool:
     """
     results = [ln for ln in output.splitlines() if HOOK_RESULT_LINE.search(ln)]
     if not results:
-        return False
+        # No parseable result line at all -- no hooks configured, output in a
+        # shape this cannot read, a wrapper that swallowed it. Whatever the
+        # cause, nothing was observed to run, and reporting that as a clean
+        # pass is precisely the false positive this function exists to catch.
+        return True
     return all(SKIPPED_NO_FILES.search(ln) for ln in results)
 
 

@@ -1254,3 +1254,68 @@ def test_renaming_the_local_hook_id_stays_consistent(repo, keys_file, facts_path
     generate(repo, keys_file, facts_path, stubs, "mermaid")
     got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
     assert "mermaid" in got["present"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["", "No hooks configured for this repository.\n"],
+    ids=["empty", "no-result-lines"],
+)
+def test_output_with_no_hook_result_lines_is_not_a_pass(
+    repo, keys_file, facts_path, stubs, tmp_path, output
+):
+    """A run whose output carries no parseable result line told us nothing.
+    Reporting it as a clean pass is the false positive is_vacuous exists for."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = tmp_path / "silent"
+    fake.mkdir()
+    pc_stub = fake / "pre-commit"
+    body = "".join(f'echo "{ln}"\n' for ln in output.splitlines())
+    pc_stub.write_text('#!/bin/sh\nif [ "$1" = "install" ]; then exit 0; fi\n' + body + "exit 0\n")
+    pc_stub.chmod(0o755)
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert got["run_ok"] is False, "a run that reported nothing is not a pass"
+
+
+def test_copy_assets_notices_a_file_planted_after_the_pre_check(repo):
+    """foreign_assets() gates the write, but the file can appear in the window
+    between that check and the copy. copy_assets computes the answer either
+    way; discarding it reopened exactly the hole the pre-check closes."""
+    import precommit
+
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "lint-mermaid.mjs").write_text("// planted\n")
+    wrote, kept, alien = precommit.copy_assets("mermaid", str(repo))
+    assert alien == ["scripts/lint-mermaid.mjs"], "copy_assets did not notice the plant"
+    assert kept == ["scripts/lint-mermaid.mjs"]
+    assert wrote == []
+    assert (repo / "scripts" / "lint-mermaid.mjs").read_text() == "// planted\n"
+
+
+def test_generate_stops_when_the_asset_appears_after_the_pre_check(
+    repo, keys_file, facts_path, stubs, monkeypatch
+):
+    """The branch that acts on copy_assets' answer.
+
+    The real race is between foreign_assets() and the copy, which cannot be hit
+    reliably from outside -- so the pre-check is made to report nothing (what it
+    would have seen a moment earlier) while the file is already on disk.
+    """
+    import precommit
+
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "lint-mermaid.mjs").write_text("// planted\n")
+    monkeypatch.setattr(precommit, "foreign_assets", lambda keys, directory: [])
+    monkeypatch.setattr(precommit, "latest_tag", lambda url: "v1.0.0")
+    monkeypatch.setattr(precommit, "npm_latest", lambda pkg: "1.2.3")
+
+    keys = keys_file("mermaid")
+    args = precommit.argparse.Namespace(
+        dir=str(repo), templates_file=str(keys), facts_out=str(facts_path), force=True
+    )
+    with pytest.raises(SystemExit) as exc:
+        precommit.cmd_generate(args)
+    assert exc.value.code != 0
+    assert (repo / "scripts" / "lint-mermaid.mjs").read_text() == "// planted\n"

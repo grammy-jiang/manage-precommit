@@ -406,6 +406,13 @@ def native_hooks(repo: str) -> list[str]:
     return found
 
 
+# Prefixes whose *driver* name is arbitrary, so no fixed key can match them.
+# Each names a command git runs: a filter's clean/smudge/process during
+# `git add`, a textconv while producing a diff, a merge driver during a merge.
+RISKY_LOCAL_PREFIXES = ("filter.", "diff.", "merge.")
+RISKY_LOCAL_SUFFIXES = (".clean", ".smudge", ".process", ".textconv", ".driver")
+
+
 def risky_local_config(repo: str) -> list[str]:
     """Which of RISKY_LOCAL_CONFIG this repository sets at LOCAL scope.
 
@@ -418,13 +425,17 @@ def risky_local_config(repo: str) -> list[str]:
     if rc != 0:
         # Same reasoning as native_hooks: unknown is not empty.
         return [f"<could not determine: git config failed: {err or f'exit {rc}'}>"]
-    return sorted(
-        {
-            RISKY_LOCAL_CONFIG[key]
-            for k in out.splitlines()
-            if (key := k.strip().lower()) in RISKY_LOCAL_CONFIG
-        }
-    )
+    found = set()
+    for raw in out.splitlines():
+        key = raw.strip()
+        low = key.lower()
+        if low in RISKY_LOCAL_CONFIG:
+            found.add(RISKY_LOCAL_CONFIG[low])
+        elif low.startswith(RISKY_LOCAL_PREFIXES) and low.endswith(RISKY_LOCAL_SUFFIXES):
+            # e.g. filter.lfs.clean, diff.x.textconv, merge.ours.driver -- the
+            # driver name is the repo's to choose, so this cannot be a lookup.
+            found.add(clean(key))
+    return sorted(found)
 
 
 def safe_merge_ref(ref: str) -> str:
@@ -558,9 +569,16 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # committed object is compared against it once the commit exists.
     staged_oids: dict[str, str] = {}
     for rel in paths:
-        _, oid, _ = git(repo, "hash-object", "--", os.path.join(repo, rel))
-        if oid:
-            staged_oids[rel] = oid
+        rc_hash, oid, err_hash = git(repo, "hash-object", "--", os.path.join(repo, rel))
+        if rc_hash != 0 or not oid:
+            # Skipping it would drop that file out of the post-commit content
+            # check while the result still reported content_matches: true --
+            # the verification quietly covering fewer files than it claims.
+            die(
+                f"could not hash {rel} before staging it "
+                f"({err_hash or f'git exit {rc_hash}'}); refusing to commit unverified"
+            )
+        staged_oids[rel] = oid
 
     git(repo, "add", "--", *paths, check=True)
     # `-F -` with the bytes already validated above: git never re-reads the
@@ -609,7 +627,8 @@ def cmd_commit(args: argparse.Namespace) -> int:
 
     # The file list is not the content: a hook (or a race) could commit
     # different bytes under the same path.
-    for rel, oid in staged_oids.items():
+    for rel in paths:
+        oid = staged_oids[rel]
         rc_oid, committed_oid, _ = git(repo, "rev-parse", f"{sha}:{rel}")
         if rc_oid != 0 or committed_oid != oid:
             emit(

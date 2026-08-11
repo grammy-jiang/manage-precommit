@@ -28,7 +28,11 @@ All of it, in this order, before asking anything:
    list. Each line carries the author as well as the subject, and the author is
    what makes "someone else's work is in it" a fact the operator can check
    rather than a warning they have to take on trust.
-3. **`would_add`** — what replaces them.
+3. **`would_add`, every line, verbatim.** The same rule as `would_drop`, for
+   the same reason: this is what the force actually puts on the remote, and the
+   author on each line is how the operator notices a commit that should not be
+   there — an unexpected one from a bad rebase, or someone else's work about to
+   be attributed to this push. Never summarise it either.
 4. **The destination and its URL**, from `guidance`. A remote's nickname says
    nothing about where the code goes.
 5. If `suspicious_characters` is true, say that too: those subject lines contain

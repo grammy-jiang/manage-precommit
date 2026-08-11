@@ -152,31 +152,58 @@ def _is_blank_or_comment(line: str) -> bool:
     return not stripped or stripped.startswith("#")
 
 
+def _quote_end(text: str, start: int) -> int:
+    """Index just past the scalar quoted at `start`, or -1 if it never closes.
+
+    YAML escapes differ by quote style: '' is a literal quote inside a
+    single-quoted scalar, and a backslash escapes the next character inside a
+    double-quoted one. Treating every occurrence of the opening quote as the
+    close made `'foo''bar'` read as `foo` -- a silent truncation, in a module
+    whose stated rule is that a refusal beats a wrong answer that looks right.
+    """
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            if quote == "'" and i + 1 < len(text) and text[i + 1] == "'":
+                i += 2  # '' is one literal quote, not a close
+                continue
+            return i + 1
+        i += 1
+    return -1
+
+
 def _split_key(text: str) -> tuple[str, str] | None:
     """Split ``key: value`` at the first colon outside quotes.
 
     Returns None when the text is not a mapping entry. Quote tracking matters
     because ``files: '\\.ya?ml:$'`` contains a colon that is data.
     """
-    quote: str | None = None
-    for i, ch in enumerate(text):
-        if quote:
-            if ch == quote:
-                quote = None
-            continue
+    i = 0
+    while i < len(text):
+        ch = text[i]
         if ch in "\"'":
-            quote = ch
+            end = _quote_end(text, i)
+            if end == -1:
+                raise ConfigRefused("a quoted value on this line is never closed")
+            i = end
             continue
         if ch == "#":  # a comment starts here; no key was found before it
             return None
         if ch == ":":
             rest = text[i + 1 :]
             if rest and not rest[0].isspace():
+                i += 1
                 continue  # "a:b" is a plain scalar, not a mapping entry
             # The trailing comment is not part of the value. Without this,
             # `repos: # note` yields "# note" rather than "", and the
             # block-sequence check below refuses a perfectly ordinary file.
             return text[:i].strip(), _code_only(rest).strip()
+        i += 1
     return None
 
 
@@ -186,11 +213,13 @@ def _scalar(raw: str) -> str:
     if not raw:
         return ""
     if raw[0] in "\"'":
-        quote = raw[0]
-        end = raw.find(quote, 1)
+        end = _quote_end(raw, 0)
         if end == -1:
-            return raw[1:]
-        return raw[1:end]
+            # Malformed, and the value can only be guessed at from here. The
+            # module's rule is that a refusal beats a wrong answer.
+            raise ConfigRefused("a quoted value on this line is never closed")
+        inner = raw[1 : end - 1]
+        return inner.replace("''", "'") if raw[0] == "'" else inner
     # Unquoted: a " #" starts a comment, a bare "#" inside a word does not.
     cut = raw.find(" #")
     if cut != -1:
@@ -206,14 +235,16 @@ def _code_only(line: str) -> str:
     puts `*emphasis*` in comments, and `# skip *generated* files` matched the
     anchor pattern -- refusing an ordinary config the tool exists to extend.
     """
-    quote: str | None = None
-    for i, ch in enumerate(line):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch in "\"'":
+            end = _quote_end(line, i)
+            if end == -1:
+                return line  # unterminated: _split_key refuses it properly
+            i = end
+            continue
+        if ch == "#" and (i == 0 or line[i - 1].isspace()):
             # YAML opens a comment only at an unquoted # preceded by whitespace
             # (or at the start of the line). Cutting at any # truncated ordinary
             # values -- `id: check-todo#123`, `exclude: vendor/.*#generated$` --
@@ -221,6 +252,7 @@ def _code_only(line: str) -> str:
             # refusal. _scalar had the rule right; _code_only ran first and
             # never let it see the value.
             return line[:i]
+        i += 1
     return line
 
 

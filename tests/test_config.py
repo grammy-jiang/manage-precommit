@@ -407,3 +407,35 @@ def test_a_hash_without_preceding_whitespace_is_part_of_the_value():
 def test_a_real_trailing_comment_is_still_dropped():
     cfg = C.scan("repos:\n  - repo: local  # the local block\n    hooks:\n      - id: a\n")
     assert cfg.repos[0].url == "local"
+
+
+# -- guards added after round 12 of the reviewer panel ------------------------
+
+
+def test_a_doubled_quote_inside_a_single_quoted_scalar_is_not_a_close():
+    """`'foo''bar'` is YAML for foo'bar. Treating every quote as a close read
+    it as `foo` -- a silent truncation, in a module whose stated rule is that a
+    refusal beats a wrong answer that looks right."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n        exclude: 'foo''bar'\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["exclude"] == "foo'bar"
+
+
+def test_a_backslash_escaped_quote_inside_a_double_quoted_scalar_is_not_a_close():
+    cfg = C.scan(
+        'repos:\n  - repo: local\n    hooks:\n      - id: a\n        exclude: "foo\\"bar"\n'
+    )
+    assert "bar" in cfg.repos[0].hooks[0].settings["exclude"]
+
+
+def test_a_hash_inside_a_quoted_scalar_is_not_a_comment():
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n        exclude: 'vendor/ #keep'\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["exclude"] == "vendor/ #keep"
+
+
+def test_an_unterminated_quote_is_refused_not_guessed_at():
+    with pytest.raises(C.ConfigRefused, match="never closed"):
+        C.scan("repos:\n  - repo: 'local\n    hooks:\n      - id: a\n")

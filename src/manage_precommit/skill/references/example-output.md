@@ -24,7 +24,7 @@ HOOKS
                https://github.com/adrienverge/yamllint: already present (rev v1.38.0)
   recommended  markdownlint  <- README.md
                gitleaks  <- any repo -- secret scan
-  versions     gitleaks=v8.30.1, mermaid=11.16.0
+  versions     hygiene=v6.0.0, yamllint=v1.38.0, gitleaks=v8.30.1, mermaid=11.16.0
 
 FILES
   written  .pre-commit-config.yaml, scripts/lint-mermaid.mjs
@@ -55,7 +55,7 @@ NET
 | `SCAN detected` | `precommit.py --recommend`, from markers it actually saw |
 | `HOOKS added` / `left as-is` | the merge report: one line per **catalog** entry, plus `minimum_pre_commit_version` and `exclude` |
 | `HOOKS recommended` | `--recommend`; the `<-` names the file that triggered it |
-| `HOOKS versions` | fetched live at merge time (`git ls-remote`, `npm view`) |
+| `HOOKS versions` | fetched live at merge time (`git ls-remote`, `npm view`) for **every selected key**, including ones that turn out to be already present |
 | `FILES` | what the write step created versus what it found already there |
 | `VERIFY` | `precommit.py --verify` — `run_ok`, `vacuous` and `autofixed` are its verdict |
 | `COMMIT choice` | derived by `gitwork.py facts` from the recorded hash and push |

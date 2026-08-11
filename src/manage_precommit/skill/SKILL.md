@@ -94,9 +94,14 @@ yes, not at Step 5 with the config already written.
 Anything already in `previous` is not offered again; say it is already there —
 **unless it also appears in `disabled`**. That means the entry exists but looks
 like it will not run: `stages` that exclude the commit, or a `files`/`exclude`
-that matches nothing. Say which, say it is not the coverage it appears to be,
-and offer to add a working one. Being told "gitleaks is already there" about a
-scanner configured never to run is worse than not being told at all.
+that matches nothing. Say which, and say it is not the coverage it appears to
+be. **Do not offer to add a working one — this skill cannot.** The fragment
+declares the same hook id that is already present, so selecting it again writes
+nothing and changes nothing; the merge only ever inserts and never edits an
+existing entry's `stages`/`files`/`exclude`. The fix is a hand edit of that
+entry, the same as a `needs_manual` case. Being told "gitleaks is already
+there" about a scanner configured never to run is worse than not being told at
+all — and being told the skill will repair it is worse still.
 Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-miss is
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.
@@ -318,6 +323,11 @@ change and not an intention:
   take the first, show it back, and write only that line to the file. If a
   commit does fail citing the line count, rewrite the file with one line and
   re-run the same command.
+- **Restate an unresolved Step 4 failure.** If the verify run was not a clean
+  pass — a genuine hook failure, not a vacuous run or an autofix — say so again
+  here, plainly, immediately before the question. It may have scrolled well out
+  of view, and approving *Commit + push* while a secret scan or a linter is
+  still failing is a decision nobody would make knowingly.
 - **Say what else this run touched.** If Step 4 reported a non-empty
   `autofixed`, say so plainly *before* asking: "verifying the hooks also
   modified `<those files>` elsewhere in your tree. This run will not stage or

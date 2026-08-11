@@ -1259,3 +1259,70 @@ def test_the_untouched_files_are_named_not_just_counted(repo, written, tmp_path)
     recorded = json.loads(written.read_text())["commit"]
     assert recorded["untouched"] == "2 other files"
     assert recorded["untouched_files"] == ["a.txt", "b.txt"]
+
+
+def test_a_textconv_driver_cannot_forge_the_reviewed_diff(repo, written, tmp_path):
+    """textconv is a different mechanism from diff.external: a .gitattributes
+    mapping plus a local driver, whose output git substitutes as file content.
+    --no-ext-diff does nothing against it."""
+    (repo / ".gitattributes").write_text(".pre-commit-config.yaml diff=forge\n")
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "diff.forge.textconv", "/bin/echo"], check=True
+    )
+    commit(repo, written, tmp_path)
+    path = repo / ".pre-commit-config.yaml"
+    path.write_text(path.read_text() + "# a real edit\n")
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert "# a real edit" in got["diff"], "the textconv driver produced the reviewed diff"
+
+
+def test_a_per_driver_config_key_is_disclosed(repo, remote, written, tmp_path):
+    """The driver name is the repo's to choose, so an exact-key lookup can
+    never see filter.<name>.clean -- which git runs during `git add`."""
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "filter.sneaky.clean", "/bin/cat"], check=True
+    )
+    subprocess.run(
+        [REAL_GIT, "-C", str(repo), "config", "diff.sneaky.textconv", "/bin/cat"], check=True
+    )
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert "filter.sneaky.clean" in got["local_overrides"], got["local_overrides"]
+    assert "diff.sneaky.textconv" in got["local_overrides"], got["local_overrides"]
+
+
+def test_an_ordinary_repo_still_reports_no_per_driver_keys(repo, remote, written, tmp_path):
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["local_overrides"] == []
+
+
+def test_a_file_whose_hash_cannot_be_taken_is_not_silently_unverified(repo, written, tmp_path):
+    """Skipping it dropped that path out of the post-commit content check while
+    the result still said content_matches: true."""
+    fake = tmp_path / "nohash"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "hash-object" ]; then echo "fatal: nope" >&2; exit 128; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        str(msgfile(tmp_path)),
+        "--facts",
+        str(written),
+        stubs=fake,
+    )
+    assert proc.returncode != 0
+    assert "refusing to commit unverified" in proc.stderr
