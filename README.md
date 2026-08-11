@@ -34,7 +34,13 @@ a parse error.
   installed by symlink and its scripts run under your system `python3`, so
   anything it needed would have to be installed by hand on every machine.
 - For the `mermaid` hook only: Node.js, plus a Chromium/Chrome the hook's
-  `mermaid-cli` can drive (it downloads one on first use if none is reusable)
+  `mermaid-cli` can drive (it downloads one on first use if none is reusable).
+  In CI, a container, or on a distro that restricts unprivileged user
+  namespaces, Chromium's sandbox cannot start — set `MERMAID_LINT_NO_SANDBOX=1`
+  to run it without one. Opt-in, because that removes a real boundary around a
+  browser rendering text out of the repository. The hook says so itself when it
+  hits that failure, and reports it as an environment problem rather than an
+  invalid diagram.
 
 ## Install
 

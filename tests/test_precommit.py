@@ -1533,3 +1533,65 @@ def test_a_disabled_entry_reaches_the_facts(repo, facts_path, stubs):
         stubs=stubs,
     )
     assert json.loads(facts_path.read_text())["hooks"]["disabled"] == ["gitleaks"]
+
+
+# -- arguments are checked before anything is installed or run ----------------
+#
+# These run with pre-commit genuinely absent from PATH (only_path=True replaces
+# it with the stub directory, which holds git and npm and nothing else). That is
+# how the bug showed up: `pre-commit install` ran first, so on a machine without
+# pre-commit the run died there and the guards below were never reached at all.
+# Every developer here has pre-commit installed; CI does not, which is what
+# caught it.
+
+
+@pytest.mark.parametrize("bad", ["/etc/hosts", "../escape.txt"])
+def test_a_files_value_is_refused_before_the_git_hook_is_installed(
+    repo, keys_file, facts_path, stubs, bad
+):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    assert not hook.exists(), "fixture already installed the hook; the test proves nothing"
+
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files",
+        bad,
+        stubs=stubs,
+        only_path=True,
+    )
+    assert proc.returncode != 0
+    assert "outside the repository" in proc.stderr
+    assert not hook.exists(), "the repository was mutated before the argument was checked"
+
+
+def test_two_file_sources_are_refused_before_the_git_hook_is_installed(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    listing = tmp_path / "paths.txt"
+    listing.write_text("README.md\n")
+    hook = repo / ".git" / "hooks" / "pre-commit"
+
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files",
+        "README.md",
+        "--files-file",
+        str(listing),
+        stubs=stubs,
+        only_path=True,
+    )
+    assert proc.returncode != 0
+    assert "not both" in proc.stderr
+    assert not hook.exists(), "the repository was mutated before the argument was checked"

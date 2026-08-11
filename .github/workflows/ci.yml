@@ -109,6 +109,12 @@ jobs:
       # the actionable part. Without it a failure says only that something
       # changed.
       - name: Run every hook
+        # The mermaid hook renders each diagram with headless Chromium, whose
+        # sandbox cannot start on a runner with unprivileged user namespaces
+        # restricted. Without this the hook fails on a valid diagram. It is
+        # opt-in precisely so it stays a deliberate choice per environment.
+        env:
+          MERMAID_LINT_NO_SANDBOX: "1"
         run: pre-commit run --all-files --show-diff-on-failure
 
       # The gitleaks *hook* is `gitleaks git --pre-commit --staged`, which is

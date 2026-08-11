@@ -1148,10 +1148,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
     directory = args.dir
     refuse_facts_inside_repo(directory, args.facts, die)
     existing_facts = load_facts_if_present(args.facts) if args.facts else {}
-    rc, install_out = run_precommit(directory, "install")
-    if rc != 0:
-        die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
-
+    # Every argument is checked BEFORE anything is installed or run. `install`
+    # writes .git/hooks/pre-commit -- a mutation of the user's repository -- and
+    # a refusal that fires after it has already happened is not a refusal. It
+    # also made these guards conditional on the environment: with pre-commit
+    # absent from PATH the run died at the install with a different message, so
+    # a caller pointing the autofixing hooks at /etc/hosts was never told no.
+    # CI, which has no pre-commit in the test job, is where that showed up.
     files = list(args.files)
     if args.files_file:
         # Repo filenames are arbitrary: git permits quotes, `$`, backticks and
@@ -1164,7 +1167,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         files = [ln.strip() for ln in listed.splitlines() if ln.strip()]
         if not files:
             die(f"no paths in {args.files_file}")
-    before = dirty_paths(directory)
     # `--` and a per-value check: these come from the caller, and pre-commit
     # reads a leading dash as one of its own options. Without this a value like
     # "--hook-stage" silently changes what the run does, inside a step whose
@@ -1179,6 +1181,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         root = os.path.realpath(directory)
         if resolved != root and not resolved.startswith(root + os.sep):
             die(f"{name!r} resolves outside the repository; refusing to check it")
+
+    rc, install_out = run_precommit(directory, "install")
+    if rc != 0:
+        die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
+
+    before = dirty_paths(directory)
     run_args = ["run", "--files", "--", *files] if files else ["run", "--all-files"]
     rc, output = run_precommit(directory, *run_args)
     autofixed: list[str] = []
