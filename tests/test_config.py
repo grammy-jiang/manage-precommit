@@ -572,3 +572,98 @@ def test_a_transport_helper_is_still_refused_outright():
     """Disclosure is for what cannot be adjudicated; `ext::` names a program."""
     with pytest.raises(C.ConfigRefused, match="transport helper"):
         C.scan("repos:\n  - repo: ext::sh -c 'id'\n    hooks:\n      - id: a\n")
+
+
+# -- the scanner's edges -------------------------------------------------------
+#
+# Line-by-line parsing lives or dies on these. Each one is a shape a real config
+# can have, and a scanner that mis-reads one either refuses a file it should
+# accept or -- worse -- accepts a file it has misunderstood.
+
+
+def test_a_colon_inside_a_quoted_key_does_not_split_the_line():
+    """A quoted key is legal YAML and may contain a colon. Splitting on that
+    colon would invent a key out of half a quoted string -- and the halves are
+    then compared against the gating names."""
+    cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        'weird: key': v\n")
+    assert [h.id for h in cfg.repos[0].hooks] == ["a"]
+    # Kept whole, so no gating key is invented out of the halves.
+    assert "weird" not in cfg.repos[0].hooks[0].settings
+
+
+def test_a_quote_that_is_never_closed_is_refused():
+    with pytest.raises(C.ConfigRefused, match="never closed"):
+        C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        'oops: x\n")
+
+
+def test_a_line_whose_only_colon_has_no_space_after_it_is_not_a_key():
+    """`a:b` is a plain scalar. Reading it as a mapping entry would invent a
+    key nobody wrote."""
+    cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n    notakey:value\n")
+    assert [h.id for h in cfg.repos[0].hooks] == ["a"]
+
+
+def test_a_line_that_is_all_comment_after_some_text_yields_no_key():
+    cfg = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n    plain # note\n")
+    assert [h.id for h in cfg.repos[0].hooks] == ["a"]
+
+
+def test_a_trailing_comment_on_a_sequence_item_is_not_part_of_it():
+    """_scalar sees the raw item here: _split_key never runs on a `- x` line."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages:\n"
+        "          - manual # only by hand\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["stages"] == "[manual]"
+
+
+def test_a_merge_key_is_refused_even_with_no_anchor_in_sight():
+    """The anchor check fires first on the usual `<<: *base`, so the merge-key
+    branch needs a merge key with no alias to be reached at all."""
+    with pytest.raises(C.ConfigRefused, match="merge key"):
+        C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        <<: plain\n")
+
+
+def test_a_top_level_key_after_repos_ends_the_block():
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+        "default_language_version:\n  python: python3.11\n"
+    )
+    assert [e.url for e in cfg.repos] == ["local"]
+    assert "default_language_version" in cfg.top_keys
+
+
+def test_blank_lines_and_comments_inside_an_entry_are_carried_not_read():
+    cfg = C.scan(
+        "repos:\n  - repo: https://x/y\n\n    # why this one\n    rev: v1\n"
+        "    hooks:\n\n      # and this hook\n      - id: a\n"
+    )
+    assert cfg.repos[0].rev == "v1"
+    assert [h.id for h in cfg.repos[0].hooks] == ["a"]
+
+
+def test_a_deeper_line_inside_an_entry_is_carried_not_read():
+    """Anything more indented than the entry's keys belongs to a value this
+    scanner does not interpret -- it is preserved, not parsed."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n        name: a\n"
+        "        additional_dependencies:\n          - some-package==1.0\n"
+    )
+    assert [h.id for h in cfg.repos[0].hooks] == ["a"]
+
+
+def test_a_blank_line_inside_a_block_sequence_does_not_end_it():
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages:\n"
+        "          - manual\n\n          - push\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["stages"] == "[manual, push]"
+
+
+def test_a_dedent_ends_a_block_sequence():
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages:\n"
+        "          - manual\n      - id: b\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["stages"] == "[manual]"
+    assert [h.id for h in cfg.repos[0].hooks] == ["a", "b"]

@@ -1750,3 +1750,121 @@ def test_a_reverified_hash_supersedes_an_already_recorded_one(repo, written, tmp
     recorded = json.loads(written.read_text())["commit"]
     assert recorded["hash"] == real, recorded
     assert recorded["subject"] != "a stale subject"
+
+
+# -- the failure paths ---------------------------------------------------------
+
+
+def test_a_directory_that_does_not_exist_is_named(tmp_path):
+    proc = run("gitwork.py", "--dir", str(tmp_path / "nope"), "push-plan")
+    assert proc.returncode != 0
+    assert "directory not found" in proc.stderr
+
+
+def test_a_subcommand_outside_a_work_tree_says_so(tmp_path, written):
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(plain),
+        "commit",
+        "--message-file",
+        str(msgfile(tmp_path)),
+        "--facts",
+        str(written),
+    )
+    assert proc.returncode != 0
+    assert "not a git work tree" in proc.stderr
+
+
+def test_a_missing_message_file_is_named(repo, written, tmp_path):
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        str(tmp_path / "never-written.txt"),
+        "--facts",
+        str(written),
+    )
+    assert proc.returncode != 0
+    assert "message file not found" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [("", "remote file is empty"), ("origin\nsecond\n", "exactly one name")],
+)
+def test_a_bad_remote_file_is_refused(repo, written, tmp_path, body, expected):
+    """--remote-file exists because a remote name is repo-controlled text that
+    must not be typed into a command. Its own shape still has to be checked."""
+    listing = tmp_path / "remote.txt"
+    listing.write_text(body)
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "push",
+        "--remote-file",
+        str(listing),
+        "--facts",
+        str(written),
+    )
+    assert proc.returncode != 0
+    assert expected in proc.stderr
+
+
+def test_the_push_url_falls_back_to_the_fetch_url(repo, written, tmp_path):
+    """`get-url --push --all` prints nothing when no pushurl is configured on
+    some git versions; the fetch url is then the honest answer, and showing
+    nothing at all would leave the consent line without a destination."""
+    bare = tmp_path / "fallback.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", "origin", str(bare)], check=True)
+    commit(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert str(bare) in got["remote_urls"]["origin"]
+
+
+def test_a_status_line_for_a_file_this_run_does_not_own_is_ignored(repo, written, tmp_path):
+    """file_states seeds only the managed paths; anything else in the porcelain
+    output belongs to the user."""
+    (repo / "theirs.txt").write_text("mine\n")
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert "theirs.txt" not in got["states"]
+    assert set(got["states"]) == set(got["files"])
+
+
+def test_a_commit_whose_content_no_longer_matches_is_refused(repo, written, tmp_path):
+    """blob_matches_verified's mismatch arm: the committed object is right, the
+    working tree has since changed, and the recorded sha is neither."""
+    commit(repo, written, tmp_path)
+    managed = json.loads(written.read_text())["internal"]["managed_files"]
+    facts = json.loads(written.read_text())
+    facts["internal"]["managed_files"][0]["sha256"] = "0" * 64
+    written.write_text(json.dumps(facts))
+    real = git_out(repo, "rev-parse", "--short", "HEAD")
+
+    proc = run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written), "--hash", real)
+    assert proc.returncode != 0
+    assert managed[0]["path"] in proc.stderr
+
+
+def test_the_diffstat_for_tracked_changes_is_a_real_git_summary(repo, written, tmp_path):
+    """diffstat's TRACKED branch -- reached only when no commit hash is recorded
+    yet, which is the state Step 5 is in when it shows the diff. Distinct from
+    the untracked branch, which counts lines by hand, and from the committed
+    branch, which asks `git show`."""
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+    target = repo / json.loads(written.read_text())["internal"]["managed_files"][0]["path"]
+    target.write_text(target.read_text() + "\n# one more line\n")
+
+    facts = json.loads(written.read_text())
+    assert "hash" not in facts.get("commit", {}), "the tracked branch needs no recorded commit"
+
+    run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written))
+    stat = json.loads(written.read_text())["net"]["diffstat"]
+    assert "changed" in stat and "insertion" in stat, stat

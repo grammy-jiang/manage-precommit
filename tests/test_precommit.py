@@ -1880,3 +1880,116 @@ def test_missing_pre_commit_is_reported_cleanly(repo, keys_file, facts_path, stu
     )
     assert proc.returncode != 0
     assert "pre-commit not found on PATH" in proc.stderr
+
+
+# -- the failure paths ---------------------------------------------------------
+
+
+def test_a_directory_that_does_not_exist_is_named(tmp_path, facts_path, keys_file, stubs):
+    proc = run("precommit.py", "--dir", str(tmp_path / "nope"), "--detect", stubs=stubs)
+    assert proc.returncode != 0
+    assert "directory not found" in proc.stderr
+
+
+def test_an_empty_templates_file_is_refused(repo, facts_path, tmp_path, stubs):
+    """An empty selection is not "generate nothing" -- it is a caller that lost
+    its list between steps."""
+    empty = tmp_path / "keys.txt"
+    empty.write_text("\n\n")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(empty),
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    assert proc.returncode != 0
+    assert "no catalog keys" in proc.stderr
+
+
+def test_an_empty_files_file_is_refused(repo, keys_file, facts_path, stubs, tmp_path):
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    empty = tmp_path / "paths.txt"
+    empty.write_text("\n")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        "--files-file",
+        str(empty),
+        stubs=stubs,
+    )
+    assert proc.returncode != 0
+    assert "no paths in" in proc.stderr
+
+
+def test_a_config_that_is_not_utf8_is_named_rather_than_mangled(repo, stubs):
+    """errors="replace" here would hand the scanner text the file does not
+    contain, and the additive writer would then "preserve" bytes that were
+    never there."""
+    (repo / ".pre-commit-config.yaml").write_bytes(b"repos: []\n\xff\xfe\n")
+    proc = run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs)
+    assert proc.returncode != 0
+    assert "not valid UTF-8" in proc.stderr
+
+
+def test_hook_output_longer_than_the_cap_is_truncated(repo, keys_file, facts_path, stubs, tmp_path):
+    """A hook can print a whole file. The agent has to read this to judge the
+    run, so it is bounded the way git's stderr is."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    fake = _pre_commit_stub(tmp_path, "chatty", ["x" * 40000, "trailing-whitespace......Passed"])
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert "(truncated" in proc.stderr
+    assert len(proc.stderr) < 40000
+
+
+class TestAMalformedCatalogFragmentStopsTheRun:
+    """Our OWN templates, checked on every run. A fragment that stops scanning
+    is a packaging or edit error, and it must not become a merge."""
+
+    def test_an_unfilled_placeholder_is_caught(
+        self, repo, keys_file, facts_path, stubs, skill_copy
+    ):
+        fragment = skill_copy / "templates" / "gitleaks.yaml"
+        # __NPM__, not __REV__: gitleaks HAS a rev_repo, so __REV__ is
+        # substituted and never reaches the check. In a comment, so the failure
+        # is the placeholder and not the YAML.
+        fragment.write_text(fragment.read_text() + "# left over: __NPM__\n")
+        proc = generate(
+            repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts"
+        )
+        assert proc.returncode != 0
+        assert "unfilled placeholder" in proc.stderr
+
+    def test_a_fragment_that_does_not_scan_is_caught(
+        self, repo, keys_file, facts_path, stubs, skill_copy
+    ):
+        fragment = skill_copy / "templates" / "gitleaks.yaml"
+        fragment.write_text("- repo: https://github.com/gitleaks/gitleaks\n  hooks: *alias\n")
+        proc = generate(
+            repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts"
+        )
+        assert proc.returncode != 0
+        assert "malformed" in proc.stderr
+
+    def test_a_fragment_declaring_two_entries_is_caught(
+        self, repo, keys_file, facts_path, stubs, skill_copy
+    ):
+        fragment = skill_copy / "templates" / "gitleaks.yaml"
+        fragment.write_text(
+            fragment.read_text() + "- repo: https://github.com/psf/black\n  rev: v1\n"
+            "  hooks:\n    - id: black\n"
+        )
+        proc = generate(
+            repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts"
+        )
+        assert proc.returncode != 0
+        assert "exactly one repo entry" in proc.stderr

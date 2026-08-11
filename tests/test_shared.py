@@ -450,3 +450,72 @@ def test_safe_porcelain_omits_the_double_dash_when_scanning_everything():
 
     shared.safe_porcelain(ok_git, "/tmp", (), lambda m: None, what="x")
     assert seen["args"] == ("status", "--porcelain", "--no-renames")
+
+
+# -- the failure paths ---------------------------------------------------------
+#
+# Every one of these is a die() nobody reaches on a good day, which is exactly
+# why they are worth pinning: they run for the first time on somebody's broken
+# machine, and a traceback there is worse than a sentence.
+
+
+class Stop(Exception):
+    """Stands in for die(), which is a NoReturn the caller supplies."""
+
+
+def stopper(message):
+    raise Stop(message)
+
+
+def test_an_unreadable_file_stops_with_the_reason(tmp_path):
+    missing = tmp_path / "nope" / "deeper.json"
+    with pytest.raises(Stop, match="cannot read"):
+        shared.read_bytes_or_die(str(missing), stopper)
+
+
+def test_a_facts_file_that_is_not_an_object_is_refused(tmp_path):
+    """json.loads happily returns a list or a string; every reader here indexes
+    it by key."""
+    listy = tmp_path / "facts.json"
+    listy.write_text("[1, 2, 3]")
+    with pytest.raises(Stop, match="must contain a JSON object"):
+        shared.read_json_or_die(str(listy), stopper)
+
+
+def test_a_facts_file_that_cannot_be_written_stops(tmp_path):
+    unwritable = tmp_path / "no-such-dir" / "facts.json"
+    with pytest.raises(Stop, match="cannot write facts file"):
+        shared.write_json_or_die(str(unwritable), {"a": 1}, stopper)
+
+
+def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
+    """git C-quotes a non-ASCII filename as escapes, and this undoes that --
+    but an escape can name a codepoint that is not a single byte, which the
+    latin-1 round-trip cannot represent. The quoted body is then the only
+    honest answer; guessing would invent a name the user cannot find."""
+    escaped = chr(92) + "u1234"  # a literal backslash-u escape, as git would emit
+    assert shared.porcelain_path(' M "' + escaped + '"') == escaped
+
+
+def test_a_missing_git_binary_stops_with_a_sentence(monkeypatch):
+    def absent(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(shared.subprocess, "run", absent)
+    git = shared.make_git(stopper)
+    with pytest.raises(Stop, match="git not found"):
+        git("/tmp", "status")
+
+
+def test_a_git_call_that_hangs_is_stopped_and_named(monkeypatch):
+    """A timeout is the failure mode that matters most here: this tool shells
+    out to git inside somebody's repository, where a credential prompt or a
+    wedged filesystem can block forever."""
+
+    def hang(argv, **kwargs):
+        raise shared.subprocess.TimeoutExpired(argv, kwargs.get("timeout", 120))
+
+    monkeypatch.setattr(shared.subprocess, "run", hang)
+    git = shared.make_git(stopper)
+    with pytest.raises(Stop, match="timed out after"):
+        git("/tmp", "status")

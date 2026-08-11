@@ -157,7 +157,7 @@ jobs:
           "$RUNNER_TEMP/gitleaks" dir . --redact --no-banner
 
   coverage:
-    name: Coverage (every file >= 90%)
+    name: Coverage (every file >= 95%)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -191,4 +191,7 @@ jobs:
       - name: Gate
         # A project total hides a hole, so the floor is per file. This is the
         # same script `make coverage` runs, so local and CI cannot drift.
-        run: python tests/check_coverage.py --min 90
+        # 95, not 90: the gap between them was entirely die() paths -- the
+        # code that runs for the first time on somebody's broken machine,
+        # where a traceback is worse than a sentence.
+        run: python tests/check_coverage.py --min 95
