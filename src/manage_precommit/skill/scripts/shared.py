@@ -23,7 +23,7 @@ import re
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import NoReturn, TypedDict
 
 # Character ranges are declared as integers and the pattern is built at import,
@@ -329,6 +329,42 @@ def is_work_tree(git: Callable[..., tuple[int, str, str]], repo: str) -> bool:
     return rc == 0 and out == "true"
 
 
+def safe_porcelain(
+    git: Callable[..., tuple[int, str, str]],
+    repo: str,
+    paths: Sequence[str],
+    die: Callable[[str], NoReturn],
+    *,
+    what: str,
+) -> str:
+    """`git status --porcelain --no-renames [-- paths]`, or a hard stop.
+
+    One policy, stated once: **a failed check is not a clean result.** Empty
+    output means "nothing changed", so swallowing a non-zero exit (a locked
+    index, an I/O error) reports the tree as clean -- which variously discards
+    work this run just wrote, merges into a user's in-progress edit, or drops
+    the autofix disclosure Step 5 promises before the commit question.
+
+    Shared because three call sites across two scripts had hand-written the
+    same command and the same guard with three different wordings, and had
+    already begun to drift. `what` supplies the only part that legitimately
+    differs. A caller needing its own exit code passes a `die` that closes over
+    it -- the failure is one thing; how loudly each caller exits is theirs.
+
+    Output is UNSTRIPPED: the two leading status columns are meaningful.
+    """
+    args = ["status", "--porcelain", "--no-renames"]
+    if paths:
+        args += ["--", *paths]
+    rc, out, err = git(repo, *args, strip=False)
+    if rc != 0:
+        die(
+            f"git status failed (exit {rc}): {err or 'no stderr'}. Refusing to report "
+            f"{what}, because a failed check is not a clean result."
+        )
+    return out
+
+
 def make_git(
     die: Callable[[str], NoReturn], *, timeout: int = 120
 ) -> Callable[..., tuple[int, str, str]]:
@@ -380,6 +416,14 @@ def make_git(
             # legitimate is lost.
             "-c",
             "core.fsmonitor=",
+            # git's own default, forced because it is repo-local and therefore
+            # attacker-settable. With core.quotePath=false git prints raw bytes
+            # in a filename -- control characters, bidi overrides -- and every
+            # path this tool reads from git flows into a summary the user acts
+            # on. clean() is the belt; this is the braces, and it is the layer
+            # that stops the byte reaching the decoder at all.
+            "-c",
+            "core.quotePath=true",
         ]
         if isolated:
             # For a lookup that is purely about a hardcoded upstream URL and has
@@ -563,13 +607,21 @@ class RecommendReport(TypedDict, total=False):
     This is the decision table that used to live in SKILL.md as prose. The rule
     "*.md present -> markdownlint" is a scan, not a judgement, so it belongs
     where it can be tested.
+
+    And it is now actually applied: cmd_recommend annotates its payload with
+    this type. Declared but never used, it was a type-safety claim wired to
+    nothing -- it had already drifted two fields behind the real payload while
+    reading as though mypy were watching. A shape nobody checks is worse than
+    no shape, because the next reader believes it.
     """
 
     always_on: list[str]
     recommended: list[Recommendation]
     previous: list[str]  # catalog keys the existing config already carries
+    disabled: dict[str, list[str]]  # present, but configured never to fire
     proposed: list[str]  # always_on + recommended, minus previous
     detected: list[str]  # the markers actually seen, for the summary's SCAN row
+    detected_paths: list[str]  # the same markers as bare paths, for --files-file
     prev_repos: int
     config: str  # existing | none
 

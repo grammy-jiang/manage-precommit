@@ -13,12 +13,12 @@ import pytest
 from conftest import NPM_VERSION, REAL_GIT, SKILL, out_json, run, stub_calls
 
 
-def generate(repo, keys_file, facts_path, stubs, *names, force=False):
+def generate(repo, keys_file, facts_path, stubs, *names, force=False, scripts=None):
     args = ["--dir", str(repo), "--templates-file", str(keys_file(*names))]
     if force:
         args.append("--force")
     args += ["--facts-out", str(facts_path)]
-    return run("precommit.py", *args, stubs=stubs)
+    return run("precommit.py", *args, stubs=stubs, scripts=scripts)
 
 
 # -- recommend ---------------------------------------------------------------
@@ -594,7 +594,7 @@ def test_verify_reports_a_non_utf8_facts_file_cleanly(repo, keys_file, facts_pat
 
 
 def test_a_forged_character_this_run_would_insert_stops_the_write(
-    repo, keys_file, facts_path, stubs
+    repo, keys_file, facts_path, stubs, skill_copy
 ):
     """The check is that WE never introduce one.
 
@@ -603,20 +603,24 @@ def test_a_forged_character_this_run_would_insert_stops_the_write(
     an ordinary comment -- refused every future run permanently, with no line
     number and no entry in the error table. A character the user already had is
     theirs; `--detect` reports it instead.
-    """
-    import shutil
 
-    fragment = SKILL / "templates" / "gitleaks.yaml"
-    backup = fragment.read_bytes()
-    try:
-        fragment.write_bytes(backup.replace(b"gitleaks\n", "gitleaks\u202e\n".encode(), 1))
-        proc = generate(repo, keys_file, facts_path, stubs, "gitleaks")
-        assert proc.returncode != 0
-        assert "insert" in proc.stderr
-        assert not (repo / ".pre-commit-config.yaml").exists()
-    finally:
-        fragment.write_bytes(backup)
-    assert shutil  # the import is only here to keep the finally obvious
+    Corrupts a COPY of the skill tree. This used to write the forged bytes over
+    the real shipped templates/gitleaks.yaml and restore in a `finally` -- so
+    any interruption in between (SIGKILL, an xdist worker crash, --timeout,
+    Ctrl-C) left a poisoned template in the working tree, one `git add -A` from
+    being shipped into other people's repositories.
+    """
+    fragment = skill_copy / "templates" / "gitleaks.yaml"
+    original = fragment.read_bytes()
+    fragment.write_bytes(original.replace(b"gitleaks\n", "gitleaks\u202e\n".encode(), 1))
+
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts")
+    assert proc.returncode != 0
+    assert "insert" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+    assert (SKILL / "templates" / "gitleaks.yaml").read_bytes() == original, (
+        "the real shipped template was touched"
+    )
 
 
 def test_a_pre_existing_forged_character_is_reported_not_blocked(
@@ -1595,3 +1599,75 @@ def test_two_file_sources_are_refused_before_the_git_hook_is_installed(
     assert proc.returncode != 0
     assert "not both" in proc.stderr
     assert not hook.exists(), "the repository was mutated before the argument was checked"
+
+
+# -- round 15 ----------------------------------------------------------------
+
+
+def test_a_selected_key_missing_from_the_written_file_refuses_after_the_write(
+    repo, keys_file, facts_path, stubs, skill_copy
+):
+    """SKILL.md Step 3 names this as one of two exits that happen AFTER the
+    config is written ('a live .pre-commit-config.yaml is now in their tree'),
+    and nothing tested it -- deleting the verify_written call failed no test."""
+    fragment = skill_copy / "templates" / "gitleaks.yaml"
+    fragment.write_bytes(
+        fragment.read_bytes().replace(
+            b"https://github.com/gitleaks/gitleaks", b"https://example.invalid/other"
+        )
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts")
+    assert proc.returncode != 0
+    assert "is not in it" in proc.stderr
+    assert proc.stdout.strip() == "", "a post-write failure must not also report success"
+    assert (repo / ".pre-commit-config.yaml").exists(), (
+        "the premise of this refusal is that the file is already on disk"
+    )
+
+
+def test_a_manual_only_hook_written_at_its_key_s_column_is_still_seen_as_disabled(repo, stubs):
+    """End to end for the scanner fix: this indentation style used to report a
+    secret scanner confined to `pre-commit run --hook-stage manual` as active
+    coverage."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n"
+        "    hooks:\n"
+        "      - id: gitleaks\n"
+        "        stages:\n"
+        "        - manual\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+def test_the_recommend_payload_carries_every_field_its_type_declares(repo, stubs):
+    """RecommendReport was declared and never applied, and had already drifted
+    two fields behind the payload while reading as though mypy were watching."""
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    for field in (
+        "always_on",
+        "recommended",
+        "previous",
+        "disabled",
+        "proposed",
+        "detected",
+        "detected_paths",
+        "prev_repos",
+        "config",
+    ):
+        assert field in got, field
+
+
+def test_a_broad_exclude_is_reported_with_its_pattern(repo, keys_file, facts_path, stubs):
+    """Both readers of the top-level exclude: now go through one public call."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "exclude: '.*'\nrepos:\n"
+        "  - repo: https://github.com/psf/black\n    rev: 24.1.0\n"
+        "    hooks:\n      - id: black\n"
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "pattern: .*" in proc.stderr
+    assert "EVERY hook" in proc.stderr

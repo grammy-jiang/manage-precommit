@@ -1441,3 +1441,157 @@ def test_every_push_url_is_disclosed(repo, written, tmp_path):
     got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
     shown = got["remote_urls"]["origin"]
     assert str(first) in shown and str(second) in shown, shown
+
+
+# -- round 15 ----------------------------------------------------------------
+
+
+def _with_upstream(repo, written, tmp_path, name="bare"):
+    """A repo whose branch has a real upstream, so push-plan takes that path."""
+    bare = tmp_path / f"{name}.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "remote", "add", "origin", str(bare)], check=True)
+    commit(repo, written, tmp_path)
+    subprocess.run([REAL_GIT, "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
+    return bare
+
+
+@pytest.mark.parametrize("poison", ["url", "remove-section"])
+def test_a_poisoned_branch_remote_degrades_to_the_branch_that_checks(
+    repo, written, tmp_path, poison
+):
+    """Why push_plan's upstream path needs no allowlist of its own.
+
+    A review round called for one: branch.<branch>.remote comes from
+    .git/config, `git push` accepts a raw URL in that position, and
+    refuse_option_like only rejects a leading dash. But that path is reached
+    only when `git rev-parse @{u}` has already succeeded, and git resolves @{u}
+    only for a CONFIGURED remote with a live remote-tracking ref. Both ways of
+    poisoning it make @{u} fail, which routes to the no-upstream branch -- and
+    that branch enumerates `git remote` and refuses anything not on it.
+
+    This test is the evidence for that claim, and the thing that will notice if
+    a future git makes @{u} resolve in either case. Then the guard becomes
+    necessary after all.
+    """
+    _with_upstream(repo, written, tmp_path)
+    elsewhere = tmp_path / "attacker.git"
+    subprocess.run([REAL_GIT, "init", "-q", "--bare", "-b", "main", str(elsewhere)], check=True)
+    if poison == "url":
+        subprocess.run(
+            [REAL_GIT, "-C", str(repo), "config", "branch.main.remote", str(elsewhere)],
+            check=True,
+        )
+    else:
+        subprocess.run(
+            [REAL_GIT, "-C", str(repo), "config", "--remove-section", "remote.origin"],
+            check=True,
+        )
+
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] in ("no-upstream", "stop-no-remote"), got["action"]
+
+    # The outcome differs by case and neither is a failure worth asserting: with
+    # the remote section removed there is nothing to push to, and with a URL in
+    # branch.main.remote the no-upstream path falls back to the one CONFIGURED
+    # remote and pushes there. What matters is the same either way.
+    run("gitwork.py", "--dir", str(repo), "push", "--facts", str(written))
+    landed = subprocess.run(
+        [REAL_GIT, "-C", str(elsewhere), "rev-list", "--all", "--count"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert landed.stdout.strip() == "0", "the push reached the destination nobody was shown"
+
+
+def test_a_configured_upstream_remote_still_plans_normally(repo, written, tmp_path):
+    """The ordinary case must keep working."""
+    _with_upstream(repo, written, tmp_path)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "push-plan"))
+    assert got["action"] in ("stop-up-to-date", "fast-forward"), got["action"]
+    assert got["remote"] == "origin"
+
+
+def test_status_names_what_else_is_uncommitted(repo, written, tmp_path):
+    """Step 4's --all-files question is about exactly these files: the
+    autofixing hooks rewrite whatever they are pointed at, and this run's guard
+    covers only this run's files. Asked in the abstract the risk is accepted
+    blind, and the concrete state only appeared in Step 5.1, after the rewrite."""
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+    (repo / "README.md").write_text("edited by the user\n")
+    untracked = repo / "scratch.txt"
+    untracked.write_text("not tracked\n")
+
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert "README.md" in got["dirty_elsewhere"]
+    assert "scratch.txt" not in got["dirty_elsewhere"], (
+        "--all-files covers tracked files only, so an untracked one is not at risk"
+    )
+    for owned in got["files"]:
+        assert owned not in got["dirty_elsewhere"], "this run's own files are not 'elsewhere'"
+
+
+def test_a_clean_tree_reports_nothing_dirty_elsewhere(repo, written, tmp_path):
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["dirty_elsewhere"] == []
+
+
+def test_untouched_filenames_are_cleaned_before_they_are_shown(repo, written, tmp_path):
+    """Pins the PROPERTY, not a particular mechanism.
+
+    Two things could be doing the work here: core.quotePath (now forced), which
+    makes git C-quote a hostile filename in its own output, and the clean() on
+    this list. Deleting the clean() does not fail this test, so the forced
+    quoting is what is load-bearing; the clean() is belt-and-braces, kept for
+    consistency with every sibling display list rather than because a test
+    distinguishes it. Deleting core.quotePath IS caught, by test_shared.
+    """
+    bidi = chr(0x202E)
+    hostile = repo / f"notes{bidi}.txt"
+    hostile.write_text("theirs\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+    # Tracked AND modified: that is what lands in the untouched list. Newly
+    # added is not the same thing, and testing that shape reached nothing.
+    hostile.write_text("theirs, edited\n")
+
+    proc = run(
+        "gitwork.py",
+        "--dir",
+        str(repo),
+        "commit",
+        "--message-file",
+        str(msgfile(tmp_path)),
+        "--facts",
+        str(written),
+    )
+    assert bidi not in proc.stdout, "a text-reordering character reached the untouched list"
+    assert bidi not in proc.stderr
+    assert bidi not in written.read_text()
+
+
+def test_committed_filenames_are_cleaned_before_they_are_shown(repo, written, tmp_path):
+    """commit_files() output carries the 'commit touched extra files' refusal --
+    one of the two lines here most meant to stop somebody.
+
+    Same caveat as the test above: with core.quotePath forced, git quotes the
+    name before this code ever sees it, so the clean() here cannot be observed
+    by any test. The property is what is pinned."""
+    bidi = chr(0x202E)
+    stray = repo / f"notes{bidi}.txt"
+    stray.write_text("x\n")
+    # Staged BEFORE the commit step, so `commit --only <managed>` still records
+    # it: an index entry this run did not add is exactly the scope violation
+    # commit_files exists to report.
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "stray"], check=True)
+
+    proc = run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written), "--hash", "HEAD")
+    assert proc.returncode != 0
+    assert "notes" in proc.stderr, "the offending file was not even named"
+    assert bidi not in proc.stderr, "a text-reordering character reached the refusal"
+    assert bidi not in proc.stdout

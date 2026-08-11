@@ -571,16 +571,37 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
 
     Rendered in the flow shape so a caller reading `settings` does not have to
     care which form the file used.
+
+    A block sequence may sit at the SAME column as its key -- this file already
+    supports that style for `repos:` and `hooks:` -- so the bound is `<
+    key_indent`, not `<=`. Reading it as `<=` returned "" for
+
+        stages:
+        - manual
+
+    and every caller treats "" as "not set", so a hook confined to the manual
+    stage was reported as active coverage. That is the false-coverage bug this
+    whole feature exists to prevent, reintroduced by the indentation style.
+    A sibling key at the same column still ends the sequence: it fails the
+    `- ` test below.
     """
     items = []
+    seq_indent: int | None = None
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
         if _is_blank_or_comment(line):
             continue
-        if _indent_of(line) <= key_indent:
+        indent = _indent_of(line)
+        if indent < key_indent:
             break
         body = line.strip()
         if not body.startswith("- "):
+            break
+        if seq_indent is None:
+            seq_indent = indent
+        elif indent != seq_indent:
+            # Ragged items are not one sequence. Refusing to guess is this
+            # scanner's whole posture.
             break
         items.append(_scalar(body[2:]))
     return "[" + ", ".join(items) + "]" if items else ""
@@ -651,6 +672,21 @@ def reindent(block: str, spaces: int) -> str:
             strip = min(-spaces, _indent_of(line))
             out.append(line[strip:])
     return "\n".join(out)
+
+
+def top_level_scalar(cfg: Config, key: str) -> str | None:
+    """The value of a top-level `<key>:` scalar, or None when the file has none.
+
+    Public because precommit.py needs it and was reaching in through
+    `_split_key` + `_scalar` -- twice, identically. An outside caller using this
+    module's underscore names means the public surface is insufficient for its
+    own consumer, and it pins two unrelated functions in another file to the
+    private return shape of this one.
+    """
+    if key not in cfg.top_keys:
+        return None
+    parsed = _split_key(cfg.lines[cfg.top_keys[key]])
+    return _scalar(parsed[1]) if parsed else None
 
 
 def hook_delta(entry: RepoEntry) -> int | None:

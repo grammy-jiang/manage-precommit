@@ -205,34 +205,54 @@ outcome that otherwise reads as success — name each one.
 
 ## Step 4 — Verify
 
-**Ask before running it.** This is the step that changes files, and it is not
-scoped to this run's work: `--all-files` runs *every* hook — including ones the
-user already had — over *every tracked file*, and the autofixing ones rewrite
-what they touch. Step 3's guard covers only the files this run writes, so an
-unrelated file holding uncommitted work can be rewritten here. Say that, then
-AskUserQuestion: **Run the hooks over all files** / **Only this run's files** /
-**Skip verification**.
+**First, find out what is actually at risk.** This is the step that changes
+files, and it is not scoped to this run's work: `--all-files` runs *every* hook
+— including ones the user already had — over *every tracked file*, and the
+autofixing ones rewrite what they touch. Step 3's guard covers only the files
+this run writes, so an unrelated file holding uncommitted work can be rewritten
+here. Do not leave that as a hypothetical the user has to imagine:
+
+```bash
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" status --facts "<facts.json>"
+```
+
+Read `dirty_elsewhere`. **Name those files in the question**, or say plainly
+that there are none. A user choosing "all files" is accepting that those exact
+files may be rewritten; asked in the abstract, they accept a risk they cannot
+see, and by the time Step 5.1 shows them the real state the rewrite has already
+happened.
+
+**Then ask.** AskUserQuestion: **Run the hooks over all files** / **Only this
+run's files** / **Skip verification**. Each option has its own command — run the
+one that matches the answer, and nothing else.
 
 - *All files* — the full check, and the honest one; autofixes elsewhere are
   reported in Step 5 and never committed by this skill.
+
+  ```bash
+  python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify --facts "<facts.json>"
+  ```
+
 - *Only this run's files* — write `files.written` to a `mktemp` file with the
   Write tool and pass `--files-file`, never `--files` (see the recovery block
   below for why). Narrower, and it will not tell you whether the hooks pass on
   the rest of the repo.
-- *Skip* — nothing is installed and nothing is checked. `pre-commit install`,
-  which writes `.git/hooks/pre-commit`, runs only inside this step, so skipping
-  it leaves the config written and **no hook active**: the next `git commit`
-  triggers nothing. Say exactly that, then continue to Step 5 as normal; when
-  you reach Step 6, add `--note "verification skipped; git hook not installed"`
-  to the `gitwork.py facts` call — `--note` is a Step 6 flag and no Step 5
-  subcommand accepts it. They can install it later by re-running this step, or
-  by hand with `pre-commit install`.
 
-```bash
-python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify --facts "<facts.json>"
-```
+  ```bash
+  python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify \
+      --facts "<facts.json>" --files-file "<paths.txt>"
+  ```
 
-Installs the git hook and runs it. **Read `run_ok`, not the exit code of your own
+- *Skip* — **run neither command.** Nothing is installed and nothing is checked.
+  `pre-commit install`, which writes `.git/hooks/pre-commit`, runs only inside
+  this step, so skipping it leaves the config written and **no hook active**:
+  the next `git commit` triggers nothing. Say exactly that, then continue to
+  Step 5 as normal; when you reach Step 6, add `--note "verification skipped;
+  git hook not installed"` to the `gitwork.py facts` call — `--note` is a Step 6
+  flag and no Step 5 subcommand accepts it. They can install it later by
+  re-running this step, or by hand with `pre-commit install`.
+
+Whichever command ran installs the git hook and runs it. **Read `run_ok`, not the exit code of your own
 reading of the output** — the tool already judged two outcomes that look like
 success and are not.
 
@@ -335,11 +355,15 @@ change and not an intention:
   take the first, show it back, and write only that line to the file. If a
   commit does fail citing the line count, rewrite the file with one line and
   re-run the same command.
-- **Restate an unresolved Step 4 failure.** If the verify run was not a clean
-  pass — a genuine hook failure, not a vacuous run or an autofix — say so again
-  here, plainly, immediately before the question. It may have scrolled well out
-  of view, and approving *Commit + push* while a secret scan or a linter is
-  still failing is a decision nobody would make knowingly.
+- **Note an unresolved Step 4 failure**, if the verify run was not a clean pass
+  — a genuine hook failure, not a vacuous run or an autofix. Mention it here,
+  and restate it **last**, in the block directly above the question. It may have
+  scrolled well out of view, and approving *Commit + push* while a secret scan
+  or a linter is still failing is a decision nobody would make knowingly. This
+  item used to claim it was "immediately before the question" while sitting
+  second of five — the three items below it are routine mechanics, and burying
+  a failing secret scan under them is exactly the outcome the rule exists to
+  prevent.
 - **Say what else this run touched.** If Step 4 reported a non-empty
   `autofixed`, say so plainly *before* asking: "verifying the hooks also
   modified `<those files>` elsewhere in your tree. This run will not stage or
@@ -379,6 +403,17 @@ change and not an intention:
   plainly, before the question.** Offering *Commit + push* with no warning to
   someone whose repo has no remote gets them a commit and a failed push they
   were not warned about. The three options below stay the same either way.
+
+**Last, adjacent to the question**, if and only if Step 4 ended in a genuine
+failure, say it again on its own line and mark it so it survives a skim:
+
+```text
+STILL FAILING: <hook> — this commit would carry it.
+```
+
+Nothing goes between that line and the question. If the verify run passed, was
+vacuous, or only autofixed, this line does not appear at all — a marker that
+shows up routinely stops being read.
 
 Then AskUserQuestion — exactly these, never an "also commit other changes"
 option: **Commit + push** / **Commit only** (local) / **Don't commit**.

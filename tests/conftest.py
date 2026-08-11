@@ -136,7 +136,7 @@ COVER_SUBPROCESSES = os.environ.get("MP_COVER_SUBPROCESS") == "1"
 REPO = Path(__file__).resolve().parents[1]
 
 
-def script_command(script: str, args: tuple[str, ...]) -> list[str]:
+def script_command(script: str, args: tuple[str, ...], scripts: Path = SCRIPTS) -> list[str]:
     """The argv that runs `script`, under coverage when asked.
 
     --rcfile is absolute because these subprocesses are started in throwaway
@@ -146,7 +146,26 @@ def script_command(script: str, args: tuple[str, ...]) -> list[str]:
     launcher = [sys.executable]
     if COVER_SUBPROCESSES:
         launcher += ["-m", "coverage", "run", "--parallel-mode", f"--rcfile={REPO}/pyproject.toml"]
-    return [*launcher, str(SCRIPTS / script), *args]
+    return [*launcher, str(scripts / script), *args]
+
+
+@pytest.fixture
+def skill_copy(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A throwaway copy of the whole skill tree, safe to corrupt.
+
+    A test that needs a malformed template must never write one through the
+    real SKILL path. Restoring in a `finally` is not enough: a SIGKILL, an xdist
+    worker crash, --timeout, OOM or Ctrl-C between the write and the restore
+    leaves a forged-byte template in the working tree, one `git add -A` from
+    being shipped -- and the shipped templates are exactly the bytes this skill
+    writes into other people's repositories.
+
+    The whole tree, not just templates/: the scripts resolve their siblings from
+    their own directory, and SKILL_DIR is derived from __file__.
+    """
+    dest = tmp_path_factory.mktemp("skillcopy") / "skill"
+    shutil.copytree(SKILL, dest)
+    return dest
 
 
 def run(
@@ -156,8 +175,13 @@ def run(
     cwd: Path | None = None,
     only_path: bool = False,
     stdin: str | None = None,
+    scripts: Path | None = None,
 ):
     """Run one of the skill's scripts exactly as SKILL.md does.
+
+    `scripts` points at a copy of the skill tree (see the `skill_copy` fixture)
+    for the few tests that need a deliberately malformed template. They must not
+    write one through the real SKILL path.
 
     `only_path` REPLACES PATH with the stub directory instead of prepending to
     it -- the only way to test what happens when an external tool is genuinely
@@ -171,7 +195,7 @@ def run(
         env["PATH"] = str(stubs) if only_path else f"{stubs}{os.pathsep}{env['PATH']}"
     env["NO_COLOR"] = "1"
     return subprocess.run(
-        script_command(script, args),
+        script_command(script, args, scripts or SCRIPTS),
         capture_output=True,
         text=True,
         env=env,

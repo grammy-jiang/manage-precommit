@@ -41,6 +41,7 @@ from shared import (
     Facts,
     ManagedFile,
     Recommendation,
+    RecommendReport,
     atomic_write_bytes,
     clean,
     default_file_mode,
@@ -54,6 +55,7 @@ from shared import (
     read_json_or_die,
     refuse_facts_inside_repo,
     refuse_option_like,
+    safe_porcelain,
     write_json_or_die,
 )
 
@@ -378,10 +380,8 @@ def exclude_pattern(cfg: cfgmod.Config) -> str | None:
     Surfaced because a broad one silently switches every hook off, and being
     pre-existing it shows up in no diff this run produces.
     """
-    if "exclude" not in cfg.top_keys:
-        return None
-    parsed = cfgmod._split_key(cfg.lines[cfg.top_keys["exclude"]])
-    return clean(cfgmod._scalar(parsed[1])) if parsed else None
+    value = cfgmod.top_level_scalar(cfg, "exclude")
+    return clean(value) if value is not None else None
 
 
 def present_keys(cfg: cfgmod.Config | None) -> list[str]:
@@ -486,20 +486,17 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
     """
     if not is_work_tree(git, directory):
         return  # not a work tree: nothing is tracked, so nothing can be pending
-    rc, out, err = git(
-        directory, "status", "--porcelain", "--no-renames", "--", *paths, strip=False
+    # A failure here is NOT "found nothing dirty" -- returning would merge into
+    # whatever the user had in progress, which is the one thing this function
+    # exists to prevent. safe_porcelain owns that policy; the exit code is ours,
+    # so it goes in through a die that closes over EXIT_DIRTY.
+    out = safe_porcelain(
+        git,
+        directory,
+        paths,
+        lambda msg: die(msg, code=EXIT_DIRTY),
+        what="whether this run's files are already modified",
     )
-    if rc != 0:
-        # NOT the same as "found nothing dirty". A locked or corrupt index makes
-        # this fail transiently, and returning here would merge into whatever
-        # the user had in progress while the whole point of the function is that
-        # it never does. Unknown is not clean.
-        die(
-            f"could not check whether this run's files are already modified "
-            f"(git status exited {rc}: {err or 'no stderr'}). Refusing to continue, "
-            "because a failed check is not a clean result.",
-            code=EXIT_DIRTY,
-        )
     dirty = [ln[3:].strip() for ln in out.splitlines() if ln[:2] != "??" and ln[3:].strip()]
     if dirty:
         listed = ", ".join(clean(d) for d in dirty)
@@ -548,9 +545,7 @@ def plan(
             # reads as a success while nothing is actually being scanned. The
             # line is pre-existing, so it appears in no inserted hunk and the
             # Step 5 diff never shows it either.
-            line = cfg.lines[cfg.top_keys["exclude"]]
-            parsed = cfgmod._split_key(line)
-            pattern = clean(cfgmod._scalar(parsed[1])) if parsed else ""
+            pattern = exclude_pattern(cfg) or ""
             report.append(
                 (
                     "kept",
@@ -1045,19 +1040,20 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
             "hooks": {"recommended": recs, "disabled": sorted(disabled)},
         }
         write_json_or_die(facts_out, dict(facts), die)
-    emit(
-        {
-            "always_on": list(ALWAYS_ON),
-            "recommended": recs,
-            "previous": previous,
-            "disabled": disabled,
-            "proposed": proposed,
-            "detected": markers,
-            "detected_paths": trigger_paths,
-            "prev_repos": len(cfg.repos) if cfg else 0,
-            "config": "existing" if cfg else "none",
-        }
-    )
+    # Annotated, so the shape shared.RecommendReport documents is the shape mypy
+    # actually enforces here. It had drifted two fields while claiming otherwise.
+    report: RecommendReport = {
+        "always_on": list(ALWAYS_ON),
+        "recommended": recs,
+        "previous": previous,
+        "disabled": disabled,
+        "proposed": proposed,
+        "detected": markers,
+        "detected_paths": trigger_paths,
+        "prev_repos": len(cfg.repos) if cfg else 0,
+        "config": "existing" if cfg else "none",
+    }
+    emit(report)
     return 0
 
 
@@ -1125,14 +1121,9 @@ def dirty_paths(directory: str) -> set[str]:
     and Step 5 promises to disclose that list before the commit question. A
     failed check returning an empty set would either invent autofixes (if the
     BEFORE call failed) or silently drop the disclosure entirely (if the AFTER
-    one did), which is the failure porcelain() in gitwork already refuses.
+    one did) -- the failure shared.safe_porcelain refuses on everyone's behalf.
     """
-    rc, out, err = git(directory, "status", "--porcelain", "--no-renames", strip=False)
-    if rc != 0:
-        die(
-            f"git status failed (exit {rc}): {err or 'no stderr'}. Refusing to report "
-            "what the hooks changed, because a failed check is not a clean result."
-        )
+    out = safe_porcelain(git, directory, (), die, what="what the hooks changed")
     return {p for ln in out.splitlines() if (p := porcelain_path(ln))}
 
 
