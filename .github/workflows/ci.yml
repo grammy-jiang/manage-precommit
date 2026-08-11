@@ -96,11 +96,23 @@ jobs:
       # The hooks build their own environments -- Go for gitleaks, Node for
       # markdownlint and mermaid -- which is most of the runtime. Keyed on the
       # config, so a rev bump rebuilds and nothing else does.
+      #
+      # BOTH paths, because they are two halves of one environment: the node env
+      # holds mermaid-cli, and the browser it drives is downloaded by npm's
+      # postinstall into ~/.cache/puppeteer. Caching only the first restored a
+      # linter with no browser on every cache HIT, and a cache entry is
+      # immutable, so nothing would ever repair it. That is why the tag run
+      # failed at the exact commit master had just passed: master missed the
+      # cache and rebuilt both halves. Both are functions of the same file --
+      # mermaid-cli's version is pinned there -- so one key covers them.
+      # The -v2 discriminator retires the half-populated entry.
       - name: Cache hook environments
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          path: |
+            ~/.cache/pre-commit
+            ~/.cache/puppeteer
+          key: pre-commit-${{ runner.os }}-v2-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install
         run: python -m pip install --upgrade pip && pip install pre-commit pyyaml
