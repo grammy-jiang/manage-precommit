@@ -38,12 +38,38 @@ a parse error.
 
 ## Install
 
-Clone the repo and symlink the skill directory into your skills directory:
+Both routes install a **symlink** into `~/.claude/skills/`, never a copy — so
+there is only ever one set of files, and nothing can drift out of sync. Restart
+Claude Code to pick it up.
+
+### As a package
+
+```bash
+# not on PyPI yet -- install straight from the repository:
+pipx install git+https://github.com/grammy-jiang/manage-precommit.git
+manage-precommit install
+```
+
+The package is an installer and nothing else; all the work lives in the skill
+files it links. `--dry-run` prints what would happen, refusals included;
+`--dest DIR` overrules the default location; `--force` acts on something that
+is not ours. `manage-precommit uninstall` removes the link and leaves the
+package alone.
+
+It refuses to touch anything it did not create: a real directory there may be a
+hand-written skill, and a link pointing elsewhere is not its to remove.
+
+### From a checkout
 
 ```bash
 git clone git@github.com:grammy-jiang/manage-precommit.git
-ln -s "$PWD/manage-precommit/src/manage_precommit/skill" ~/.claude/skills/manage-precommit
+cd manage-precommit
+make install     # ~/.claude/skills/manage-precommit -> ./src/manage_precommit/skill
+make uninstall
 ```
+
+This links the working tree, so an edit is live on the next Claude Code restart
+with no rebuild.
 
 ## Usage
 
