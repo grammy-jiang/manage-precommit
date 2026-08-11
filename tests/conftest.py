@@ -123,18 +123,47 @@ def no_tags_stub(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return d
 
 
+# Almost every test in this suite drives a script as a subprocess, which a plain
+# coverage run cannot see: it measures the pytest process, and the code under
+# test never executes there. Without this the report understates the scripts by
+# roughly two thirds. Off by default -- it costs a coverage startup per
+# subprocess, and this suite starts hundreds of them.
+#
+# `coverage run <script>` sets sys.path[0] to the script's own directory, the
+# same as `python <script>` does, so this does NOT weaken the standalone
+# property that removing PYTHONPATH below exists to prove.
+COVER_SUBPROCESSES = os.environ.get("MP_COVER_SUBPROCESS") == "1"
+REPO = Path(__file__).resolve().parents[1]
+
+
+def script_command(script: str, args: tuple[str, ...]) -> list[str]:
+    """The argv that runs `script`, under coverage when asked.
+
+    --rcfile is absolute because these subprocesses are started in throwaway
+    repositories, not in the checkout; a relative one would silently miss the
+    settings and measure the wrong thing.
+    """
+    launcher = [sys.executable]
+    if COVER_SUBPROCESSES:
+        launcher += ["-m", "coverage", "run", "--parallel-mode", f"--rcfile={REPO}/pyproject.toml"]
+    return [*launcher, str(SCRIPTS / script), *args]
+
+
 def run(
     script: str,
     *args: str,
     stubs: Path | None = None,
     cwd: Path | None = None,
     only_path: bool = False,
+    stdin: str | None = None,
 ):
     """Run one of the skill's scripts exactly as SKILL.md does.
 
     `only_path` REPLACES PATH with the stub directory instead of prepending to
     it -- the only way to test what happens when an external tool is genuinely
     absent, since prepending leaves the real one still findable behind it.
+
+    `stdin` feeds the process, for the one script SKILL.md pipes into.
     """
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)  # prove the scripts resolve each other unaided
@@ -142,11 +171,12 @@ def run(
         env["PATH"] = str(stubs) if only_path else f"{stubs}{os.pathsep}{env['PATH']}"
     env["NO_COLOR"] = "1"
     return subprocess.run(
-        [sys.executable, str(SCRIPTS / script), *args],
+        script_command(script, args),
         capture_output=True,
         text=True,
         env=env,
         cwd=str(cwd) if cwd else None,
+        input=stdin,
         timeout=120,
     )
 

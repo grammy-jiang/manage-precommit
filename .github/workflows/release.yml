@@ -1,0 +1,161 @@
+name: Release
+
+# Tag-driven, and gated. Pushing v* runs the full CI suite -- tests on 3.10
+# through 3.14, lint, type-check, every pre-commit hook, and the per-file
+# coverage floor -- and only if all of it passes does anything get built,
+# attached to a GitHub Release, or published to PyPI via Trusted Publishing
+# (OIDC). No API token is stored here.
+#
+# The gate is `ci.yml` itself, called as a reusable workflow, not a second copy
+# of the same steps. A copy drifts from the original, and the copy is the one a
+# release would be trusting.
+#
+# PyPI setup (one time), at https://pypi.org/manage/account/publishing/ :
+#   PyPI project name  manage-precommit
+#   Owner              grammy-jiang
+#   Repository         manage-precommit
+#   Workflow           release.yml
+#   Environment        pypi
+# A failed `pypi` job uploads nothing, so the version is not burned: fix the
+# publisher and re-run the job. `build` and `github-release` still succeed, so a
+# tag always produces downloadable artifacts.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap and first: a tag that disagrees with the packaged version fails in
+  # seconds rather than after five test matrices have run.
+  check-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches the packaged version
+        # All three, not just two: the version lives in pyproject.toml and in
+        # __init__.py, and `manage-precommit --version` reads the second one.
+        run: |
+          python - "${GITHUB_REF_NAME#v}" <<'PY'
+          import pathlib, re, sys, tomllib
+
+          tag = sys.argv[1]
+          pkg = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          init = re.search(
+              r'__version__ = "([^"]+)"',
+              pathlib.Path("src/manage_precommit/__init__.py").read_text(),
+          ).group(1)
+          if not tag == pkg == init:
+              raise SystemExit(f"tag {tag} / pyproject {pkg} / __init__ {init} disagree")
+          print(f"tag v{tag} matches the packaged version")
+          PY
+
+  # Every gate CI applies to a pull request, applied to the tag as well.
+  gates:
+    needs: check-tag
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check metadata
+        run: pipx run twine check dist/*
+
+      # The package exists to deliver the skill, so a wheel that builds but does
+      # not contain it is the one failure this workflow must not ship. Cheap to
+      # check, and it catches a packaging change (a stray force-include, a
+      # narrowed `packages`) that every other gate passes.
+      - name: The wheel actually contains the skill
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          names = set(zipfile.ZipFile(wheel).namelist())
+          need = [
+              "manage_precommit/skill/SKILL.md",
+              "manage_precommit/skill/scripts/precommit.py",
+              "manage_precommit/skill/scripts/gitwork.py",
+              "manage_precommit/skill/scripts/config.py",
+              "manage_precommit/skill/scripts/shared.py",
+              "manage_precommit/skill/scripts/summary.py",
+              "manage_precommit/cli.py",
+          ]
+          missing = [n for n in need if n not in names]
+          if missing:
+              raise SystemExit(f"{wheel.name} is missing: {missing}")
+          print(f"{wheel.name} carries the skill: {len(names)} entries")
+          PY
+
+      # v6 is the first upload-artifact on Node 24; v4 and v5 target Node 20,
+      # which GitHub deprecated and now force-runs on 24 anyway. v7 adds an
+      # opt-in `archive` parameter we do not set.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # v7 is the first download-artifact on Node 24. v8 also makes a digest
+      # mismatch fail the run rather than log a warning, which is what we want
+      # here: a corrupted artifact must not reach a GitHub Release or PyPI. Its
+      # other breaking change -- the path layout for downloads by artifact ID --
+      # does not apply; this downloads by name.
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+  pypi:
+    # Last, and only after the artifacts are already downloadable from the
+    # GitHub Release. A PyPI upload is the one step in this workflow that cannot
+    # be undone -- a version number, once published, can never be reused.
+    needs: [build, github-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/manage-precommit
+    permissions:
+      id-token: write # the OIDC token Trusted Publishing exchanges; no secret
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

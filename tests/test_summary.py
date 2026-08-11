@@ -260,3 +260,125 @@ def test_the_verify_scope_qualifies_what_passed():
     wide = json.loads(json.dumps(FULL))
     wide["verify"]["scope"] = "all-files"
     assert "every tracked file" in render(wide)
+
+
+# -- the shapes facts.json can arrive in --------------------------------------
+#
+# This file renders whatever the other four scripts wrote, and every optional
+# key is a branch. Untested, a rename upstream turns a whole section into
+# silence -- which reads exactly like "there was nothing to report".
+
+
+@pytest.mark.parametrize(
+    ("mode", "env", "expected"),
+    [
+        ("always", {}, True),
+        ("always", {"NO_COLOR": "1"}, True),  # explicit beats the environment
+        ("never", {}, False),
+        ("never", {"FORCE_COLOR": "1"}, False),
+        ("auto", {"NO_COLOR": "1"}, False),
+        ("auto", {"NO_COLOR": ""}, False),  # NO_COLOR is set-or-not, not truthy
+        ("auto", {"FORCE_COLOR": "1"}, True),
+        ("auto", {}, False),  # not a tty under pytest
+        ("auto", {"TERM": "dumb"}, False),
+    ],
+)
+def test_when_colour_is_used(mode, env, expected, monkeypatch):
+    for var in ("NO_COLOR", "FORCE_COLOR", "TERM"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    assert summary.use_color(mode) is expected
+
+
+def test_a_section_whose_every_row_is_empty_prints_no_header():
+    """Otherwise a bare "VERIFY" heading with nothing under it reads as a bug --
+    and this section in particular is one a reader checks for reassurance."""
+    assert "VERIFY" not in render({"verify": {"skipped": []}})
+
+
+def test_a_single_note_need_not_be_a_list():
+    assert "NOTES" in render({"notes": "the config was already up to date"})
+    assert "up to date" in render({"notes": "the config was already up to date"})
+
+
+def test_notes_are_listed():
+    text = render({"notes": ["first thing", "second thing"]})
+    assert "first thing" in text
+    assert "second thing" in text
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ("existing", "existing -- 2 repos"),
+        ("fresh", "none yet (fresh file)"),
+        ("none", "none"),
+        (None, "none"),
+    ],
+)
+def test_the_prior_config_state_is_spelled_out(config, expected):
+    scan = {"git_repo": True, "prev_repos": 2}
+    if config is not None:
+        scan["config"] = config
+    assert expected in render({"scan": scan})
+
+
+def test_a_directory_that_is_not_a_git_repository_says_so():
+    assert "not a git repo" in render({"scan": {"git_repo": False}})
+
+
+def test_a_recommendation_may_be_a_bare_name():
+    """precommit.py writes dicts; nothing stops a caller writing strings, and a
+    TypeError here would lose the whole summary after the work was done."""
+    assert "markdownlint" in render({"hooks": {"recommended": ["markdownlint"]}})
+
+
+def test_a_forced_push_that_dropped_nothing_says_only_FORCED():
+    facts = json.loads(json.dumps(FULL))
+    facts["commit"]["push"]["forced"] = True
+    text = render(facts)
+    assert "FORCED" in text
+    assert "dropped" not in text
+
+
+def test_a_forced_push_that_dropped_commits_says_how_many():
+    facts = json.loads(json.dumps(FULL))
+    facts["commit"]["push"].update({"forced": True, "dropped": 3})
+    assert "dropped 3 remote commit(s)" in render(facts)
+
+
+def test_a_verify_that_never_ran_shows_no_run_row():
+    text = render({"verify": {"install": "git hook installed"}})
+    assert "install" in text
+    assert "\n  run " not in text  # the row, not the word in the title
+
+
+def test_a_failed_verify_is_still_reported():
+    assert "failed" in render({"verify": {"run": "failed", "run_ok": False}})
+
+
+def test_a_commit_scope_with_nothing_left_untouched():
+    text = render({"commit": {"choice": "commit", "scope": "1 pre-commit setup file only"}})
+    assert "1 pre-commit setup file only" in text
+    assert "untouched" not in text
+
+
+def test_the_net_section_renders_either_half_alone():
+    assert "diff" in render({"net": {"diffstat": "1 file changed"}})
+    assert "1 -> 2" in render({"net": {"prev_repos": 1, "new_repos": 2}})
+
+
+# -- the two ways SKILL.md invokes it -----------------------------------------
+
+
+def test_facts_can_arrive_on_stdin():
+    proc = run_script("summary.py", stdin=json.dumps(FULL))
+    assert proc.returncode == 0, proc.stderr
+    assert "HOOKS" in proc.stdout
+
+
+def test_an_unreadable_facts_path_fails_loudly(tmp_path):
+    proc = run_script("summary.py", str(tmp_path / "never-written.json"))
+    assert proc.returncode == 1
+    assert "cannot read" in proc.stderr

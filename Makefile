@@ -18,10 +18,19 @@ help:
 test:
 	$(PYTHON) -m pytest
 
+# MP_COVER_SUBPROCESS makes the suite run each script under coverage too. Most
+# of it drives them as subprocesses, which a plain run cannot see -- without it
+# the report understates the scripts by roughly two thirds. COVERAGE_FILE is
+# absolute because those subprocesses start in throwaway repositories, and each
+# writes its own data file beside it.
+#
+# The floor is per file, not per project: a project total hides a hole. Same
+# script CI runs, so local and CI cannot drift apart.
 coverage:
 	rm -f .coverage .coverage.*
-	COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) -m pytest --cov --cov-report= -q
+	MP_COVER_SUBPROCESS=1 COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) -m pytest --cov --cov-report= -q
 	COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) -m coverage report
+	COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) tests/check_coverage.py --min 90
 
 lint:
 	$(PYTHON) -m ruff check .
