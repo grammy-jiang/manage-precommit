@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+from typing import Any
 
 from shared import (
     NotARegularFile,
@@ -172,7 +173,7 @@ def push_line(push: object, pal: Pal) -> str | None:
     return line
 
 
-def render(facts: dict, pal: Pal) -> str:
+def render(facts: dict[str, Any], pal: Pal) -> str:
     lines: list[str] = []
     title = clean(facts.get("title", "manage-precommit - run summary"))
     lines.append(pal.title(title))

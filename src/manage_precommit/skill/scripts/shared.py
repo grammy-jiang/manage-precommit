@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import NoReturn, TypedDict
+from typing import Any, NoReturn, TypedDict
 
 # Character ranges are declared as integers and the pattern is built at import,
 # rather than written as escapes inside a string literal. A literal here would
@@ -225,7 +225,7 @@ def preserved_mode(path: str) -> int:
         return default_file_mode()
 
 
-def write_json(path: str, payload: dict) -> None:
+def write_json(path: str, payload: Mapping[str, object]) -> None:
     """Write a facts file atomically, keeping its permissions.
 
     Several commands update this file in turn; a half-written one would fail the
@@ -236,7 +236,7 @@ def write_json(path: str, payload: dict) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
 
 
-def read_json_or_die(path: str, die: Callable[[str], NoReturn]) -> dict:
+def read_json_or_die(path: str, die: Callable[[str], NoReturn]) -> dict[str, Any]:
     """Read the facts JSON, or stop with the caller's die().
 
     The tools' cross-boundary handshake, and it was implemented three times --
@@ -254,7 +254,9 @@ def read_json_or_die(path: str, die: Callable[[str], NoReturn]) -> dict:
     return parsed
 
 
-def write_json_or_die(path: str, payload: dict, die: Callable[[str], NoReturn]) -> None:
+def write_json_or_die(
+    path: str, payload: Mapping[str, object], die: Callable[[str], NoReturn]
+) -> None:
     """write_json with the failure turned into a caller's die().
 
     Mirrors read_bytes_or_die so every script reports an unwritable facts file

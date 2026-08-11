@@ -33,10 +33,11 @@ jobs:
   # seconds rather than after five test matrices have run.
   check-tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -66,10 +67,11 @@ jobs:
   build:
     needs: gates
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -111,7 +113,7 @@ jobs:
       # v6 is the first upload-artifact on Node 24; v4 and v5 target Node 20,
       # which GitHub deprecated and now force-runs on 24 anyway. v7 adds an
       # opt-in `archive` parameter we do not set.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: dist
           path: dist/
@@ -119,6 +121,7 @@ jobs:
   github-release:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -127,7 +130,7 @@ jobs:
       # here: a corrupted artifact must not reach a GitHub Release or PyPI. Its
       # other breaking change -- the path layout for downloads by artifact ID --
       # does not apply; this downloads by name.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: dist
           path: dist
@@ -147,15 +150,16 @@ jobs:
     # be undone -- a version number, once published, can never be reused.
     needs: [build, github-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/p/manage-precommit
     permissions:
       id-token: write # the OIDC token Trusted Publishing exchanges; no secret
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: dist
           path: dist
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1

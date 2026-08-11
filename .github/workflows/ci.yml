@@ -9,6 +9,10 @@ on:
   # copy of them. A copy drifts, and the copy is the one a release trusts.
   workflow_call:
 
+# Every `uses:` below is pinned to a commit SHA, not a tag: a tag is a mutable
+# ref, and this repository's release workflow calls these same jobs before
+# publishing to PyPI. The trailing comment names the version the SHA was, so a
+# human can still read the file. .github/dependabot.yml watches the pins.
 permissions:
   contents: read
 
@@ -20,6 +24,7 @@ jobs:
   test:
     name: Test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -27,9 +32,9 @@ jobs:
         # classifiers. A claim nothing runs against is a guess.
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -55,10 +60,11 @@ jobs:
   quality:
     name: Lint and type-check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           # The oldest supported version, so a construct newer than 3.10 is
           # caught by the type-checker here rather than by a user on 3.10.
@@ -85,10 +91,11 @@ jobs:
     # tool for managing exactly this file; it has to hold itself to it.
     name: Hooks (pre-commit)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.13"
           cache: pip
@@ -107,7 +114,7 @@ jobs:
       # mermaid-cli's version is pinned there -- so one key covers them.
       # The -v2 discriminator retires the half-populated entry.
       - name: Cache hook environments
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cache/pre-commit
@@ -152,10 +159,11 @@ jobs:
   coverage:
     name: Coverage (every file >= 90%)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.13"
           cache: pip
