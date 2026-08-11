@@ -94,7 +94,7 @@ the scripts as subprocesses, which a plain coverage run cannot see — without i
 the report understates them by roughly two thirds. `COVERAGE_FILE` is absolute
 because those subprocesses start in throwaway repositories.
 
-The floor is **per file, not per project**: a project total hides a hole, and
+The floor is **95%, per file, not per project**: a project total hides a hole, and
 the barely-covered file is where the next bug is. `tests/check_coverage.py` is
 the enforcer, and CI runs that same script rather than a second threshold that
 could drift from it.

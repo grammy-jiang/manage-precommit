@@ -31,7 +31,7 @@ coverage:
 	rm -f .coverage .coverage.*
 	MP_COVER_SUBPROCESS=1 COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) -m pytest --cov --cov-report= -q
 	COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) -m coverage report
-	COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) tests/check_coverage.py --min 90
+	COVERAGE_FILE=$(CURDIR)/.coverage $(PYTHON) tests/check_coverage.py --min 95
 
 lint:
 	$(PYTHON) -m ruff check .
