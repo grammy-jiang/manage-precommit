@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from collections.abc import Mapping
 from typing import NoReturn, cast
@@ -54,6 +55,7 @@ from shared import (
     read_json_or_die,
     refuse_facts_inside_repo,
     refuse_option_like,
+    safe_porcelain,
     write_json_or_die,
 )
 
@@ -161,9 +163,16 @@ DISCARD_COMMAND = {
 
 
 def discards(states: dict[str, str]) -> dict[str, str]:
-    """The command that would discard each managed file's change."""
+    """The command that would discard each managed file's change.
+
+    shlex.quote, because SKILL.md relays these as literal, copy-pasteable shell
+    commands. Today's managed names are tame, but a filename with a space turns
+    `rm -- my file.yaml` into two arguments -- data loss for the rm, a silent
+    no-op for the git ones -- and the set of managed files is not a constant
+    here: it grows with the catalog.
+    """
     return {
-        path: DISCARD_COMMAND.get(state, "").format(path=path)
+        path: DISCARD_COMMAND.get(state, "").format(path=shlex.quote(path))
         for path, state in states.items()
         if DISCARD_COMMAND.get(state)
     }
@@ -174,20 +183,32 @@ def porcelain(repo: str, paths: list[str]) -> str:
 
     Unstripped: the leading column is meaningful (see shared.make_git).
 
-    A non-zero exit is fatal rather than empty. Empty output means "nothing
-    changed", and file_states() seeds every path clean -- so swallowing a
-    failure here (a locked index, an I/O error) would report the whole set as
-    clean, `status` would emit changed:false, and SKILL.md's Step 5 table would
-    send the agent to the summary with "no change: the config already matched",
-    silently discarding work this run had just written.
+    A non-zero exit is fatal rather than empty, which is shared.safe_porcelain's
+    whole policy: file_states() seeds every path clean, so swallowing a failure
+    here would report the whole set as clean, `status` would emit changed:false,
+    and SKILL.md's Step 5 table would send the agent to the summary with "no
+    change: the config already matched", silently discarding work this run had
+    just written.
     """
-    rc, out, err = git(repo, "status", "--porcelain", "--no-renames", "--", *paths, strip=False)
-    if rc != 0:
-        die(
-            f"git status failed (exit {rc}): {err or 'no stderr'}. Refusing to report "
-            "the state of this run's files, because a failed check is not a clean result."
-        )
-    return out
+    return safe_porcelain(git, repo, paths, die, what="the state of this run's files")
+
+
+def dirty_elsewhere(repo: str, managed: list[str]) -> list[str]:
+    """Tracked files with uncommitted changes that this run does NOT own.
+
+    Untracked files are excluded: `pre-commit run --all-files` covers tracked
+    files only, so an untracked one is not at risk from the choice this list
+    exists to inform.
+    """
+    owned = {os.path.normpath(p) for p in managed}
+    out = []
+    for line in safe_porcelain(git, repo, (), die, what="what else is uncommitted").splitlines():
+        if len(line) < 4 or line[:2] == "??":
+            continue
+        path = porcelain_path(line)
+        if path and os.path.normpath(path) not in owned:
+            out.append(clean(path))
+    return sorted(out)
 
 
 def file_states(repo: str, paths: list[str]) -> dict[str, str]:
@@ -284,6 +305,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             "diff_commands": commands,
             "diff": diff,
             "changed": any(s != "clean" for s in states.values()),
+            # What Step 4's `--all-files` question is actually about. The
+            # autofixing hooks rewrite whatever they are pointed at, and this
+            # run's own guard covers only this run's files -- so THESE are the
+            # files a user is putting at risk by choosing "all files". Stated as
+            # a list rather than left for them to imagine: asked in the
+            # abstract, the risk is accepted blind, and the concrete state only
+            # showed up in Step 5.1, after the rewrite.
+            "dirty_elsewhere": dirty_elsewhere(repo, paths),
             "suspicious_characters": suspicious,
         }
     )
@@ -307,11 +336,18 @@ def safe_ref(ref: str) -> str:
 
 
 def commit_files(repo: str, ref: str = "HEAD") -> list[str]:
-    """Paths touched by a commit. A failed lookup is an error, not an empty commit."""
+    """Paths touched by a commit. A failed lookup is an error, not an empty commit.
+
+    clean()ed like every other repo-derived string that reaches a person. These
+    names carry the "commit touches <extra> -- do NOT push" warning and the
+    content-mismatch alert, which are the two lines here most meant to stop
+    somebody -- so they are the last place a bidi override should be able to
+    rearrange what is on screen.
+    """
     rc, out, err = git(repo, "show", "--name-only", "--format=", safe_ref(ref))
     if rc != 0:
         die(f"cannot read commit {ref}: {err or f'git exit {rc}'}")
-    return [line for line in out.splitlines() if line.strip()]
+    return [clean(line) for line in out.splitlines() if line.strip()]
 
 
 def undo_hint(repo: str, ref: str = "HEAD") -> str:
@@ -558,7 +594,12 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # stay aligned and ln[3:] really is the path on every line. --no-renames
     # keeps every line "XY path"; with renames a line reads "R  old -> new" and
     # the comparison would miss.
-    _, all_status, _ = git(repo, "status", "--porcelain", "--no-renames", strip=False)
+    # Through safe_porcelain like every sibling call: a failed check here used
+    # to come back as "" and so as ZERO untouched files, and SKILL.md Step 5
+    # makes this load-bearing ("say what else this run touched ... otherwise the
+    # user finds out from the summary, after the fact"). Silence is the one
+    # answer that must not be produced by an error.
+    all_status = safe_porcelain(git, repo, (), die, what="what else this commit left untouched")
     untouched = [ln for ln in all_status.splitlines() if porcelain_path(ln) not in set(paths)]
 
     # The blob id of exactly the bytes just verified, taken before staging; each
@@ -655,7 +696,10 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # autofixed by name, and a bare "1 other file" beside that list left the
     # reader unable to tell whether the two describe the same files -- so
     # neither number could be checked.
-    untouched_names = sorted(porcelain_path(ln) for ln in untouched)
+    # porcelain_path deliberately UNDOES git's C-quoting, so it hands back the
+    # real bytes of the name -- which is right for comparing paths and wrong for
+    # showing them. Every other display list here is cleaned; this one was not.
+    untouched_names = sorted(clean(porcelain_path(ln)) for ln in untouched)
     n = len(untouched_names)
     phrase = f"{n} other file{'' if n == 1 else 's'}" if n else None
     result = {
@@ -791,6 +835,14 @@ def push_plan(repo: str) -> PushPlan:
             "local_overrides": overrides,
             "native_hooks": hooks_present,
         }
+    # No allowlist check on `remote` here, and that is deliberate -- see the
+    # test named for it. Reaching this line at all means `git rev-parse @{u}`
+    # succeeded above, and git only resolves @{u} when branch.<branch>.remote
+    # names a CONFIGURED remote with a live remote-tracking ref. Put a URL there
+    # and @{u} fails; remove the remote's config section and it fails too. Both
+    # land in the no-upstream branch, which enumerates `git remote` and refuses
+    # anything not on it. Measured, not assumed. A second check here would be
+    # unreachable code wearing a security rationale, which is worse than none.
     _, remote, _ = git(repo, "config", "--get", f"branch.{branch}.remote")
     _, merge_ref, _ = git(repo, "config", "--get", f"branch.{branch}.merge")
     _, upstream_sha, _ = git(repo, "rev-parse", "@{u}")

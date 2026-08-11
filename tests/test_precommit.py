@@ -13,12 +13,12 @@ import pytest
 from conftest import NPM_VERSION, REAL_GIT, SKILL, out_json, run, stub_calls
 
 
-def generate(repo, keys_file, facts_path, stubs, *names, force=False):
+def generate(repo, keys_file, facts_path, stubs, *names, force=False, scripts=None):
     args = ["--dir", str(repo), "--templates-file", str(keys_file(*names))]
     if force:
         args.append("--force")
     args += ["--facts-out", str(facts_path)]
-    return run("precommit.py", *args, stubs=stubs)
+    return run("precommit.py", *args, stubs=stubs, scripts=scripts)
 
 
 # -- recommend ---------------------------------------------------------------
@@ -594,7 +594,7 @@ def test_verify_reports_a_non_utf8_facts_file_cleanly(repo, keys_file, facts_pat
 
 
 def test_a_forged_character_this_run_would_insert_stops_the_write(
-    repo, keys_file, facts_path, stubs
+    repo, keys_file, facts_path, stubs, skill_copy
 ):
     """The check is that WE never introduce one.
 
@@ -603,20 +603,24 @@ def test_a_forged_character_this_run_would_insert_stops_the_write(
     an ordinary comment -- refused every future run permanently, with no line
     number and no entry in the error table. A character the user already had is
     theirs; `--detect` reports it instead.
-    """
-    import shutil
 
-    fragment = SKILL / "templates" / "gitleaks.yaml"
-    backup = fragment.read_bytes()
-    try:
-        fragment.write_bytes(backup.replace(b"gitleaks\n", "gitleaks\u202e\n".encode(), 1))
-        proc = generate(repo, keys_file, facts_path, stubs, "gitleaks")
-        assert proc.returncode != 0
-        assert "insert" in proc.stderr
-        assert not (repo / ".pre-commit-config.yaml").exists()
-    finally:
-        fragment.write_bytes(backup)
-    assert shutil  # the import is only here to keep the finally obvious
+    Corrupts a COPY of the skill tree. This used to write the forged bytes over
+    the real shipped templates/gitleaks.yaml and restore in a `finally` -- so
+    any interruption in between (SIGKILL, an xdist worker crash, --timeout,
+    Ctrl-C) left a poisoned template in the working tree, one `git add -A` from
+    being shipped into other people's repositories.
+    """
+    fragment = skill_copy / "templates" / "gitleaks.yaml"
+    original = fragment.read_bytes()
+    fragment.write_bytes(original.replace(b"gitleaks\n", "gitleaks\u202e\n".encode(), 1))
+
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts")
+    assert proc.returncode != 0
+    assert "insert" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+    assert (SKILL / "templates" / "gitleaks.yaml").read_bytes() == original, (
+        "the real shipped template was touched"
+    )
 
 
 def test_a_pre_existing_forged_character_is_reported_not_blocked(
@@ -1595,3 +1599,217 @@ def test_two_file_sources_are_refused_before_the_git_hook_is_installed(
     assert proc.returncode != 0
     assert "not both" in proc.stderr
     assert not hook.exists(), "the repository was mutated before the argument was checked"
+
+
+# -- round 15 ----------------------------------------------------------------
+
+
+def test_a_selected_key_missing_from_the_written_file_refuses_after_the_write(
+    repo, keys_file, facts_path, stubs, skill_copy
+):
+    """SKILL.md Step 3 names this as one of two exits that happen AFTER the
+    config is written ('a live .pre-commit-config.yaml is now in their tree'),
+    and nothing tested it -- deleting the verify_written call failed no test."""
+    fragment = skill_copy / "templates" / "gitleaks.yaml"
+    fragment.write_bytes(
+        fragment.read_bytes().replace(
+            b"https://github.com/gitleaks/gitleaks", b"https://example.invalid/other"
+        )
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", scripts=skill_copy / "scripts")
+    assert proc.returncode != 0
+    assert "is not in it" in proc.stderr
+    assert proc.stdout.strip() == "", "a post-write failure must not also report success"
+    assert (repo / ".pre-commit-config.yaml").exists(), (
+        "the premise of this refusal is that the file is already on disk"
+    )
+
+
+def test_a_manual_only_hook_written_at_its_key_s_column_is_still_seen_as_disabled(repo, stubs):
+    """End to end for the scanner fix: this indentation style used to report a
+    secret scanner confined to `pre-commit run --hook-stage manual` as active
+    coverage."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n"
+        "    hooks:\n"
+        "      - id: gitleaks\n"
+        "        stages:\n"
+        "        - manual\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+def test_the_recommend_payload_carries_every_field_its_type_declares(repo, stubs):
+    """RecommendReport was declared and never applied, and had already drifted
+    two fields behind the payload while reading as though mypy were watching."""
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    for field in (
+        "always_on",
+        "recommended",
+        "previous",
+        "disabled",
+        "proposed",
+        "detected",
+        "detected_paths",
+        "prev_repos",
+        "config",
+    ):
+        assert field in got, field
+
+
+def test_a_broad_exclude_is_reported_with_its_pattern(repo, keys_file, facts_path, stubs):
+    """Both readers of the top-level exclude: now go through one public call."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "exclude: '.*'\nrepos:\n"
+        "  - repo: https://github.com/psf/black\n    rev: 24.1.0\n"
+        "    hooks:\n      - id: black\n"
+    )
+    proc = generate(repo, keys_file, facts_path, stubs, "gitleaks", force=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "pattern: .*" in proc.stderr
+    assert "EVERY hook" in proc.stderr
+
+
+# -- round 16 ----------------------------------------------------------------
+
+
+def test_an_unrelated_local_hook_is_not_attributed_to_mermaid(repo, stubs):
+    """`repo: local` is a bucket anybody's hooks sit in. Matching the URL alone
+    reported every disabled local hook as mermaid's -- the mirror of the
+    false-coverage bug: instead of calling a dead hook live, it calls somebody
+    else's dead hook ours."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "      - id: my-custom-hook\n        name: my-custom-hook\n"
+        "        entry: ./x.sh\n        language: script\n        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" not in got["disabled"], got["disabled"]
+
+
+def test_a_disabled_mermaid_hook_is_still_attributed_to_mermaid(repo, stubs):
+    """The narrowing must not silence the real case."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["disabled"], got["disabled"]
+
+
+def test_a_symlinked_markdown_file_is_not_named_as_the_lint_target(repo, stubs, tmp_path):
+    """trigger_paths is written to a file and passed as --files-file, so
+    `pre-commit run --files` points the autofixing hooks at whatever is named --
+    and gitleaks reads and prints it. The mermaid probe already refuses to READ
+    through a symlink; naming one as the target was the same threat unguarded."""
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY\n")
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    # The ONLY markdown in the tree, so the outcome does not depend on walk
+    # order: unguarded it is necessarily the chosen trigger.
+    (repo / "notes.md").symlink_to(secret)
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "notes.md" not in got["detected_paths"], got["detected_paths"]
+    assert "markdownlint" not in [r["name"] for r in got["recommended"]], got["recommended"]
+
+
+def test_a_repo_cloned_off_this_disk_is_disclosed(repo, stubs):
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: file:///tmp/hooks\n    rev: v1\n    hooks:\n      - id: a\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert got["local_repo_sources"] == ["file:///tmp/hooks"]
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["local_repo_sources"] == ["file:///tmp/hooks"]
+
+
+# -- round 17 ----------------------------------------------------------------
+
+
+def test_verify_written_checks_hook_ids_not_just_the_repo_url():
+    """The commonest merge inserts missing hook IDS into a repo entry whose URL
+    the file already carries -- hygiene has seven ids under one URL. Checking
+    the URL alone passed trivially in exactly that case, so a splice that
+    dropped the new hook block still reported success, while SKILL.md Step 3
+    promises the merged file is re-scanned and every entry confirmed present."""
+    import config as C
+    import precommit as P
+
+    after = C.scan(
+        "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n"
+        "    rev: v6.0.0\n    hooks:\n      - id: trailing-whitespace\n"
+    )
+    # The URL is present, so the old check passed. One declared id is not.
+    with pytest.raises(SystemExit) as exit_info:
+        P.verify_written(
+            "cfg", ["hygiene"], after, {"hygiene": {"trailing-whitespace", "end-of-file-fixer"}}
+        )
+    assert exit_info.value.code != 0
+
+    # And it does not cry wolf when everything declared really is there.
+    P.verify_written("cfg", ["hygiene"], after, {"hygiene": {"trailing-whitespace"}})
+
+
+@pytest.mark.parametrize(
+    ("reason", "setup"),
+    [
+        ("unknown-key", "unknown"),
+        ("dirty", "dirty"),
+        ("config-refused", "refused"),
+    ],
+)
+def test_a_classified_exit_says_why_in_json(repo, keys_file, facts_path, stubs, reason, setup):
+    """gitwork's non-1 exits always carry a machine-checkable object; this
+    file's 3/4/5 handed the caller an English sentence and nothing else -- and
+    EXIT_DIRTY covers two different causes that could only be told apart by
+    reading the prose."""
+    if setup == "unknown":
+        args = ["--templates-file", str(keys_file("nosuchkey"))]
+    elif setup == "dirty":
+        (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+        subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+        (repo / ".pre-commit-config.yaml").write_text("repos: []\n# my edit\n")
+        args = ["--templates-file", str(keys_file("gitleaks"))]
+    else:
+        (repo / ".pre-commit-config.yaml").write_text("repos:\n  - repo: local\n    hooks: *x\n")
+        args = ["--templates-file", str(keys_file("gitleaks"))]
+
+    proc = run(
+        "precommit.py", "--dir", str(repo), *args, "--facts-out", str(facts_path), stubs=stubs
+    )
+    assert proc.returncode != 0
+    got = out_json(proc)
+    assert got["ok"] is False
+    assert got["reason"] == reason, got
+    assert got["exit"] == proc.returncode
+
+
+def test_hook_output_is_neutralised_before_the_agent_reads_it(
+    repo, keys_file, facts_path, stubs, tmp_path
+):
+    """The hooks echo the paths they check, gitleaks prints match context, and a
+    `repo: local` block supplies its own hook name -- so this is a channel from
+    the repository straight to the agent, and it was the one that skipped
+    clean()."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    bidi = chr(0x202E)
+    fake = _pre_commit_stub(tmp_path, "hostile", [f"trailing-whitespace{bidi}......Passed"])
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert bidi not in proc.stderr, "a text-reordering character reached the agent"
+    assert "WARNING" in proc.stderr

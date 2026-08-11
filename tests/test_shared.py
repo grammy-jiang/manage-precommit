@@ -373,3 +373,77 @@ def test_a_quoted_porcelain_path_is_decoded():
 def test_an_ordinary_porcelain_path_is_untouched():
     assert shared.porcelain_path(" M README.md") == "README.md"
     assert shared.porcelain_path("?? a/b/c.txt") == "a/b/c.txt"
+
+
+# -- round 15 ----------------------------------------------------------------
+
+
+def test_core_quotePath_is_forced(monkeypatch):
+    """git's own default, but repo-local and therefore attacker-settable. With
+    it off git prints the raw bytes of a filename -- control characters, bidi
+    overrides -- into output this tool turns into a summary the user acts on."""
+    seen = {}
+
+    class Result:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return Result()
+
+    monkeypatch.setattr(shared.subprocess, "run", fake_run)
+    git = shared.make_git(lambda m: pytest.fail(m))
+    git("/tmp", "status")
+    assert "core.quotePath=true" in seen["argv"]
+    # The rest of the hardening is still there -- this test must not become the
+    # reason a later edit drops one of the others.
+    for flag in ("protocol.ext.allow=never", "protocol.file.allow=user", "core.fsmonitor="):
+        assert flag in seen["argv"]
+
+
+def test_safe_porcelain_refuses_rather_than_reporting_clean():
+    """Empty output means "nothing changed", so a swallowed failure reads as a
+    clean tree -- which variously discards this run's work, merges into a user's
+    edit, or drops the autofix disclosure."""
+    calls = []
+
+    def failing_git(repo, *args, **kwargs):
+        calls.append(args)
+        return 128, "", "fatal: index file corrupt"
+
+    class Stop(Exception):
+        pass
+
+    def die(msg):
+        raise Stop(msg)
+
+    with pytest.raises(Stop) as caught:
+        shared.safe_porcelain(failing_git, "/tmp", ["a.txt"], die, what="the state of things")
+    message = str(caught.value)
+    assert "a failed check is not a clean result" in message
+    assert "the state of things" in message
+    assert "index file corrupt" in message
+
+
+def test_safe_porcelain_passes_paths_after_a_double_dash():
+    """A path beginning with a dash would otherwise be read as an option."""
+    seen = {}
+
+    def ok_git(repo, *args, **kwargs):
+        seen["args"] = args
+        return 0, " M a.txt\n", ""
+
+    out = shared.safe_porcelain(ok_git, "/tmp", ["a.txt"], lambda m: None, what="x")
+    assert out == " M a.txt\n"
+    assert seen["args"] == ("status", "--porcelain", "--no-renames", "--", "a.txt")
+
+
+def test_safe_porcelain_omits_the_double_dash_when_scanning_everything():
+    seen = {}
+
+    def ok_git(repo, *args, **kwargs):
+        seen["args"] = args
+        return 0, "", ""
+
+    shared.safe_porcelain(ok_git, "/tmp", (), lambda m: None, what="x")
+    assert seen["args"] == ("status", "--porcelain", "--no-renames")

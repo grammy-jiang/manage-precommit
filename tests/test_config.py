@@ -474,3 +474,101 @@ def test_an_ordinary_repo_value_is_accepted(url):
     run-a-program shape is refused."""
     cfg = C.scan(f"repos:\n  - repo: {url}\n    hooks:\n      - id: a\n")
     assert cfg.repos[0].url == url
+
+
+# -- round 15 ----------------------------------------------------------------
+
+
+def _hook_settings(text: str) -> dict:
+    return C.scan(text).repos[0].hooks[0].settings
+
+
+def test_a_block_sequence_at_its_key_s_own_column_is_read():
+    """YAML permits it, and this scanner already supports the style for repos:
+    and hooks:. Reading it as "" made looks_disabled() treat a manual-only hook
+    as active coverage -- the exact false-coverage failure the feature exists to
+    prevent, reintroduced by an indentation style."""
+    same_column = (
+        "repos:\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n"
+        "    hooks:\n"
+        "      - id: gitleaks\n"
+        "        stages:\n"
+        "        - manual\n"
+    )
+    assert _hook_settings(same_column)["stages"] == "[manual]"
+
+
+def test_the_indented_block_sequence_style_still_reads():
+    indented = (
+        "repos:\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n"
+        "    hooks:\n"
+        "      - id: gitleaks\n"
+        "        stages:\n"
+        "          - manual\n"
+        "          - push\n"
+    )
+    assert _hook_settings(indented)["stages"] == "[manual, push]"
+
+
+def test_a_sibling_key_at_the_same_column_ends_the_sequence():
+    text = (
+        "repos:\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n"
+        "    hooks:\n"
+        "      - id: gitleaks\n"
+        "        stages:\n"
+        "        - manual\n"
+        "        files: '\\.py$'\n"
+    )
+    settings = _hook_settings(text)
+    assert settings["stages"] == "[manual]"
+    assert settings["files"] == "\\.py$"  # _scalar strips the quotes
+
+
+def test_ragged_sequence_items_are_not_read_as_one_sequence():
+    """Refusing to guess is this scanner's posture everywhere else."""
+    text = (
+        "repos:\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n"
+        "    hooks:\n"
+        "      - id: gitleaks\n"
+        "        stages:\n"
+        "        - manual\n"
+        "          - push\n"
+    )
+    assert _hook_settings(text)["stages"] == "[manual]"
+
+
+def test_top_level_scalar_is_public():
+    """precommit.py was reaching through _split_key + _scalar, twice."""
+    cfg = C.scan("exclude: '^vendor/'\nrepos:\n  - repo: https://x/y\n    hooks:\n      - id: a\n")
+    assert C.top_level_scalar(cfg, "exclude") == "^vendor/"  # unquoted, like every scalar
+    assert C.top_level_scalar(cfg, "fail_fast") is None
+
+
+def test_a_local_path_repo_is_disclosed_rather_than_refused():
+    """A bare path and a file:// URL are legitimate -- monorepos do this -- so
+    neither is refused. But neither is a named remote either: what pre-commit
+    clones comes off this disk, and it used to be carried across in total
+    silence while the ext:: shape next door is announced."""
+    cfg = C.scan(
+        "repos:\n"
+        "  - repo: file:///tmp/hooks\n    rev: v1\n    hooks:\n      - id: a\n"
+        "  - repo: ../sibling-hooks\n    rev: v1\n    hooks:\n      - id: b\n"
+        "  - repo: https://github.com/psf/black\n    rev: v1\n    hooks:\n      - id: c\n"
+        "  - repo: local\n    hooks:\n      - id: d\n        name: d\n"
+        "        entry: ./x.sh\n        language: script\n"
+    )
+    assert C.local_repo_sources(cfg) == ["../sibling-hooks", "file:///tmp/hooks"]
+
+
+def test_a_transport_helper_is_still_refused_outright():
+    """Disclosure is for what cannot be adjudicated; `ext::` names a program."""
+    with pytest.raises(C.ConfigRefused, match="transport helper"):
+        C.scan("repos:\n  - repo: ext::sh -c 'id'\n    hooks:\n      - id: a\n")

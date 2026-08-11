@@ -298,3 +298,31 @@ def test_main_reads_sys_argv_when_given_nothing(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["manage-precommit", "--version"])
     assert cli.main() == 0
     assert capsys.readouterr().out.strip() == __version__
+
+
+# -- round 15 ----------------------------------------------------------------
+
+
+def test_uninstall_force_still_refuses_a_real_directory(root):
+    """--force reaches the foreign-LINK branch and must never reach this one.
+    `install` never creates a directory here, so one that exists is somebody
+    else's -- possibly a hand-written skill. A one-line regression (`and not
+    force`) would make `manage-precommit uninstall --force` rmtree it, and every
+    other test in this file would still pass."""
+    hand_written = root / "manage-precommit"
+    hand_written.mkdir()
+    (hand_written / "SKILL.md").write_text("mine\n")
+
+    with pytest.raises(FileExistsError, match="is a directory, not a symlink"):
+        cli.uninstall(root, force=True)
+    assert (hand_written / "SKILL.md").read_text() == "mine\n"
+
+
+def test_uninstall_force_refusal_survives_the_command_layer(root, capsys):
+    hand_written = root / "manage-precommit"
+    hand_written.mkdir()
+    (hand_written / "SKILL.md").write_text("mine\n")
+
+    assert cli.main(["uninstall", "--dest", str(root), "--force"]) == 1
+    assert "is a directory, not a symlink" in capsys.readouterr().err
+    assert (hand_written / "SKILL.md").is_file()

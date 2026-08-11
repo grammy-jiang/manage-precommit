@@ -97,7 +97,17 @@ def emit_section(lines: list[str], header: str, rows: list[tuple[str, object]], 
     lines.append(pal.hdr(header))
     width = max(len(label) for label, _ in kept)
     for label, value in kept:
-        lines.append(f"  {pal.label(label.ljust(width))}  {value}")
+        text = str(value)
+        # Continuation lines are indented HERE, because only this function knows
+        # the value column: the width depends on which other rows survived the
+        # None filter above. A caller computing it from its own label name got
+        # it wrong the moment a longer label appeared beside it -- "present but
+        # off" is four characters longer than "recommended", so a run reporting
+        # a disabled entry alongside two recommendations wrapped four columns
+        # short.
+        if "\n" in text:
+            text = text.replace("\n", "\n" + " " * (2 + width + 2))
+        lines.append(f"  {pal.label(label.ljust(width))}  {text}")
 
 
 def names(items: object, pal: Pal, kind: str | None = None) -> str:
@@ -122,9 +132,21 @@ def names(items: object, pal: Pal, kind: str | None = None) -> str:
 
 
 def color_diffstat(text: object, pal: Pal) -> str:
+    """Colour the counts in a diffstat line.
+
+    Targeted at the shapes gitwork.diffstat actually produces, which is the
+    whole point: it colours git's summary line
+
+        1 file changed, 4 insertions(+), 2 deletions(-)
+
+    and the hand-built "N new file(s), M lines" for an untracked write. The
+    original patterns looked for `+12` / `-3` -- a sign immediately before the
+    digits -- and neither shape has ever contained one, so the feature was dead
+    on every real invocation while looking implemented.
+    """
     out = clean(text)
-    out = re.sub(r"\+\d+", lambda m: pal.add(m.group()), out)
-    out = re.sub(r"(?<!\w)-\d+", lambda m: pal.rem(m.group()), out)
+    out = re.sub(r"\d+(?= insertion| new file| line)", lambda m: pal.add(m.group()), out)
+    out = re.sub(r"\d+(?= deletion)", lambda m: pal.rem(m.group()), out)
     return out
 
 
@@ -206,8 +228,9 @@ def render(facts: dict, pal: Pal) -> str:
                     parts.append(part)
                 else:
                     parts.append(clean(item))
-            indent = " " * (2 + len("recommended") + 2)
-            rec_value = f"\n{indent}".join(parts)
+            # Joined bare: emit_section indents continuation lines, because it
+            # is the only place that knows how wide the label column ended up.
+            rec_value = "\n".join(parts)
         versions = hooks.get("versions") or {}
         ver_value = ", ".join(f"{clean(k)}={clean(v)}" for k, v in versions.items()) or None
         emit_section(
