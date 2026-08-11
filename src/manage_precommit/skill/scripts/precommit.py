@@ -32,7 +32,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import config as cfgmod
 from hookoutput import is_vacuous, skipped_hooks
@@ -75,7 +75,11 @@ EXIT_REFUSED = 5
 # the way git's stderr is bounded in shared.make_git.
 MAX_HOOK_OUTPUT = 20000
 
-CATALOG: dict[str, dict] = {
+# `Any`, deliberately: this is JSON read off disk, so the value types really
+# are unknown until a reader checks them -- and every reader here does, with
+# .get() and a default. Pretending otherwise with `object` only moves the
+# cast to each call site.
+CATALOG: dict[str, dict[str, Any]] = {
     "hygiene": {
         "fragment": "hygiene.yaml",
         "rev_repo": "https://github.com/pre-commit/pre-commit-hooks",
@@ -549,7 +553,7 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
 
 def plan(
     cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool
-) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict, dict[str, set[str]]]:
+) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict[str, str], dict[str, set[str]]]:
     """Work out every insertion, without touching the file.
 
     `pre_existing` says whether the config came from the user or from our own
@@ -783,7 +787,7 @@ def copy_assets(key: str, directory: str) -> tuple[list[str], list[str], list[st
     return written, kept, foreign
 
 
-def load_facts_if_present(path: str) -> dict:
+def load_facts_if_present(path: str) -> dict[str, Any]:
     """Whatever is already in the facts file, or {} when there is nothing yet.
 
     Step 1 may have seeded it with what the scan detected; the write step adds

@@ -38,7 +38,7 @@ import re
 import shlex
 import sys
 from collections.abc import Mapping
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 from shared import (
     PRECOMMIT_CONFIG_NAME,
@@ -1212,7 +1212,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, parents=[before], allow_abbrev=False)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    def subcommand(name: str, **kwargs) -> argparse.ArgumentParser:
+    def subcommand(name: str, **kwargs: Any) -> argparse.ArgumentParser:
         """A subparser that inherits --dir and, crucially, allow_abbrev=False.
 
         add_parser does not inherit the parent's setting, so without this an

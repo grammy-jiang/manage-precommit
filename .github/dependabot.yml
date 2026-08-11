@@ -1,0 +1,42 @@
+# Every `uses:` in this repository is pinned to a commit SHA, which is the only
+# ref an attacker cannot move. A pin with nobody watching it is just an old
+# version, so Dependabot opens the bump as a pull request -- where it meets the
+# same gates as any other change, instead of arriving silently because a tag
+# moved underneath us. That matters more here than in most repositories: this
+# one publishes to PyPI from a tag.
+#
+# Not covered: pre-commit hook revs. Dependabot has no pre-commit ecosystem, so
+# those are bumped with `pre-commit autoupdate`. That is load-bearing -- ci.yml
+# reads the gitleaks rev out of .pre-commit-config.yaml to choose the scanner
+# version, so a stale rev there is a stale secret scanner.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week before proposing a bump. A compromised release is usually
+    # yanked within days, and the whole value of pinning is lost if the pin is
+    # moved to a bad release the day it appears.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      # One pull request for the routine bumps rather than six. A grouped update
+      # that fails CI is also easier to bisect than six that landed in an
+      # arbitrary order.
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      dev:
+        patterns: ["*"]
