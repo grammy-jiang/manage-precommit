@@ -269,3 +269,44 @@ class TestThePlatformClaimIsMadeInOnePlace:
             pytest.skip("no checkout")
         text = readme.read_text(encoding="utf-8")
         assert "**Linux and macOS.** Not Windows." in text
+
+
+class TestProgressiveDisclosureIsWiredBothWays:
+    """Detail moved into a reference is detail the agent might not fetch.
+
+    That trade is only safe if two things hold: every reference is reachable
+    from the body, and the body still refuses on its own for anything it
+    delegated. These check both, because the failure is silent either way -- an
+    orphan reference is never read, and a dead link fails on a recovery path,
+    which is the worst moment to discover it.
+    """
+
+    def references(self) -> list[Path]:
+        return sorted((cli.skill_source() / "references").glob("*.md"))
+
+    def body(self) -> str:
+        return (cli.skill_source() / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_every_reference_is_linked_from_the_body(self):
+        unlinked = [p.name for p in self.references() if f"references/{p.name}" not in self.body()]
+        assert unlinked == [], f"never loaded by anything: {unlinked}"
+
+    def test_every_link_points_at_a_file_that_exists(self):
+        named = set(re.findall(r"references/([\w.-]+\.md)", self.body()))
+        present = {p.name for p in self.references()}
+        assert named <= present, f"dead links: {sorted(named - present)}"
+
+    def test_the_body_still_refuses_without_opening_the_reference(self):
+        """The load-bearing half. An agent that never fetches the reference must
+        still not report a vacuous run as a pass, or push after a failed
+        commit -- so the trigger AND the refusal stay in the body."""
+        body = self.body()
+        for phrase in (
+            "`vacuous: true`",
+            "`unchecked` non-empty",
+            "**Not a pass.**",
+            "**do not push**",
+            "never stop without a summary",
+            "never weaken a hook to make the run pass",
+        ):
+            assert phrase.lower() in body.lower(), phrase

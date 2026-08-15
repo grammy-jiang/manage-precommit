@@ -557,6 +557,7 @@ class VerifyFacts(TypedDict, total=False):
     run_ok: bool
     vacuous: bool
     autofixed: list[str]
+    rerun_files: list[str]  # what a vacuous re-run must name, already unioned
     autofixed_ours: list[str]  # of those, files this run owns -- they DO get committed
     autofixed_elsewhere: list[str]  # the rest: the user's to review, never staged here
     # Hooks this run ADDED that reported no files to check. A run can be green
