@@ -207,11 +207,22 @@ def test_install_dry_run_reports_the_refusal_the_real_run_would_make(root, capsy
     assert "already exists and is not a symlink" in capsys.readouterr().err
 
 
-def test_install_defaults_to_the_home_skills_directory(tmp_path, monkeypatch, capsys):
+def test_install_defaults_to_the_detected_agents_skills_directory(tmp_path, monkeypatch, capsys):
+    """The tmp HOME needs a detectable agent in it.
+
+    Without one this passed on a developer machine and failed on CI, for the
+    right reason: `claude` was on the developer's PATH, so detection found a
+    product that had nothing to do with the tmp HOME under test. The bare
+    `install` path is worth testing, but only against state the test controls.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    (tmp_path / ".claude").mkdir()
     assert cli.main(["install"]) == 0
     assert (tmp_path / ".claude" / "skills" / "manage-precommit").is_symlink()
-    assert str(tmp_path / ".claude") in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Claude Code detected" in out
+    assert str(tmp_path / ".claude") in out
 
 
 def test_uninstall_command_removes_the_link(root, capsys):
@@ -254,6 +265,8 @@ def test_uninstall_dry_run_reports_a_refusal(root, tmp_path, capsys):
 
 def test_uninstall_defaults_to_the_home_skills_directory(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    (tmp_path / ".claude").mkdir()
     cli.main(["install"])
     capsys.readouterr()
     assert cli.main(["uninstall"]) == 0
