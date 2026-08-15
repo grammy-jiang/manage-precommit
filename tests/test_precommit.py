@@ -2068,8 +2068,12 @@ def test_the_rerun_list_is_worked_out_for_the_agent(repo, keys_file, facts_path,
         stubs=stubs,
     )
     generate(repo, keys_file, facts_path, stubs, "hygiene", force=True)
+    # A stub pre-commit, like every other verify test here: the real binary is
+    # on a developer's PATH and not on a CI runner's, and this test is about the
+    # list the tool computes, not about running hooks.
+    fake = _pre_commit_stub(tmp_path, "rerun", ["trailing-whitespace......Passed"])
     got = out_json(
-        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=stubs)
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
     )
     facts = json.loads(facts_path.read_text())
     expected = sorted({*facts["files"]["written"], *facts["scan"]["detected_paths"]})
