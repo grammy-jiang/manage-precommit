@@ -29,6 +29,7 @@ import difflib
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,18 @@ def walk_repo(directory: str) -> list[str]:
             if len(found) >= MAX_SCAN_FILES:
                 return found
     return found
+
+
+def prerequisites() -> dict[str, str]:
+    """External tools a catalog entry needs, and whether they are here.
+
+    Computed rather than probed by the caller: SKILL.md used to tell the agent
+    to run `command -v npm && command -v node` and interpret the output, which
+    is a shell command and a judgement for something shutil.which answers
+    exactly. One fewer bash block in the body, and one fewer thing to get wrong.
+    """
+    missing = sorted(tool for tool in ("npm", "node") if shutil.which(tool) is None)
+    return {"mermaid": "missing: " + ", ".join(missing) if missing else "present"}
 
 
 def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], list[str]]:
@@ -1118,6 +1131,7 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         "recommended": recs,
         "previous": previous,
         "disabled": disabled,
+        "prerequisites": prerequisites(),
         "local_repo_sources": [clean(u) for u in cfgmod.local_repo_sources(cfg)] if cfg else [],
         "proposed": proposed,
         "detected": markers,
@@ -1222,6 +1236,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
         autofixed = sorted(dirty_paths(directory) - before)
         rc, output = run_precommit(directory, *run_args)
 
+    # This run's own files, from the facts it was given: the two halves of
+    # `autofixed` get opposite sentences, so the split has to know which is
+    # which. normpath on both sides, because one list comes from git status and
+    # the other from the facts file.
+    # isinstance, because the facts file is on disk between steps and a
+    # rewritten one can hold anything. A malformed entry is somebody else's
+    # error to report -- gitwork.managed() does that with a sentence -- not a
+    # traceback out of this list comprehension.
+    managed_now = {
+        os.path.normpath(str(entry.get("path", "")))
+        for entry in (existing_facts.get("internal") or {}).get("managed_files") or []
+        if isinstance(entry, dict)
+    }
     vacuous = is_vacuous(output)
     skipped = skipped_hooks(output)
     # Which hook ids this run actually put in the config; anything of ours that
@@ -1299,6 +1326,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "vacuous": vacuous,
             "autofixed": autofixed,
             "unchecked": unchecked,
+            # Split here, not by the agent. SKILL.md used to tell it to
+            # partition this against files.written + files.kept -- set
+            # arithmetic over two lists it had to hold in its head, to answer a
+            # question this function already has the inputs for. The two halves
+            # get opposite sentences: ours IS committed (cmd_verify re-hashes
+            # the managed files precisely so an autofixed one still passes the
+            # commit gate), theirs is not.
+            "autofixed_ours": [f for f in autofixed if os.path.normpath(f) in managed_now],
+            "autofixed_elsewhere": [f for f in autofixed if os.path.normpath(f) not in managed_now],
             "skipped": skipped,
             "scope": "these-files" if files else "all-files",
             "exit": rc,

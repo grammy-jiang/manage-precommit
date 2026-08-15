@@ -271,7 +271,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     facts = load_facts(args.facts)
     paths = managed_paths(facts)
     if not is_repo(repo):
-        emit({"is_repo": False, "states": None, "diff": None, "files": paths})
+        emit(
+            {
+                "is_repo": False,
+                "states": None,
+                "diff": None,
+                "files": paths,
+                # Where Step 5 goes from here, and what to record when it gets
+                # there. SKILL.md carried this as a two-row mapping the agent
+                # applied by hand; the same table already lives in cmd_commit's
+                # record_choice/record_note for exactly this reason.
+                "next": "summary",
+                "record_choice": "not committed",
+                "record_note": "not a git repo",
+            }
+        )
         return 0
     states = file_states(repo, paths)
     diff, commands = build_diff(repo, states)
@@ -300,7 +314,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             "discards": discards(states),
             "diff_commands": commands,
             "diff": diff,
-            "changed": any(s != "clean" for s in states.values()),
+            "changed": (changed := any(s != "clean" for s in states.values())),
+            "next": "review" if changed else "summary",
+            "record_choice": None if changed else "not committed",
+            "record_note": None if changed else "no change: the config already matched",
             # What Step 4's `--all-files` question is actually about. The
             # autofixing hooks rewrite whatever they are pointed at, and this
             # run's own guard covers only this run's files -- so THESE are the
