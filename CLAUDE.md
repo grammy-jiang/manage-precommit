@@ -102,6 +102,21 @@ the barely-covered file is where the next bug is. `tests/check_coverage.py` is
 the enforcer, and CI runs that same script rather than a second threshold that
 could drift from it.
 
+## Platforms
+
+Linux and macOS. The `installer` CI job runs `test_cli.py` and `test_agents.py`
+on `windows-latest` and `macos-latest`, and both pass — but that is the
+installer, not the skill. `SKILL.md` runs `mktemp`, `rm -f` and `command -v`
+and drives `pre-commit`; making that portable is a separate piece of work, and
+until it is done the classifiers, `compatibility:` and the README all say the
+same thing.
+
+Windows taught the suite something worth keeping: `Path.home()` reads
+`USERPROFILE` there, so tests that set `$HOME` were operating on the runner's
+real home. The `home` fixture in `test_cli.py` patches the lookup itself, and a
+test asserts the redirection happened. Prefer that fixture over `monkeypatch.setenv`
+for anything that resolves a home directory.
+
 ## Python versions
 
 `requires-python = ">=3.10"`, and CI runs the suite on 3.10 through 3.14. mypy

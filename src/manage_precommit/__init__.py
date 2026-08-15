@@ -5,4 +5,4 @@ The package exists to deliver the skill. Everything that does work lives under
 the tools it drives.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
