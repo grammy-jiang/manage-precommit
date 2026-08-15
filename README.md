@@ -44,23 +44,38 @@ a parse error.
 
 ## Install
 
-Both routes install a **symlink** into `~/.claude/skills/`, never a copy — so
-there is only ever one set of files, and nothing can drift out of sync. Restart
-Claude Code to pick it up.
+Works under **Claude Code**, **Codex** and **GitHub Copilot CLI**. Both routes
+install a **symlink**, never a copy — so there is only ever one set of files,
+and nothing can drift out of sync.
+
+`manage-precommit install` detects which of the three are on this machine and
+links the skill where each one looks:
+
+| Agent | Skills directory |
+| --- | --- |
+| Claude Code | `~/.claude/skills/` |
+| Codex | `~/.agents/skills/` |
+| GitHub Copilot CLI | `~/.agents/skills/` |
+
+Codex and Copilot read the same directory, so installing for both writes **one**
+link, not two of the same name. `--agent NAME` (repeatable), `--all` and
+`--dest DIR` overrule the detection; `--dry-run` prints what would happen,
+refusals included.
 
 ### As a package
 
 ```bash
-# not on PyPI yet -- install straight from the repository:
-pipx install git+https://github.com/grammy-jiang/manage-precommit.git
+pipx install manage-precommit
 manage-precommit install
 ```
 
 The package is an installer and nothing else; all the work lives in the skill
 files it links. `--dry-run` prints what would happen, refusals included;
 `--dest DIR` overrules the default location; `--force` acts on something that
-is not ours. `manage-precommit uninstall` removes the link and leaves the
-package alone.
+is not ours. `manage-precommit uninstall` removes the links and leaves the package alone --
+and it sweeps every directory it could have written to, not just the detected
+ones: a link outlives the product that read it, which is exactly when leaving it
+behind is worst.
 
 It refuses to touch anything it did not create: a real directory there may be a
 hand-written skill, and a link pointing elsewhere is not its to remove.

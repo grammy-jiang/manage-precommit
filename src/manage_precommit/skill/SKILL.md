@@ -2,8 +2,8 @@
 name: manage-precommit
 description: Set up or update a repository's pre-commit hooks from a curated catalog (base hygiene, yamllint, markdownlint, a bundled mermaid-diagram validator, gitleaks), pinning the latest versions and merging into any existing .pre-commit-config.yaml without clobbering the user's own hooks, revs, or comments. Then install, test, review the diff, and — with confirmation — commit and push only the pre-commit files. Use when the user asks to add, set up, configure, refresh, or update pre-commit hooks / a .pre-commit-config.yaml, add a linter/formatter/secret-scan/markdown/mermaid/yaml check, or "set up pre-commit".
 license: MIT
-compatibility: Needs python3 3.10 or newer, plus git and pre-commit on PATH; the mermaid entry additionally needs node and npm. Writes only the pre-commit setup files of the repository it is pointed at, plus temporary files outside it. Runs in any agent that reads the Agent Skills format, though the questions it asks need a host that can ask them.
-allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Bash(command:*) Read Write AskUserQuestion
+compatibility: Needs python3 3.10 or newer, plus git and pre-commit on PATH; the mermaid entry additionally needs node and npm. Writes only the pre-commit setup files of the repository it is pointed at, plus temporary files outside it. Runs under Claude Code, Codex and GitHub Copilot CLI -- any agent that reads the Agent Skills format -- though the questions it asks need a host that can reach a user.
+allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Bash(command:*) Read Write
 metadata:
   homepage: https://github.com/grammy-jiang/manage-precommit
 ---
@@ -30,9 +30,11 @@ and it fails closed.
 
 ## Placeholders
 
-`<skill-dir>` is the directory holding this SKILL.md — usually
-`~/.claude/skills/manage-precommit`. `<repo>` is the repository being worked on.
-Substitute both; never run a command with the angle brackets still in it.
+`<skill-dir>` is the directory holding this SKILL.md —
+`~/.claude/skills/manage-precommit` under Claude Code,
+`~/.agents/skills/manage-precommit` under Codex or GitHub Copilot. `<repo>` is
+the repository being worked on. Substitute both; never run a command with the
+angle brackets still in it.
 
 The scripts need Python 3.10+ and `git`; `pre-commit` itself from Step 4
 onward; and `npm` for the `mermaid` entry.
@@ -43,8 +45,22 @@ stop; do not fall back to hand-written git or a hand-written config.
 **Any non-zero exit stops that action** — report it verbatim. The recoverable
 exceptions are documented where they occur.
 
-**If AskUserQuestion is unavailable** (headless), stop at the first choice and
-say which confirmation is needed. Never assume an answer.
+## What this skill needs from you
+
+Two capabilities, named by what they do rather than by any one agent's tool
+names, because this skill runs under several:
+
+- **Ask a question and wait for the answer.** Claude Code has AskUserQuestion,
+  which renders the options as a menu; elsewhere, ask in prose and wait. The
+  options given at each step are the options — never add one, never drop one,
+  never assume an answer, and never proceed on silence. **If no user can be
+  reached at all** — a headless or non-interactive run — stop at the first
+  choice and say which confirmation is missing. This skill installs git hooks
+  and can commit and push; not one of those happens unasked.
+- **Write and read a file directly.** Where a step says to write a file, use
+  your file-write tool rather than a shell heredoc. Repo filenames and commit
+  messages are arbitrary text, and putting them through a shell is how a
+  quote or a backtick becomes a command.
 
 **Pick `<facts.json>` once, in Step 1, and pass that same path to every `--facts`
 and `--facts-out` after it.** A different path is not an error — it silently loses everything recorded
@@ -226,7 +242,7 @@ files may be rewritten; asked in the abstract, they accept a risk they cannot
 see, and by the time Step 5.1 shows them the real state the rewrite has already
 happened.
 
-**Then ask.** AskUserQuestion: **Run the hooks over all files** / **Only this
+**Then ask** — **Run the hooks over all files** / **Only this
 run's files** / **Skip verification**. Each option has its own command — run the
 one that matches the answer, and nothing else.
 
@@ -445,7 +461,7 @@ exercised; nothing here has been checked by it" — and do not dress it as
 STILL FAILING. Reporting a pass as a failure and a non-check as a pass are the
 same mistake in opposite directions.
 
-Then AskUserQuestion — exactly these, never an "also commit other changes"
+Then ask — exactly these, never an "also commit other changes"
 option: **Commit + push** / **Commit only** (local) / **Don't commit**.
 
 ### 3. Commit

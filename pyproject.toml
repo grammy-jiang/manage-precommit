@@ -138,6 +138,7 @@ explicit_package_bases = true
 namespace_packages = true
 files = [
     "src/manage_precommit/__init__.py",
+    "src/manage_precommit/agents.py",
     "src/manage_precommit/cli.py",
     "src/manage_precommit/skill/scripts",
 ]

@@ -40,10 +40,11 @@ All of it, in this order, before asking anything:
    not be what is recorded.
 6. **That it cannot be undone** by this skill or by them, once pushed.
 
-Then AskUserQuestion — exactly two options: **Force-push** / **Skip push**.
+Then ask — exactly two options: **Force-push** / **Skip push**.
 
-There is no third option, and no default. If AskUserQuestion is unavailable,
-stop and say a force-push decision is needed.
+There is no third option, and no default. If no user can be reached, stop and
+say a force-push decision is needed. This is the one decision in the whole skill
+that cannot be undone afterwards, so silence is never consent to it.
 
 ## Only on "Force-push"
 

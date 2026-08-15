@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from manage_precommit import __version__, cli
+from manage_precommit import __version__, agents, cli
 
 SKILL = Path(__file__).resolve().parents[1] / "src" / "manage_precommit" / "skill"
 
@@ -49,8 +49,11 @@ def test_a_package_without_its_skill_files_says_so(monkeypatch, tmp_path):
         cli.skill_source()
 
 
-def test_the_default_destination_follows_home(tmp_path):
-    assert cli.skills_dir(tmp_path) == tmp_path / ".claude" / "skills"
+def test_the_default_destinations_follow_home(tmp_path):
+    """Every path is derived from HOME so a test can point it at a tmp tree and
+    get the whole table with it."""
+    paths = {t.path for t in agents.all_targets(home=tmp_path)}
+    assert paths == {tmp_path / ".claude" / "skills", tmp_path / ".agents" / "skills"}
 
 
 # --- telling our own link from somebody else's ------------------------------
@@ -179,7 +182,10 @@ def test_install_command_reports_what_it_linked(root, capsys):
     assert cli.main(["install", "--dest", str(root)]) == 0
     out = capsys.readouterr().out
     assert f"Linked {root / 'manage-precommit'}" in out
-    assert "restart Claude Code" in out
+    # --dest names a directory, not a product, so there is no reload hint to
+    # give: this installer does not guess which agent reads a path somebody
+    # typed. The hint appears when an AGENT was resolved -- see below.
+    assert "Upgrading the package" in out
 
 
 def test_install_command_reports_a_refusal_and_fails(root, tmp_path, capsys):
@@ -323,3 +329,67 @@ def test_uninstall_force_refusal_survives_the_command_layer(root, capsys):
     assert cli.main(["uninstall", "--dest", str(root), "--force"]) == 1
     assert "is a directory, not a symlink" in capsys.readouterr().err
     assert (hand_written / "SKILL.md").is_file()
+
+
+# -- more than one agent -------------------------------------------------------
+
+
+def test_installing_for_codex_and_copilot_writes_one_link_not_two(tmp_path, monkeypatch, capsys):
+    """They read the SAME directory. Two links of the same name cannot coexist
+    there, and Copilot -- which reads both its own directory and the shared one
+    -- would list the skill twice if we used its private path instead."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cli.main(["install", "--agent", "codex", "--agent", "copilot"]) == 0
+    shared = tmp_path / ".agents" / "skills" / "manage-precommit"
+    assert shared.is_symlink()
+    assert not (tmp_path / ".copilot").exists()
+    out = capsys.readouterr().out
+    assert out.count("Linked ") == 1, out
+    # Both products are still named, and both reload hints given.
+    assert "Codex" in out and "Copilot" in out
+    assert "/skills reload" in out
+
+
+def test_install_all_covers_every_known_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cli.main(["install", "--all"]) == 0
+    assert (tmp_path / ".claude" / "skills" / "manage-precommit").is_symlink()
+    assert (tmp_path / ".agents" / "skills" / "manage-precommit").is_symlink()
+
+
+def test_naming_an_agent_that_is_not_here_says_so_and_acts_anyway(tmp_path, monkeypatch, capsys):
+    """An installer acting on a guess should be cheap to overrule -- including
+    when the guess is "you do not have this"."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    assert cli.main(["install", "--agent", "codex"]) == 0
+    assert (tmp_path / ".agents" / "skills" / "manage-precommit").is_symlink()
+    assert "not detected here -- acting anyway" in capsys.readouterr().out
+
+
+def test_with_nothing_installed_it_refuses_to_guess(tmp_path, monkeypatch, capsys):
+    """Linking into a directory nobody reads is worse than saying so: it looks
+    like it worked."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    assert cli.main(["install"]) == 1
+    err = capsys.readouterr().err
+    assert "no supported agent found" in err
+    assert "--agent" in err and "--all" in err and "--dest" in err
+
+
+def test_uninstall_sweeps_every_directory_even_when_nothing_is_detected(tmp_path, monkeypatch):
+    """A link outlives the product that read it, and that is exactly when
+    leaving it behind is worst -- so uninstall sweeps rather than detects."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cli.main(["install", "--all"])
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    assert cli.main(["uninstall"]) == 0
+    assert not (tmp_path / ".claude" / "skills" / "manage-precommit").exists()
+    assert not (tmp_path / ".agents" / "skills" / "manage-precommit").exists()
+
+
+def test_a_detected_agent_gets_its_own_reload_hint(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cli.main(["install", "--agent", "claude"]) == 0
+    assert "restart Claude Code" in capsys.readouterr().out

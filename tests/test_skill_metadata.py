@@ -157,6 +157,42 @@ class TestTheSkillSaysWhatItActuallyNeeds:
             assert needed in compatibility
 
 
+class TestNothingIsWrittenForOneAgentOnly:
+    def test_a_claude_only_tool_is_never_named_without_saying_so(self):
+        """AskUserQuestion exists in Claude Code and nowhere else.
+
+        Naming it unqualified turns a menu into a missing tool under Codex or
+        Copilot -- and this skill's questions gate installing a git hook,
+        committing, and force-pushing, so a step that cannot ask is a step that
+        must stop rather than proceed.
+
+        Checked per LINE, not per file: every file here mentions Claude Code
+        somewhere, so a file-level check can never fail and would sit there
+        looking like a guard.
+        """
+        offenders = [
+            f"{path.name}:{i}"
+            for path in skill_files()
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if "AskUserQuestion" in line and "Claude Code" not in line
+        ]
+        assert offenders == []
+
+    def test_the_skill_directory_is_named_for_every_host_it_installs_into(self):
+        """`<skill-dir>` is substituted into every command the agent runs. A
+        body naming only one product's path tells the other two to run a script
+        that is not there."""
+        body = (cli.skill_source() / "SKILL.md").read_text(encoding="utf-8")
+        for path in ("~/.claude/skills/manage-precommit", "~/.agents/skills/manage-precommit"):
+            assert path in body, path
+
+    def test_allowed_tools_grants_no_tool_only_one_host_has(self):
+        """A grant is read by all three. A name only one knows is at best
+        ignored and at worst a parse error on the others."""
+        granted = str(frontmatter()["allowed-tools"]).split()
+        assert "AskUserQuestion" not in granted
+
+
 class TestNothingPointsAtSomethingThatIsGone:
     def test_no_file_calls_a_subcommand_that_no_longer_exists(self):
         """The installer has exactly two commands. Anything else spelled as
