@@ -97,10 +97,11 @@ def test_a_plain_directory_is_not_a_link(root):
 
 def test_our_own_link_is_recognised(root):
     dest = cli.install(root, force=False)
-    # resolve() on both sides: Windows stores a symlink target in its
-    # extended-length form (\\?\D:\...), so the raw readlink value is a
-    # different string for the same directory.
-    assert Path(cli.link_target(dest)).resolve() == SKILL.resolve()
+    # samefile, not string equality: Windows stores a symlink target in its
+    # extended-length form, and `\\?\D:\x` and `D:\x` are the same directory
+    # spelled two ways -- resolve() keeps the prefix rather than removing it.
+    # "Is this the same directory" is the question worth asking anyway.
+    assert os.path.samefile(cli.link_target(dest), SKILL)
     assert cli.is_our_link(dest) is True
 
 
