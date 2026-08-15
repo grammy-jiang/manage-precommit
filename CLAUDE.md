@@ -7,6 +7,7 @@
 | Path | What it is |
 | --- | --- |
 | `src/manage_precommit/cli.py` | the console script — an installer, and nothing else |
+| `src/manage_precommit/agents.py` | which agents exist and where each reads skills from |
 | `src/manage_precommit/skill/SKILL.md` | the procedure the agent follows, Steps 0–6 |
 | `src/manage_precommit/skill/scripts/` | the tools SKILL.md drives; all the work is here |
 | `src/manage_precommit/skill/templates/` | one catalog fragment per hook set |
@@ -57,8 +58,10 @@ make install     # symlink this checkout into ~/.claude/skills/
 make uninstall
 ```
 
-`make install` links the *working tree*, so an edit is live on the next Claude
-Code restart with no rebuild. The published package does the same thing from
+`make install` links the *working tree* into `~/.claude/skills/`, so an edit is
+live on the next Claude Code restart with no rebuild. The published package's
+`manage-precommit install` does the same from site-packages, for whichever of
+Claude Code, Codex and Copilot CLI it finds. The published package does the same thing from
 site-packages via `manage-precommit install`.
 
 ## Testing
