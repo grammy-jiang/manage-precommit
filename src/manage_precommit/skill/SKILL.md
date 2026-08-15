@@ -3,7 +3,7 @@ name: manage-precommit
 description: Set up or update a repository's pre-commit hooks from a curated catalog (base hygiene, yamllint, markdownlint, a bundled mermaid-diagram validator, gitleaks), pinning the latest versions and merging into any existing .pre-commit-config.yaml without clobbering the user's own hooks, revs, or comments. Then install, test, review the diff, and — with confirmation — commit and push only the pre-commit files. Use when the user asks to add, set up, configure, refresh, or update pre-commit hooks / a .pre-commit-config.yaml, add a linter/formatter/secret-scan/markdown/mermaid/yaml check, or "set up pre-commit".
 license: MIT
 compatibility: Linux and macOS; not Windows, which lacks the POSIX shell this procedure needs. Requires python3 3.10+, git and pre-commit on PATH; the mermaid entry also needs node and npm. Writes only the pre-commit setup files of the repository it is pointed at, plus temporary files outside it. Runs under Claude Code, Codex and GitHub Copilot CLI, though its questions need a host that can reach a user.
-allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Bash(command:*) Read Write
+allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Read Write
 metadata:
   homepage: https://github.com/grammy-jiang/manage-precommit
 ---
@@ -126,13 +126,8 @@ Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-mis
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.
 
-Before offering `mermaid`, check its prerequisite and say what you found:
-
-```bash
-command -v npm >/dev/null && command -v node >/dev/null && echo present || echo missing
-```
-
-If either is missing, say so in the question — **and say that picking it anyway
+Before offering `mermaid`, relay `prerequisites.mermaid` from Step 1 — the scan
+already looked. If it is not `present`, say so in the question — **and say that picking it anyway
 aborts the whole write, not just that entry**: the version pin happens before
 anything is written, so a missing `npm` means none of the other selected hooks
 get written either. Also say the hook downloads a headless Chromium the first
@@ -359,11 +354,9 @@ the question in item 2:
 Neither is refused: a repo legitimately having its own hooks is ordinary, and
 so is a deploy key. What is not ordinary is finding out afterwards.
 
-Two outcomes skip the rest of Step 5 — go to Step 6 with
-`--choice "not committed"`, no `--hash`, and a `--note` saying which:
-
-- `is_repo: false` → `--note "not a git repo"`
-- `changed: false` → `--note "no change: the config already matched"`
+**If `next` is `summary`**, the rest of Step 5 does not apply: go to Step 6 with
+`--choice` and `--note` set to the `record_choice` and `record_note` the tool
+returned, and no `--hash`.
 
 Read the diff for what *the user* should weigh — a hook that will reformat their
 whole tree, an `exclude` that is not what they expected. If `gitleaks` is being
@@ -389,21 +382,13 @@ change and not an intention:
   — a genuine hook failure, not a vacuous run or an autofix. Mention it here,
   and restate it **last**, in the block directly above the question. It may have
   scrolled well out of view, and approving *Commit + push* while a secret scan
-  or a linter is still failing is a decision nobody would make knowingly. This
-  item used to claim it was "immediately before the question" while sitting
-  second of five — the three items below it are routine mechanics, and burying
-  a failing secret scan under them is exactly the outcome the rule exists to
-  prevent.
-- **Say what else this run touched — and split the list first.** Step 4's
-  `autofixed` is *everything* the hooks rewrote, not only files outside this
-  run. Partition it against `files.written` + `files.kept`:
+  or a linter is still failing is a decision nobody would make knowingly.
+- **Say what else this run touched.** Step 4 splits its `autofixed` list for
+  you; relay whichever halves are non-empty:
 
-  - **This run's own files** (in that set): "the hooks also reformatted
-    `<file>`, one of this run's own files — that is in the diff you saw and it
-    **will** be committed." `--verify` re-hashes the managed files after the
-    run precisely so an autofixed one still passes the commit gate, so saying
-    it will not be committed is simply false.
-  - **Everything else**: "verifying the hooks also modified `<those files>`
+  - `autofixed_ours` — "the hooks also reformatted `<file>`, one of this run's
+    own files — that is in the diff you saw and it **will** be committed."
+  - `autofixed_elsewhere` — "verifying the hooks also modified `<those files>`
     elsewhere in your tree. This run will not stage or commit them — they are
     yours to review and commit separately."
 

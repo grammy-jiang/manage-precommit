@@ -114,6 +114,27 @@ class TestAllowedToolsMatchesWhatTheSkillPermits:
         judgement around it. An agent running it directly gets neither."""
         assert "Bash(pre-commit" not in str(frontmatter()["allowed-tools"])
 
+    def test_no_bash_command_is_granted_that_the_body_never_runs(self):
+        """The mirror of the check below, and the one that rots quietly: a
+        command removed from the procedure leaves its grant behind, and the
+        grant is the whole point of narrowing away from bare `Bash`."""
+        granted = {
+            m.group(1)
+            for m in re.finditer(r"Bash\((\w[\w-]*):", str(frontmatter()["allowed-tools"]))
+        }
+        body = (cli.skill_source() / "SKILL.md").read_text(encoding="utf-8")
+        run = set()
+        for block in re.findall(r"```bash\n(.*?)```", body, re.S):
+            for line in block.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "-")):
+                    run.add(stripped.split()[0])
+        # mktemp and rm are named in prose rather than in a fenced block.
+        prose_only = {"mktemp", "rm"}
+        assert granted - run - prose_only == set(), (
+            f"granted but never run: {granted - run - prose_only}"
+        )
+
     def test_every_bash_command_the_body_runs_is_granted(self):
         """The grant is narrow, so it has to be complete: a command the
         procedure runs and the frontmatter omits turns a step into a permission

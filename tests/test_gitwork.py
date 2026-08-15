@@ -1868,3 +1868,28 @@ def test_the_diffstat_for_tracked_changes_is_a_real_git_summary(repo, written, t
     run("gitwork.py", "--dir", str(repo), "facts", "--facts", str(written))
     stat = json.loads(written.read_text())["net"]["diffstat"]
     assert "changed" in stat and "insertion" in stat, stat
+
+
+def test_status_says_where_step_5_goes(repo, written, tmp_path):
+    """SKILL.md carried a two-row mapping the agent applied by hand. The same
+    table already lives in cmd_commit's record_choice/record_note."""
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["next"] == "review"
+    assert got["record_choice"] is None and got["record_note"] is None
+
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+    got = out_json(run("gitwork.py", "--dir", str(repo), "status", "--facts", str(written)))
+    assert got["changed"] is False
+    assert got["next"] == "summary"
+    assert got["record_choice"] == "not committed"
+    assert "already matched" in got["record_note"]
+
+
+def test_status_outside_a_repo_also_says_where_to_go(tmp_path, written):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    got = out_json(run("gitwork.py", "--dir", str(plain), "status", "--facts", str(written)))
+    assert got["is_repo"] is False
+    assert got["next"] == "summary"
+    assert got["record_note"] == "not a git repo"

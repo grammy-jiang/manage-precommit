@@ -1993,3 +1993,61 @@ class TestAMalformedCatalogFragmentStopsTheRun:
         )
         assert proc.returncode != 0
         assert "exactly one repo entry" in proc.stderr
+
+
+# -- decided by the script, not by the agent -----------------------------------
+
+
+def test_the_mermaid_prerequisite_is_reported_rather_than_probed(repo, stubs):
+    """SKILL.md used to hand the agent `command -v npm && command -v node` and
+    ask it to interpret the output. shutil.which answers that exactly."""
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["prerequisites"]["mermaid"] in ("present",) or got["prerequisites"][
+        "mermaid"
+    ].startswith("missing: ")
+
+
+def test_a_missing_prerequisite_is_named(repo, stubs, tmp_path):
+    empty = tmp_path / "no-node"
+    empty.mkdir()
+    (empty / "git").symlink_to(stubs / "git")
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--recommend", stubs=empty, only_path=True)
+    )
+    assert got["prerequisites"]["mermaid"] == "missing: node, npm"
+
+
+def test_autofixed_is_split_by_whose_file_it_is(repo, keys_file, facts_path, stubs, tmp_path):
+    """Two halves, opposite sentences: this run's own files DO get committed
+    (--verify re-hashes them so an autofixed one still passes the commit gate),
+    the rest are the user's. The agent used to do this set arithmetic itself."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    ours = json.loads(facts_path.read_text())["internal"]["managed_files"][0]["path"]
+    # Committed first: `autofixed` is the DELTA in dirty paths across the run,
+    # so a file that was already dirty going in can never appear in it. The
+    # scenario this splits is the update-an-existing-config one.
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "base"], check=True)
+    theirs = repo / "theirs.md"
+    theirs.write_text("# theirs\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run([REAL_GIT, "-C", str(repo), "commit", "-qm", "theirs"], check=True)
+
+    fake = tmp_path / "toucher"
+    fake.mkdir()
+    pcs = fake / "pre-commit"
+    pcs.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        f'echo "fixed" >> "{repo}/{ours}"\n'
+        f'echo "fixed" >> "{theirs}"\n'
+        'echo "end-of-file-fixer.....Failed"\n'
+        "exit 1\n"
+    )
+    pcs.chmod(0o755)
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake)
+    )
+    assert ours in got["autofixed_ours"], got
+    assert "theirs.md" in got["autofixed_elsewhere"], got
+    assert ours not in got["autofixed_elsewhere"]
