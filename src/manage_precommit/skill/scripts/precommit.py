@@ -1333,6 +1333,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
             # get opposite sentences: ours IS committed (cmd_verify re-hashes
             # the managed files precisely so an autofixed one still passes the
             # commit gate), theirs is not.
+            # The exact list a vacuous re-run needs, so the recovery path stops
+            # being a set union the agent performs by hand -- on the one path
+            # that is already running because verification went wrong once.
+            "rerun_files": sorted(
+                {*(existing_facts.get("files") or {}).get("written", [])}
+                | {*(existing_facts.get("scan") or {}).get("detected_paths", [])}
+            ),
             "autofixed_ours": [f for f in autofixed if os.path.normpath(f) in managed_now],
             "autofixed_elsewhere": [f for f in autofixed if os.path.normpath(f) not in managed_now],
             "skipped": skipped,

@@ -2051,3 +2051,32 @@ def test_autofixed_is_split_by_whose_file_it_is(repo, keys_file, facts_path, stu
     assert ours in got["autofixed_ours"], got
     assert "theirs.md" in got["autofixed_elsewhere"], got
     assert ours not in got["autofixed_elsewhere"]
+
+
+def test_the_rerun_list_is_worked_out_for_the_agent(repo, keys_file, facts_path, stubs, tmp_path):
+    """The vacuous recovery path used to tell the agent to union files.written
+    with scan.detected_paths by hand -- on the one path that is already running
+    because verification went wrong once."""
+    (repo / "notes.md").write_text("# notes\n")
+    run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--recommend",
+        "--facts-out",
+        str(facts_path),
+        stubs=stubs,
+    )
+    generate(repo, keys_file, facts_path, stubs, "hygiene", force=True)
+    got = out_json(
+        run("precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=stubs)
+    )
+    facts = json.loads(facts_path.read_text())
+    expected = sorted({*facts["files"]["written"], *facts["scan"]["detected_paths"]})
+    assert got["rerun_files"] == expected
+    # Both halves really are in it: what this run wrote, and the file that
+    # caused a hook to be recommended -- which is the whole point, since the
+    # trigger file is what exercises the hook.
+    assert set(facts["files"]["written"]) <= set(got["rerun_files"])
+    assert set(facts["scan"]["detected_paths"]) <= set(got["rerun_files"])
+    assert facts["scan"]["detected_paths"], "no trigger detected; the test proves half of itself"

@@ -283,44 +283,18 @@ install, or a timeout all stop before anything is emitted: non-zero exit, empty
 stdout. There is no `run_ok` to read, so the general rule applies — report it
 verbatim and stop.
 
-- `vacuous: true` — every hook reported `(no files to check)`. `--all-files`
-  covers only git-*tracked* files, so in a repo where the setup files are still
-  untracked the run passes having checked nothing. Re-run naming the paths
-  explicitly, which works on untracked files without touching the index:
+- `vacuous: true` — every hook reported `(no files to check)`, so the run
+  checked nothing. **Not a pass.**
+- `unchecked` non-empty — a hook *this run added* never saw a file it matches.
+  **Not a pass**, however green the run looks.
+- `autofixed` non-empty — the autofixing hooks rewrote files and the tool
+  re-ran; a clean second pass is the success, and those edits may touch files
+  anywhere in the repo. Step 5 discloses them.
 
-  **Write the paths to a file with the Write tool**, one per line, at a
-  `mktemp` path outside the repo, then:
-
-  ```bash
-  python3 "<skill-dir>/scripts/precommit.py" --dir "<repo>" --verify \
-    --facts "<facts.json>" --files-file "<paths.txt>"
-  ```
-
-  The list is `files.written` **plus every entry of `scan.detected_paths`** —
-  the files that caused each hook to be recommended are the ones that exercise
-  it. Use `detected_paths`, never `detected`: `detected` is prose for a human
-  (`markdown (README.md)`), and passing those strings makes pre-commit look for
-  files that do not exist, so the check silently proves nothing. They go through
-  a file rather than the command line because a repository can name a file
-  anything, backticks and semicolons included — the same reason catalog keys,
-  remote names and commit messages do. Delete it once the command returns, and
-  say which form produced the result you report.
-
-- `unchecked` non-empty — the run was green overall but a hook *this run added*
-  reported it had no files to check. `--all-files` covering the whole repo is
-  not enough on its own: hygiene's hooks match anything and turn the run green
-  while `markdownlint` or `mermaid`, added because a `.md` was detected, sat
-  idle. Re-run with `--files-file` as above and confirm `unchecked` comes back
-  empty; it is not a pass until it does.
-- `autofixed` non-empty — the autofixing hooks (trailing-whitespace,
-  end-of-file-fixer, mixed-line-ending) rewrote files and exited non-zero on the
-  first run; the tool re-ran once and a clean second pass is the success. Those
-  edits **may touch files anywhere in the repo**. That is expected, they are the
-  user's to review, and Step 5 will not commit them.
-
-A genuine failure (gitleaks finds a secret, a linter errors) is real — report it;
-the user fixes the content or adjusts config. Never weaken a hook to make the run
-pass.
+For any of the three, recover with
+[references/verify-recovery.md](references/verify-recovery.md) before treating
+the run as done. A genuine hook failure — gitleaks finds a secret, a linter
+errors — is real: report it, and **never weaken a hook to make the run pass.**
 
 ## Step 5 — Review, commit, push (this run's files ONLY)
 
@@ -466,24 +440,11 @@ run verified*.
 **Read `verdict`:**
 
 - `ok` — keep the returned `hash` for Step 6.
-- anything else — **do not push.** The JSON carries `remedy` (what the user can
-  run) and `record_choice` / `record_note` (what Step 6 must record). Relay the
-  remedy; **never run it yourself** — discarding a commit that exists is the
-  user's call. Do not pass the hash to Step 6.
+- anything else — **do not push**, and do not pass the hash to Step 6. See
+  [references/commit-failures.md](references/commit-failures.md).
 
-A non-zero exit with no verdict means nothing was committed. The index is as
-you found it **except** in one case, which the tool says out loud: if stderr
-carries `AND the cleanup reset also failed`, this run's files may still be
-staged. Relay that message verbatim, and tell the user to check `git status`
-before doing anything else.
-
-Then **go to Step 6 either way**, with `--choice "not committed"` and
-`--note "<the error>"`. This shape — non-zero exit, no JSON — is the same one a
-failed push produces, and §4 already sends that to Step 6; sending this one
-nowhere left the files written, the facts half-recorded, and the `mktemp`
-`facts.json` and message file behind with nothing saying to remove them. A run
-that stops without a summary is the one case where the user gets no account of
-what is now in their tree.
+A non-zero exit with no verdict means nothing was committed. That path is in the
+same reference, and it still ends at Step 6: **never stop without a summary.**
 
 ### 4. Push
 
