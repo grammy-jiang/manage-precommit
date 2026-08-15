@@ -82,6 +82,39 @@ jobs:
       - name: Type-check
         run: mypy
 
+  installer:
+    # The installer is the half of this package that touches the operating
+    # system, and it does it with symlinks -- which Windows restricts, and which
+    # macOS spells the same as Linux but is worth proving rather than assuming.
+    # All three agents this skill supports ship on all three platforms, and the
+    # README tells all three to run `manage-precommit install`.
+    #
+    # Only these two files. The rest of the suite writes `#!/bin/sh` stubs and
+    # chmods them, drives real git repositories, and runs `mktemp`, `rm -f` and
+    # `command -v` -- a POSIX arrangement throughout. Making that portable is a
+    # separate piece of work, and running a suite that skips most of itself
+    # while reporting green would claim more than it checked.
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+
+      - name: Test the installer
+        run: python -m pytest tests/test_cli.py tests/test_agents.py
+
   hooks:
     # Every hook in .pre-commit-config.yaml -- gitleaks, yamllint,
     # markdownlint-cli2, the local mermaid linter, and the base hygiene set --
