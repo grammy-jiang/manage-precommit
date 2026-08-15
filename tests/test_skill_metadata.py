@@ -216,3 +216,35 @@ class TestNothingPointsAtSomethingThatIsGone:
         assert named, "SKILL.md should invoke the scripts by path"
         present = {p.name for p in (cli.skill_source() / "scripts").glob("*.py")}
         assert named <= present, f"named but missing: {sorted(named - present)}"
+
+
+class TestThePlatformClaimIsMadeInOnePlace:
+    """Three files state which platforms this supports. They must agree.
+
+    The failure mode is not abstract: the installer passes on Windows, so it is
+    easy to let one of them creep into claiming Windows while the skill's
+    procedure still needs a POSIX shell.
+    """
+
+    def test_compatibility_names_the_supported_platforms_and_excludes_windows(self):
+        compatibility = str(frontmatter()["compatibility"])
+        assert "Linux and macOS" in compatibility
+        assert "not Windows" in compatibility
+
+    def test_the_classifiers_agree_with_it(self):
+        if tomllib is None:
+            pytest.skip("tomllib needs 3.11+; CI checks this on every later version")
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        if not pyproject.is_file():
+            pytest.skip("no checkout")
+        classifiers = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["classifiers"]
+        assert "Operating System :: POSIX :: Linux" in classifiers
+        assert "Operating System :: MacOS :: MacOS X" in classifiers
+        assert not [c for c in classifiers if "Windows" in c]
+
+    def test_the_readme_says_the_same_thing(self):
+        readme = Path(__file__).resolve().parents[1] / "README.md"
+        if not readme.is_file():
+            pytest.skip("no checkout")
+        text = readme.read_text(encoding="utf-8")
+        assert "**Linux and macOS.** Not Windows." in text

@@ -27,6 +27,16 @@ the bundled hook renders each diagram with
 [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) and fails the commit on
 a parse error.
 
+## Platforms
+
+**Linux and macOS.** Not Windows.
+
+The installer itself is cross-platform and CI proves it — `manage-precommit
+install` is exercised on Windows and macOS runners every push. The *skill* is
+the part that is not: its procedure runs `mktemp`, `rm -f` and `command -v`, and
+drives `pre-commit`, which is a POSIX arrangement throughout. Half of it working
+is not the half that matters, so the package does not claim the platform.
+
 ## Requirements
 
 - [pre-commit](https://pre-commit.com) 4.0+
