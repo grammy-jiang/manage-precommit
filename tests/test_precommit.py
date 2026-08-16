@@ -718,6 +718,11 @@ NPM_FAILURES = [
     pytest.param("npm ERR! code E401\n", "auth", "", id="registry wants credentials"),
     pytest.param("npm error code ENOTFOUND\n", "network", "", id="dns"),
     pytest.param("npm ERR! code ECONNREFUSED\n", "network", "", id="connection refused"),
+    # The kernel's answer when there is no route at all, which is what a laptop
+    # off the VPN reports rather than any of the friendlier ones above.
+    pytest.param("npm error code ENETUNREACH\n", "network", "", id="no route to the network"),
+    pytest.param("npm error code EHOSTUNREACH\n", "network", "", id="no route to the host"),
+    pytest.param("npm ERR! code EPIPE\n", "network", "", id="connection went away mid-write"),
     # npm gives up on the socket itself and exits normally, so this never
     # reaches the TimeoutExpired handler. Reported as `network` it left the
     # `timeout` bucket with almost nothing that could land in it.

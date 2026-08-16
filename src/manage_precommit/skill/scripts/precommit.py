@@ -310,9 +310,28 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
     ("auth", frozenset({"E401", "E403", "ENEEDAUTH", "EAUTHUNKNOWN", "EOTP"})),
     ("not-found", frozenset({"E404"})),
+    # Name resolution, then the connect errnos the kernel hands back when the
+    # route or the host is not there. All of these exit normally, which is why
+    # none of them is a `TimeoutExpired`.
     (
         "network",
-        frozenset({"ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "EPROTO"}),
+        frozenset(
+            {
+                "ENOTFOUND",
+                "EAI_AGAIN",
+                "ECONNREFUSED",
+                "ECONNRESET",
+                "ECONNABORTED",
+                "EPROTO",
+                "EPIPE",
+                "ENETUNREACH",
+                "ENETDOWN",
+                "ENETRESET",
+                "EHOSTUNREACH",
+                "EHOSTDOWN",
+                "EADDRNOTAVAIL",
+            }
+        ),
     ),
     # npm gave up on a slow socket by itself, and exited normally doing it -- so
     # this never reaches the TimeoutExpired handler, which only fires when the
