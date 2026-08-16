@@ -552,7 +552,13 @@ def test_generate_asks_about_the_right_repo_for_each_catalog_key(
     calls = stub_calls(stubs)
     assert "https://github.com/pre-commit/pre-commit-hooks" in calls
     assert "https://github.com/gitleaks/gitleaks" in calls
-    assert "npm view @mermaid-js/mermaid-cli version --cache " in calls
+    # By content, not by argument order: npm accepts its flags anywhere, and an
+    # assertion that pins their position fails on a rearrangement that changed
+    # nothing. The isolated cache itself has its own test.
+    npm_view = [ln for ln in calls.splitlines() if ln.startswith("npm view ")]
+    assert len(npm_view) == 1
+    assert "@mermaid-js/mermaid-cli" in npm_view[0]
+    assert "--cache" in npm_view[0]
     # And the pinned values are the ones that repo offered, not another's.
     versions = json.loads(facts_path.read_text())["hooks"]["versions"]
     assert versions["hygiene"] == "v10.0.1"
@@ -694,6 +700,15 @@ def test_a_garbage_npm_version_is_refused(repo, keys_file, facts_path, tmp_path,
 def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(
     repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
 ):
+    """Changing cwd does not change where npm caches.
+
+    A sandbox that hands the process `NPM_CONFIG_CACHE=/root/.npm` and no way to
+    create it turned the version pin into `ENOENT mkdir`, and the pin happens
+    before anything is written -- so one unwritable directory aborted the whole
+    run. The stub proves all of it at once: the hostile value really was
+    inherited (or it exits 4), the proxy variables the sandbox needs to reach
+    the registry survived, and a warning on stderr with exit 0 is not a failure.
+    """
     fake = _fake_bin(
         tmp_path,
         "npminspect",
@@ -733,6 +748,241 @@ def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(
     assert (
         f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
     )
+
+
+def test_the_temporary_npm_cache_is_removed_when_the_pin_fails(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The failing path is the one that leaks: a cache left behind on every
+    refused pin fills the disk of exactly the machine that could not write to
+    the ordinary one."""
+    fake = _fake_bin(
+        tmp_path,
+        "npmleak",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--cache" ]; then printf "%s" "$a" > "$MP_CACHE_LOG"; mkdir -p "$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'echo "registry unreachable" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    cache_log = tmp_path / "leaked-path.txt"
+    monkeypatch.setenv("MP_CACHE_LOG", str(cache_log))
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode != 0
+    assert not (repo / ".pre-commit-config.yaml").exists()
+    cache = cache_log.read_text()
+    assert cache
+    assert not os.path.exists(cache), "the cache outlived a failed pin"
+
+
+ANSWERING_NPM = (
+    '#!/bin/sh\necho "npm $*" >> "$MP_NPM_LOG"\n'
+    'if [ "$1" = "config" ]; then printf "%s\\n" "$MP_NPM_CACHE"; exit 0; fi\n'
+    "exit 9\n"
+)
+
+
+def _verify_bin(tmp_path, name, stubs, npm=ANSWERING_NPM):
+    """A PATH whose `pre-commit` reports the npm cache it was handed.
+
+    Its `npm` answers `config get cache` and refuses everything else: --verify
+    pins no versions, so any other call is a stray one and should be loud.
+    `npm=None` leaves npm off this PATH entirely.
+    """
+    d = tmp_path / name
+    d.mkdir()
+    pc = d / "pre-commit"
+    pc.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "install" ]; then exit 0; fi\n'
+        'printf "%s" "${NPM_CONFIG_CACHE-<unset>}" > "$MP_ENV_LOG"\n'
+        '[ -z "${MP_ENV_COUNT-}" ] || env | grep -ic "^npm_config_cache=" > "$MP_ENV_COUNT"\n'
+        '[ -z "${NPM_CONFIG_CACHE-}" ] || mkdir -p "$NPM_CONFIG_CACHE" 2>/dev/null\n'
+        'echo "mermaid-lint.............................................Passed"\n'
+        "exit 0\n"
+    )
+    pc.chmod(0o755)
+    if npm is not None:
+        exe = d / "npm"
+        exe.write_text(npm)
+        exe.chmod(0o755)
+    (d / "git").symlink_to(stubs / "git")
+    return d
+
+
+def test_verify_hands_precommit_a_writable_npm_cache_when_the_inherited_one_is_not(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """The version pin was only the first npm call.
+
+    `mermaid` is a `language: node` hook with additional_dependencies, so
+    pre-commit builds its environment by running `npm install` -- and pre-commit
+    sets npm_config_prefix and unsets npm_config_userconfig, but never the
+    cache. The same unwritable directory therefore killed the hook install one
+    step later, with the config already written. Blocked here by a path under a
+    regular file rather than by permissions, so it holds when the suite runs as
+    root.
+
+    The inherited value is set in both spellings on purpose: npm lower-cases
+    `npm_config_*` environment names, so a new `NPM_CONFIG_CACHE` left beside an
+    inherited `npm_config_cache` gives npm two values for one key and hands the
+    outcome to process.env's ordering. The child must see exactly one.
+    """
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    poisoned = str(blocker / ".npm")
+    env_log = tmp_path / "child-cache.txt"
+    env_count = tmp_path / "child-cache-count.txt"
+    fake = _verify_bin(tmp_path, "verifyblocked", stubs)
+    monkeypatch.setenv("MP_ENV_LOG", str(env_log))
+    monkeypatch.setenv("MP_ENV_COUNT", str(env_count))
+    monkeypatch.setenv("MP_NPM_LOG", str(tmp_path / "npm-calls.txt"))
+    monkeypatch.setenv("MP_NPM_CACHE", poisoned)
+    monkeypatch.setenv("NPM_CONFIG_CACHE", poisoned)
+    monkeypatch.setenv("npm_config_cache", poisoned)
+
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert proc.returncode == 0, proc.stderr
+    handed = env_log.read_text()
+    assert handed not in (poisoned, "<unset>")
+    assert not os.path.exists(handed), "the scratch npm cache should be cleaned up"
+    assert env_count.read_text().strip() == "1", "npm was left two values for one key"
+
+
+def test_verify_leaves_a_usable_npm_cache_alone(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """Redirecting unconditionally would discard a warm cache on every run and
+    re-download the CLI to gain nothing."""
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    warm = tmp_path / "warm-npm-cache"
+    warm.mkdir()
+    env_log = tmp_path / "child-cache.txt"
+    fake = _verify_bin(tmp_path, "verifywarm", stubs)
+    monkeypatch.setenv("MP_ENV_LOG", str(env_log))
+    monkeypatch.setenv("MP_NPM_LOG", str(tmp_path / "npm-calls.txt"))
+    monkeypatch.setenv("MP_NPM_CACHE", str(warm))
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(warm))
+
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert env_log.read_text() == str(warm)
+
+
+@pytest.mark.parametrize(
+    "npm",
+    [
+        pytest.param(
+            '#!/bin/sh\necho "npm $*" >> "$MP_NPM_LOG"\nexit 1\n',
+            id="npm refuses the question",
+        ),
+        pytest.param(
+            "#!/nonexistent/interpreter\n",
+            id="npm cannot be executed",
+        ),
+        pytest.param(None, id="npm is not installed"),
+    ],
+)
+def test_verify_inherits_the_npm_cache_when_npm_will_not_say_where_it_is(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch, npm
+):
+    """Unanswered is not the same as unusable.
+
+    Redirecting on a guess would discard a warm cache every run on any machine
+    whose npm answers oddly, to fix a problem that may not exist. The inherited
+    setting is the status quo, and the status quo is what an undiagnosed run
+    keeps.
+
+    `only_path`, for the unrunnable case especially: exec walks PATH and moves
+    on to the next candidate when one will not start, so with the real npm
+    still behind the stub this test would pass by asking the real one.
+    """
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    warm = tmp_path / "warm-npm-cache"
+    warm.mkdir()
+    env_log = tmp_path / "child-cache.txt"
+    fake = _verify_bin(tmp_path, "verifymute", stubs, npm=npm)
+    monkeypatch.setenv("MP_ENV_LOG", str(env_log))
+    monkeypatch.setenv("MP_NPM_LOG", str(tmp_path / "npm-calls.txt"))
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(warm))
+
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        stubs=fake,
+        only_path=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert env_log.read_text() == str(warm)
+
+
+def test_verify_replaces_an_npm_cache_answer_that_is_not_an_absolute_path(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """A relative answer would be judged against the wrong directory.
+
+    It resolves against *this* process's cwd, not the cwd npm will run with, so
+    a writable match there says nothing about the directory npm would use --
+    which is why this run has a real, writable `warm` sitting in its own cwd and
+    must still refuse it.
+    """
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    warm = tmp_path / "warm-npm-cache"
+    warm.mkdir()
+    env_log = tmp_path / "child-cache.txt"
+    fake = _verify_bin(tmp_path, "verifyrelative", stubs)
+    monkeypatch.setenv("MP_ENV_LOG", str(env_log))
+    monkeypatch.setenv("MP_NPM_LOG", str(tmp_path / "npm-calls.txt"))
+    monkeypatch.setenv("MP_NPM_CACHE", warm.name)
+
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--verify",
+        "--facts",
+        str(facts_path),
+        stubs=fake,
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    handed = env_log.read_text()
+    assert handed not in (warm.name, str(warm), "<unset>")
+    assert os.path.isabs(handed)
+
+
+def test_verify_asks_npm_nothing_for_a_config_with_no_npm_backed_entry(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """A repo with no node hook should not pay for a subprocess, and should not
+    need npm installed at all to be verified."""
+    generate(repo, keys_file, facts_path, stubs, "hygiene")
+    npm_log = tmp_path / "npm-calls.txt"
+    fake = _verify_bin(tmp_path, "verifynonode", stubs)
+    monkeypatch.setenv("MP_ENV_LOG", str(tmp_path / "child-cache.txt"))
+    monkeypatch.setenv("MP_NPM_LOG", str(npm_log))
+    monkeypatch.setenv("MP_NPM_CACHE", "/tmp")
+
+    proc = run(
+        "precommit.py", "--dir", str(repo), "--verify", "--facts", str(facts_path), stubs=fake
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not npm_log.exists(), f"npm was asked: {npm_log.read_text()}"
 
 
 def test_verify_reports_hooks_that_keep_failing(repo, keys_file, facts_path, stubs, tmp_path):
@@ -2049,6 +2299,20 @@ def test_the_mermaid_prerequisite_is_reported_rather_than_probed(repo, stubs):
     assert got["prerequisites"]["mermaid"] in ("binaries present",) or got["prerequisites"][
         "mermaid"
     ].startswith("missing: ")
+
+
+def test_the_prerequisite_sentinel_is_the_string_SKILL_md_branches_on(repo, stubs):
+    """The value is a contract with the procedure, not a label.
+
+    SKILL.md tests it literally, and a reworded one fails in the direction that
+    looks like nothing: every healthy run takes the missing-prerequisite branch
+    and warns that picking mermaid aborts the whole write, with nothing wrong.
+    Renaming it here has to be red until the procedure is renamed with it.
+    """
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    value = got["prerequisites"]["mermaid"]
+    assert value == "binaries present"
+    assert f"`{value}`" in (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_a_missing_prerequisite_is_named(repo, stubs, tmp_path):

@@ -269,6 +269,11 @@ def prerequisites() -> dict[str, str]:
     to run `command -v npm && command -v node` and interpret the output, which
     is a shell command and a judgement for something shutil.which answers
     exactly. One fewer bash block in the body, and one fewer thing to get wrong.
+
+    `binaries present` and not `present`, because that is all this proves: the
+    two executables are on PATH. Whether the version pin can reach the registry
+    is settled in Step 3 and nowhere else. SKILL.md branches on this string
+    literally, so it is pinned by a test rather than by intent.
     """
     missing = sorted(tool for tool in ("npm", "node") if shutil.which(tool) is None)
     return {"mermaid": "missing: " + ", ".join(missing) if missing else "binaries present"}
@@ -1149,7 +1154,7 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
 # -- verify ------------------------------------------------------------------
 
 
-def run_precommit(directory: str, *args: str) -> tuple[int, str]:
+def run_precommit(directory: str, *args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
     try:
         proc = subprocess.run(
             ["pre-commit", *args],
@@ -1159,12 +1164,100 @@ def run_precommit(directory: str, *args: str) -> tuple[int, str]:
             encoding="utf-8",
             errors="replace",
             timeout=1800,
+            env=env,
         )
     except FileNotFoundError:
         die("pre-commit not found on PATH; install it before verifying")
     except subprocess.TimeoutExpired:
         die(f"pre-commit {' '.join(args)} timed out after 1800s")
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def creatable_dir(path: str) -> bool:
+    """Whether a process could write inside `path`, creating it if need be.
+
+    Checked, never created: making `/root/.npm` on someone's behalf is the very
+    write the sandbox is refusing, and this skill has no business writing
+    outside the repository it was pointed at. So the nearest ancestor that does
+    exist is asked instead -- if npm could create the directory, npm may.
+
+    A relative path is refused rather than resolved. It would be resolved
+    against *this* process's cwd, which is not the cwd npm will run with, so the
+    answer would be about a different directory than the one being judged.
+    """
+    if not os.path.isabs(path):
+        return False
+    probe = path
+    while True:
+        if os.path.exists(probe):
+            return os.path.isdir(probe) and os.access(probe, os.W_OK | os.X_OK)
+        parent = os.path.dirname(probe)
+        if parent == probe:  # pragma: no cover - an absolute path reaches a root
+            return False
+        probe = parent
+
+
+def npm_cache_dir() -> str | None:
+    """Where npm says its cache is, or None if it will not say.
+
+    Asked rather than reconstructed. npm resolves this from the command line,
+    the environment, a user `.npmrc` and a global one, in that order, and a
+    reimplementation of that precedence here would be a guess that breaks
+    quietly on the next npm major -- while npm itself answers exactly, offline,
+    and without needing the directory to exist.
+
+    Run in a scratch directory for the same reason `npm_latest` is: the
+    repository being configured must not get a vote via its own `.npmrc`.
+    """
+    try:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            out = subprocess.run(
+                ["npm", "config", "get", "cache"],
+                cwd=elsewhere,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    value = out.stdout.strip()
+    # npm prints the string `undefined` for a config it has no value for.
+    return value if value and value != "undefined" else None
+
+
+def npm_cache_env(cfg: cfgmod.Config | None, scratch: str) -> dict[str, str] | None:
+    """An environment giving `pre-commit` a usable npm cache, or None to inherit.
+
+    The mermaid entry is a `language: node` hook with `additional_dependencies`,
+    so `pre-commit` builds its environment by running `npm install` -- and
+    pre-commit sets `npm_config_prefix` and unsets `npm_config_userconfig`, but
+    never touches the cache. An unwritable cache path (`/root/.npm` in a sandbox
+    with no writable HOME) therefore kills the hook install exactly the way it
+    used to kill the version pin, one step later and with the config already
+    written. `npm_latest` passes `--cache` for the same reason.
+
+    Only when the inherited cache is unusable, and only for a config that
+    actually carries an npm-backed entry: overriding unconditionally would throw
+    away a warm cache every run and re-download the CLI for nothing.
+    """
+    if not [k for k in present_keys(cfg) if CATALOG[k].get("npm")]:
+        return None
+    if shutil.which("npm") is None:
+        return None
+    cache = npm_cache_dir()
+    if cache is None or creatable_dir(cache):
+        return None
+    # Every spelling dropped before one is set. npm lower-cases `npm_config_*`
+    # environment names, so leaving an inherited `npm_config_cache` beside a new
+    # `NPM_CONFIG_CACHE` leaves npm two values for one key and the winner to
+    # process.env's ordering.
+    env = {k: v for k, v in os.environ.items() if k.lower() != "npm_config_cache"}
+    env["NPM_CONFIG_CACHE"] = os.path.join(scratch, "npm-cache")
+    return env
 
 
 def dirty_paths(directory: str) -> set[str]:
@@ -1226,18 +1319,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if resolved != root and not resolved.startswith(root + os.sep):
             die(f"{name!r} resolves outside the repository; refusing to check it")
 
-    rc, install_out = run_precommit(directory, "install")
-    if rc != 0:
-        die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
+    # One scratch directory for the whole run: `install` and both `run`s have to
+    # see the same npm cache, or the second one re-downloads what the first
+    # fetched. See npm_cache_env -- usually None, and then nothing is overridden.
+    with tempfile.TemporaryDirectory() as scratch:
+        env = npm_cache_env(read_config(directory), scratch)
+        rc, install_out = run_precommit(directory, "install", env=env)
+        if rc != 0:
+            die(f"pre-commit install failed (exit {rc}): {clean(install_out)}")
 
-    before = dirty_paths(directory)
-    run_args = ["run", "--files", "--", *files] if files else ["run", "--all-files"]
-    rc, output = run_precommit(directory, *run_args)
-    autofixed: list[str] = []
+        before = dirty_paths(directory)
+        run_args = ["run", "--files", "--", *files] if files else ["run", "--all-files"]
+        rc, output = run_precommit(directory, *run_args, env=env)
+        autofixed: list[str] = []
 
-    if rc != 0:
-        autofixed = sorted(dirty_paths(directory) - before)
-        rc, output = run_precommit(directory, *run_args)
+        if rc != 0:
+            autofixed = sorted(dirty_paths(directory) - before)
+            rc, output = run_precommit(directory, *run_args, env=env)
 
     # This run's own files, from the facts it was given: the two halves of
     # `autofixed` get opposite sentences, so the split has to know which is

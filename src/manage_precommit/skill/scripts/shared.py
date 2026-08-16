@@ -643,7 +643,8 @@ class RecommendReport(TypedDict, total=False):
     previous: list[str]  # catalog keys the existing config already carries
     disabled: dict[str, list[str]]  # present, but configured never to fire
     local_repo_sources: list[str]  # repo: values cloned off this disk, not a host
-    prerequisites: dict[str, str]  # catalog key -> present | missing: <tools>
+    # SKILL.md branches on these values literally; see the sentinel test.
+    prerequisites: dict[str, str]  # catalog key -> binaries present | missing: <tools>
     proposed: list[str]  # always_on + recommended, minus previous
     detected: list[str]  # the markers actually seen, for the summary's SCAN row
     detected_paths: list[str]  # the same markers as bare paths, for --files-file
