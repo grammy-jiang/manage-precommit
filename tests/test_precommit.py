@@ -552,7 +552,7 @@ def test_generate_asks_about_the_right_repo_for_each_catalog_key(
     calls = stub_calls(stubs)
     assert "https://github.com/pre-commit/pre-commit-hooks" in calls
     assert "https://github.com/gitleaks/gitleaks" in calls
-    assert "npm view @mermaid-js/mermaid-cli version" in calls
+    assert "npm view @mermaid-js/mermaid-cli version --cache " in calls
     # And the pinned values are the ones that repo offered, not another's.
     versions = json.loads(facts_path.read_text())["hooks"]["versions"]
     assert versions["hygiene"] == "v10.0.1"
@@ -689,6 +689,50 @@ def test_a_garbage_npm_version_is_refused(repo, keys_file, facts_path, tmp_path,
     assert proc.returncode != 0
     assert "unexpected version" in proc.stderr
     assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    fake = _fake_bin(
+        tmp_path,
+        "npminspect",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'cache=""\n'
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--cache" ]; then cache="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        '[ -n "$cache" ] || { echo "missing --cache" >&2; exit 2; }\n'
+        '[ "${HTTPS_PROXY:-}" = "http://proxy.example:8080" ] || {\n'
+        '  echo "proxy env missing" >&2; exit 3;\n'
+        "}\n"
+        '[ "${NPM_CONFIG_CACHE:-}" = "/root/.npm" ] || {\n'
+        '  echo "expected inherited cache var for test" >&2; exit 4;\n'
+        "}\n"
+        'mkdir -p "$cache"\n'
+        'touch "$cache/probe"\n'
+        'printf "%s" "$cache" > "$MP_CACHE_LOG"\n'
+        'echo "npm warn Unknown env config \\"http-proxy\\". This will stop working in the next major version of npm." >&2\n'
+        "echo 11.99.0\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    cache_log = tmp_path / "cache-path.txt"
+    monkeypatch.setenv("MP_CACHE_LOG", str(cache_log))
+    monkeypatch.setenv("NPM_CONFIG_CACHE", "/root/.npm")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    cache = cache_log.read_text()
+    assert cache
+    assert cache != "/root/.npm"
+    assert not os.path.exists(cache), "temporary npm cache should be cleaned up"
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
 
 
 def test_verify_reports_hooks_that_keep_failing(repo, keys_file, facts_path, stubs, tmp_path):
@@ -2002,7 +2046,7 @@ def test_the_mermaid_prerequisite_is_reported_rather_than_probed(repo, stubs):
     """SKILL.md used to hand the agent `command -v npm && command -v node` and
     ask it to interpret the output. shutil.which answers that exactly."""
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
-    assert got["prerequisites"]["mermaid"] in ("present",) or got["prerequisites"][
+    assert got["prerequisites"]["mermaid"] in ("binaries present",) or got["prerequisites"][
         "mermaid"
     ].startswith("missing: ")
 

@@ -190,12 +190,15 @@ def latest_tag(repo_url: str) -> str:
 
 def npm_latest(pkg: str) -> str:
     name = refuse_option_like(pkg, "npm package", die)
-    # Same reasoning as latest_tag: run somewhere the repository being
-    # configured cannot supply an .npmrc that redirects the registry.
+    # Run in a scratch directory so the repository being configured cannot
+    # supply an .npmrc. Pinning also sets an explicit cache path in that scratch
+    # directory so inherited npm cache settings (for example an unwritable
+    # NPM_CONFIG_CACHE) cannot break version lookup.
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
+            cache = os.path.join(elsewhere, "npm-cache")
             out = subprocess.run(
-                ["npm", "view", name, "version"],
+                ["npm", "view", name, "version", "--cache", cache],
                 cwd=elsewhere,
                 capture_output=True,
                 text=True,
@@ -268,7 +271,7 @@ def prerequisites() -> dict[str, str]:
     exactly. One fewer bash block in the body, and one fewer thing to get wrong.
     """
     missing = sorted(tool for tool in ("npm", "node") if shutil.which(tool) is None)
-    return {"mermaid": "missing: " + ", ".join(missing) if missing else "present"}
+    return {"mermaid": "missing: " + ", ".join(missing) if missing else "binaries present"}
 
 
 def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], list[str]]:
