@@ -948,6 +948,10 @@ def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_
         pytest.param("http://registry.npmjs.org/", True, id="npmjs over plain http"),
         pytest.param("ftp://registry.npmjs.org/", False, id="not a scheme npm speaks"),
         pytest.param("https://registry.npmjs.org:nope/", False, id="a port that is not a number"),
+        # npm keeps the base path and appends the package to it, so a path is a
+        # different endpoint wearing the same name, exactly as a port is.
+        pytest.param("https://registry.npmjs.org/custom/", False, id="a base path on npmjs's name"),
+        pytest.param("https://registry.npmjs.org/", True, id="the root, which is the real one"),
     ],
 )
 def test_whether_the_registry_was_npms_own_is_decided_here(

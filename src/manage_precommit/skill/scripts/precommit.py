@@ -408,6 +408,11 @@ def is_public_registry(url: str) -> bool:
         parts = urlsplit(url)
         if parts.hostname != PUBLIC_NPM_HOST or parts.scheme not in DEFAULT_PORTS:
             return False
+        # npm keeps the base path and appends the package to it, so
+        # `.../custom/` is a different endpoint wearing the same name -- the
+        # same way a port is.
+        if parts.path not in ("", "/"):
+            return False
         # A port says something local is answering for that name -- a proxy on
         # 4873, a hosts-file override -- and the whole value of this field is
         # telling "npmjs said no" apart from "your mirror said no". Wrong in
@@ -512,47 +517,65 @@ def npm_latest(pkg: str) -> str:
     # was reported from a mirror or proxy is the only route to a registry at
     # all, and a hardcoded --registry would turn a working environment into a
     # broken one to defend against a threat the user already controls.
+    # Outside the handlers below, because it happens before npm is involved at
+    # all: no usable TMPDIR is a filesystem problem, and a `FileNotFoundError`
+    # from tempfile reported as `npm-missing` sends someone off to install
+    # something they already have.
     try:
-        with tempfile.TemporaryDirectory() as elsewhere:
+        scratch = tempfile.TemporaryDirectory()
+    except OSError as exc:  # pragma: no cover - see below
+        # Untested because tempfile walks $TMPDIR, /tmp, /var/tmp, /usr/tmp and
+        # then the cwd, so reaching this needs every one of them unusable at
+        # once -- not something a test can arrange without breaking the machine
+        # it runs on. Kept because the classification is the point: this is
+        # where a FileNotFoundError from tempfile would otherwise be reported as
+        # `npm-missing`, sending someone to install what they already have.
+        pin_failed("npm", name, f"no scratch directory to pin {pkg} in: {exc}", "filesystem")
+    try:
+        with scratch as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")
-            out = subprocess.run(
-                # Every part of this is spelled out because each is otherwise
-                # taken from the user's npm configuration, which this honours:
-                # `@latest` because a `tag=next` would pin whatever that points
-                # at, `--json` because `json=true` quotes the answer, and
-                # `--no-color` because `color=always` writes escapes through the
-                # middle of `npm error code`.
-                [
-                    "npm",
-                    "view",
-                    f"{name}@latest",
-                    "version",
-                    "--cache",
-                    cache,
-                    "--json",
-                    "--no-color",
-                ],
-                cwd=elsewhere,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=NPM_TIMEOUT,
-            )
-    except FileNotFoundError:
-        pin_failed("npm", name, f"npm not found; it is needed to pin {pkg}", "npm-missing")
-    except subprocess.TimeoutExpired:  # pragma: no cover - see below
-        # Before the generic handler: TimeoutExpired is a SubprocessError, and
-        # "could not run npm" is the wrong sentence for a registry that answered
-        # too slowly rather than not at all.
-        #
-        # Untested on purpose. Reaching it costs a real 90-second wait, and the
-        # alternative is a test-only override of NPM_TIMEOUT in shipped code --
-        # the first environment knob in these scripts that exists for the suite
-        # rather than for a user. A two-line handler is not worth either.
-        pin_failed("npm", name, f"npm view {pkg} timed out after {NPM_TIMEOUT}s", "timeout")
-    except (OSError, subprocess.SubprocessError) as exc:
-        pin_failed("npm", name, f"could not run npm for {pkg}: {exc}", "unrunnable")
+            try:
+                out = subprocess.run(
+                    # Every part of this is spelled out because each is otherwise
+                    # taken from the user's npm configuration, which this honours:
+                    # `@latest` because a `tag=next` would pin whatever that
+                    # points at, `--json` because `json=true` quotes the answer,
+                    # and `--no-color` because `color=always` writes escapes
+                    # through the middle of `npm error code`.
+                    [
+                        "npm",
+                        "view",
+                        f"{name}@latest",
+                        "version",
+                        "--cache",
+                        cache,
+                        "--json",
+                        "--no-color",
+                    ],
+                    cwd=elsewhere,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=NPM_TIMEOUT,
+                )
+            except FileNotFoundError:
+                pin_failed("npm", name, f"npm not found; it is needed to pin {pkg}", "npm-missing")
+            except subprocess.TimeoutExpired:  # pragma: no cover - see below
+                # Before the generic handler: TimeoutExpired is a SubprocessError,
+                # and "could not run npm" is the wrong sentence for a registry
+                # that answered too slowly rather than not at all.
+                #
+                # Untested on purpose. Reaching it costs a real 90-second wait,
+                # and the alternative is a test-only override of NPM_TIMEOUT in
+                # shipped code -- the first environment knob in these scripts
+                # that exists for the suite rather than for a user. A two-line
+                # handler is not worth either.
+                pin_failed("npm", name, f"npm view {pkg} timed out after {NPM_TIMEOUT}s", "timeout")
+            except (OSError, subprocess.SubprocessError) as exc:
+                pin_failed("npm", name, f"could not run npm for {pkg}: {exc}", "unrunnable")
+    except OSError as exc:  # pragma: no cover - only the cleanup reaches here
+        pin_failed("npm", name, f"scratch directory would not go away: {exc}", "filesystem")
     if out.returncode != 0:
         fields = npm_fields(out.stderr)
         code = fields.get("code", "")
