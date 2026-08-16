@@ -204,6 +204,46 @@ PIN_FIELDS = (
 )
 
 
+def scratch_root() -> str:
+    """Where a scratch directory would have gone, for when one cannot be made.
+
+    Best effort on purpose: `gettempdir()` raises for the same reason
+    `TemporaryDirectory()` just did, and a failure to name the place is not a
+    reason to withhold the rest of the report.
+    """
+    try:
+        return tempfile.gettempdir()
+    except OSError:  # pragma: no cover - unreachable for the reason below
+        return ""
+
+
+def scratch_or_pin_failed(source: str, target: str) -> tempfile.TemporaryDirectory[str]:
+    """A scratch directory, or exit 6 saying the filesystem is why.
+
+    Both pin sources need one before they can start, and an OSError from here
+    is neither a stalled remote nor a missing npm -- left alone it was a
+    traceback and exit 1 out of `latest_tag`, and `npm-missing` out of
+    `npm_latest`, since tempfile raises the same FileNotFoundError a missing
+    executable does.
+
+    Untested, and this is the one branch in these scripts that cannot be:
+    tempfile walks $TMPDIR, /tmp, /var/tmp, /usr/tmp and then the cwd, so
+    reaching it needs every one of them unusable at once, which a test cannot
+    arrange without breaking the machine it runs on. Kept because the
+    classification is the whole point of it.
+    """
+    try:
+        return tempfile.TemporaryDirectory()
+    except OSError as exc:  # pragma: no cover - see above
+        pin_failed(
+            source,
+            target,
+            f"no scratch directory to pin in: {exc}",
+            "filesystem",
+            npm_path=clean(scratch_root()),
+        )
+
+
 def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
     """Refuse a pin, saying what could not be pinned and why, machine-readably.
 
@@ -259,8 +299,13 @@ def latest_tag(repo_url: str) -> str:
     # `isolated`. Running this under the target repo's config would let that
     # repo decide which server answers for a catalog URL.
     pinning_git = make_git(die, on_timeout=stalled)
-    with tempfile.TemporaryDirectory() as elsewhere:
-        rc, out, err = pinning_git(elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True)
+    try:
+        with scratch_or_pin_failed("git", url) as elsewhere:
+            rc, out, err = pinning_git(
+                elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True
+            )
+    except OSError as exc:  # pragma: no cover - only the cleanup reaches here
+        pin_failed("git", url, f"scratch directory would not go away: {exc}", "filesystem")
     if rc != 0:
         pin_failed(
             "git",
@@ -528,19 +573,10 @@ def npm_latest(pkg: str) -> str:
     # all, and a hardcoded --registry would turn a working environment into a
     # broken one to defend against a threat the user already controls.
     # Outside the handlers below, because it happens before npm is involved at
-    # all: no usable TMPDIR is a filesystem problem, and a `FileNotFoundError`
-    # from tempfile reported as `npm-missing` sends someone off to install
-    # something they already have.
-    try:
-        scratch = tempfile.TemporaryDirectory()
-    except OSError as exc:  # pragma: no cover - see below
-        # Untested because tempfile walks $TMPDIR, /tmp, /var/tmp, /usr/tmp and
-        # then the cwd, so reaching this needs every one of them unusable at
-        # once -- not something a test can arrange without breaking the machine
-        # it runs on. Kept because the classification is the point: this is
-        # where a FileNotFoundError from tempfile would otherwise be reported as
-        # `npm-missing`, sending someone to install what they already have.
-        pin_failed("npm", name, f"no scratch directory to pin {pkg} in: {exc}", "filesystem")
+    # all: tempfile raises the same FileNotFoundError a missing executable does,
+    # and reported as `npm-missing` that sends someone off to install something
+    # they already have.
+    scratch = scratch_or_pin_failed("npm", name)
     try:
         with scratch as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")

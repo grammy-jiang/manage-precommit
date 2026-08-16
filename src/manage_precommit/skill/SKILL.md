@@ -201,12 +201,15 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   reasonable assumption and it is wrong. The JSON on stdout carries `source`
   (`npm` or `git`), `target` (the package or repository), and `cause`. Use the
   cause — do not re-derive it from the English:
-  - `filesystem` — npm could not write somewhere. **Read `npm_path` before
-    saying what to fix.** Pinning always passes its own `--cache` under a
-    temporary directory, so this is usually the *temporary filesystem* — full,
-    read-only, or a `TMPDIR` this process cannot use — and telling them to
-    change `NPM_CONFIG_CACHE` or `HOME` is advice that cannot work. Name the
-    path npm named and say which of the two it is.
+  - `filesystem` — something could not be written. **Read `npm_path` before
+    saying what to fix, and check whether it is set at all.** Pinning always
+    works in a temporary directory and passes its own `--cache` inside it, so
+    the *temporary filesystem* is the usual subject — full, read-only, or a
+    `TMPDIR` this process cannot use — and telling them to change
+    `NPM_CONFIG_CACHE` or `HOME` is advice that cannot work. A set `npm_path` is
+    the directory to name. An **empty** one means the scratch directory itself
+    could not be made, so there is no path to name: say that the temporary
+    filesystem is unusable and quote the message, which carries the error.
   - `auth` — the registry wants credentials this environment does not have.
   - `not-found` — a registry answered that there is no such package. `registry`
     names it and **`registry_is_public` says whether it was npm's own** — do not
