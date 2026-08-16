@@ -92,7 +92,16 @@ def stubs(tmp_path_factory: pytest.TempPathFactory) -> Path:
         f'exec {REAL_GIT} "$@"\n'
     )
     npm = d / "npm"
-    npm.write_text(f'#!/bin/sh\necho "npm $*" >> "{log}"\necho {NPM_VERSION}\n')
+    npm.write_text(
+        f'#!/bin/sh\necho "npm $*" >> "{log}"\n'
+        # `npm config get cache` is asked before pre-commit is handed a node
+        # hook, so the stub has to answer it as npm would: replying with a
+        # version string would read as an uncreatable cache path and send every
+        # such run down the override branch. Overridable so a test can make it
+        # a path that really is uncreatable.
+        'if [ "$1" = "config" ]; then echo "${MP_NPM_CACHE:-/tmp}"; exit 0; fi\n'
+        f"echo {NPM_VERSION}\n"
+    )
     for f in (git, npm):
         f.chmod(0o755)
     return d
@@ -142,10 +151,23 @@ def script_command(script: str, args: tuple[str, ...], scripts: Path = SCRIPTS) 
     --rcfile is absolute because these subprocesses are started in throwaway
     repositories, not in the checkout; a relative one would silently miss the
     settings and measure the wrong thing.
+
+    --source for the same reason and it is not redundant: the `source` in that
+    rcfile is a relative path, resolved against the subprocess's cwd. A test
+    that runs a script from anywhere but the checkout therefore measures
+    nothing, the run stays green, and the lines it covered quietly go missing
+    from the report -- which is the one failure a coverage floor cannot catch.
     """
     launcher = [sys.executable]
     if COVER_SUBPROCESSES:
-        launcher += ["-m", "coverage", "run", "--parallel-mode", f"--rcfile={REPO}/pyproject.toml"]
+        launcher += [
+            "-m",
+            "coverage",
+            "run",
+            "--parallel-mode",
+            f"--rcfile={REPO}/pyproject.toml",
+            f"--source={REPO}/src/manage_precommit",
+        ]
     return [*launcher, str(scripts / script), *args]
 
 

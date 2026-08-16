@@ -127,7 +127,9 @@ rejected by the tool, not quietly corrected. Show the catalog with `--catalog` i
 asked.
 
 Before offering `mermaid`, relay `prerequisites.mermaid` from Step 1 — the scan
-already looked. If it is not `present`, say so in the question — **and say that picking it anyway
+already looked. `binaries present` means `node` and `npm` are on PATH and
+nothing beyond that: the version pin is attempted in Step 3 and can still fail
+there. If it is anything else, say so in the question — **and say that picking it anyway
 aborts the whole write, not just that entry**: the version pin happens before
 anything is written, so a missing `npm` means none of the other selected hooks
 get written either. Also say the hook downloads a headless Chromium the first
