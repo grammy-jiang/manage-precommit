@@ -208,8 +208,13 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     change `NPM_CONFIG_CACHE` or `HOME` is advice that cannot work. Name the
     path npm named and say which of the two it is.
   - `auth` — the registry wants credentials this environment does not have.
-  - `not-found` — the registry has no such package. If a catalog key was
-    involved this is a bug here, not something the user can fix.
+  - `not-found` — a registry answered that there is no such package, and
+    `registry` says **which** one. This skill deliberately does not override the
+    user's registry, so if that is not `https://registry.npmjs.org/` the likely
+    cause is a mirror or proxy that does not carry this package — theirs to fix
+    by pointing npm somewhere that does, and not a bad package name. Only when
+    the public registry is the one that answered is the catalog itself wrong,
+    and that is a bug here rather than anything they can do.
   - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
     reachability problem and not their repository.
   - `timeout` — the registry answered too slowly, not "not at all", whether npm

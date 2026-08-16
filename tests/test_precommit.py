@@ -784,6 +784,32 @@ def test_a_failed_pin_names_its_cause(
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_path, stubs):
+    """Honouring the user's registry makes this the ordinary case, not an edge.
+
+    An enterprise mirror that does not proxy the package answers E404 exactly
+    the way a wrong package name does. Told only "no such package", the agent
+    reports a bug in this catalog at a user who can fix it in a minute by
+    pointing npm somewhere that carries it -- so the run says which registry
+    said no rather than leaving that to be inferred.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmmirror",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then echo "https://npm.corp.invalid/"; exit 0; fi\n'
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
 def test_a_huge_npm_complaint_is_bounded_in_both_places_it_is_relayed(
     repo, keys_file, facts_path, tmp_path, stubs
 ):
@@ -2552,30 +2578,36 @@ def test_the_mermaid_prerequisite_is_reported_rather_than_probed(repo, stubs):
     ].startswith("missing: ")
 
 
-def test_every_pin_cause_has_its_own_advice_in_SKILL_md():
+def _declared_tuple(name: str) -> list[str]:
+    """A module-level tuple-of-strings literal, read out of the script itself."""
+    tree = ast.parse((SKILL / "scripts" / "precommit.py").read_text(encoding="utf-8"))
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Tuple):
+            continue
+        if any(getattr(t, "id", "") == name for t in stmt.targets):
+            return [el.value for el in stmt.value.elts]
+    raise AssertionError(f"{name} is not a plain tuple literal any more")
+
+
+@pytest.mark.parametrize("name,least", [("PIN_CAUSES", 10), ("PIN_FIELDS", 6)])
+def test_every_part_of_the_pin_failure_contract_is_named_in_SKILL_md(name, least):
     """The taxonomy and the procedure are one contract in two files.
 
-    A cause added to the code without a sentence beside it in SKILL.md fails
-    the way a renamed sentinel does -- the agent falls through to wording that
-    does not fit, and nothing about the run looks wrong. Read out of the source
-    rather than restated here, so adding one and forgetting the other is red
-    instead of a second list to keep in step.
+    A cause with no sentence beside it fails the way a renamed sentinel does:
+    the agent falls through to wording that does not fit and nothing about the
+    run looks wrong. A *field* with no sentence is quieter still -- it is simply
+    never read, so the distinction it was added to draw is not drawn. `registry`
+    exists because a 404 from a company mirror is not a 404 from npmjs, and it
+    would have been worth nothing unmentioned.
+
+    Read out of the source rather than restated here, so adding one and
+    forgetting the other is red instead of a third list to keep in step.
     """
-    tree = ast.parse((SKILL / "scripts" / "precommit.py").read_text(encoding="utf-8"))
-    declared = [
-        [el.value for el in node.value.elts]
-        for stmt in tree.body
-        if isinstance(stmt, ast.Assign)
-        for node in [stmt]
-        if any(getattr(t, "id", "") == "PIN_CAUSES" for t in stmt.targets)
-        and isinstance(node.value, ast.Tuple)
-    ]
-    assert declared, "PIN_CAUSES is not a plain tuple literal any more"
-    causes = declared[0]
-    assert len(causes) >= 10
+    declared = _declared_tuple(name)
+    assert len(declared) >= least
     advice = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    missing = [c for c in causes if f"`{c}`" not in advice]
-    assert not missing, f"causes the procedure says nothing about: {missing}"
+    missing = [d for d in declared if f"`{d}`" not in advice]
+    assert not missing, f"{name} entries the procedure says nothing about: {missing}"
 
 
 def test_the_prerequisite_sentinel_is_the_string_SKILL_md_branches_on(repo, stubs):

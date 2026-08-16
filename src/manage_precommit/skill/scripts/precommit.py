@@ -186,6 +186,12 @@ PIN_CAUSES = (
     "unknown",
 )
 
+# And every key the payload can carry, for the same reason. A field the agent is
+# never told about is a field it will not read: `registry` was added because a
+# 404 from a mirror is not a 404 from npmjs, and that distinction is worth
+# nothing if SKILL.md does not name the key that draws it.
+PIN_FIELDS = ("source", "target", "cause", "npm_code", "npm_path", "detail", "registry")
+
 
 def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
     """Refuse a pin, saying what could not be pinned and why, machine-readably.
@@ -202,8 +208,12 @@ def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object)
     failing are the same event to the caller, and a contract that numbered them
     differently would be one more thing to remember and get wrong.
     """
-    if cause not in PIN_CAUSES:  # impossible, and asserted rather than relayed
+    # Impossible states, asserted rather than relayed: both are contracts with
+    # SKILL.md, and a value it has no sentence for is worse than a crash here.
+    if cause not in PIN_CAUSES:
         die(f"internal: {cause!r} is not one of the declared pin causes")
+    if undeclared := sorted(set(fields) - set(PIN_FIELDS)):
+        die(f"internal: undeclared pin fields {undeclared}")
     die(
         msg,
         code=EXIT_PIN_FAILED,
@@ -358,14 +368,24 @@ def npm_latest(pkg: str) -> str:
         # same category as git's remote-server text, and SKILL.md relays the
         # sentence as well as the field.
         detail = bounded_err(out.stderr)
+        cause = npm_cause(code)
+        extra: dict[str, object] = {}
+        if cause == "not-found":
+            # Which registry said no, because honouring the user's own is a
+            # decision this file made (see below) and a mirror that does not
+            # carry a package answers E404 exactly like a wrong package name.
+            # Asked only here: it costs a subprocess, and only this one cause
+            # cannot be acted on without knowing.
+            extra["registry"] = clean(npm_config("registry") or "")
         pin_failed(
             "npm",
             name,
             f"npm view {pkg} failed: {detail}",
-            npm_cause(code),
+            cause,
             npm_code=code,
             npm_path=clean(fields.get("path", "")),
             detail=detail,
+            **extra,
         )
     version = out.stdout.strip()
     if not VER_RE.match(version):
@@ -1359,14 +1379,14 @@ def creatable_dir(path: str) -> bool:
         probe = parent
 
 
-def npm_cache_dir() -> str | None:
-    """Where npm says its cache is, or None if it will not say.
+def npm_config(key: str) -> str | None:
+    """What npm says one of its settings is, or None if it will not say.
 
-    Asked rather than reconstructed. npm resolves this from the command line,
-    the environment, a user `.npmrc` and a global one, in that order, and a
-    reimplementation of that precedence here would be a guess that breaks
+    Asked rather than reconstructed. npm resolves each of these from the command
+    line, the environment, a user `.npmrc` and a global one, in that order, and
+    a reimplementation of that precedence here would be a guess that breaks
     quietly on the next npm major -- while npm itself answers exactly, offline,
-    and without needing the directory to exist.
+    and without needing anything to exist.
 
     Run in a scratch directory for the same reason `npm_latest` is: the
     repository being configured must not get a vote via its own `.npmrc`.
@@ -1374,7 +1394,7 @@ def npm_cache_dir() -> str | None:
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
             out = subprocess.run(
-                ["npm", "config", "get", "cache"],
+                ["npm", "config", "get", refuse_option_like(key, "npm config key", die)],
                 cwd=elsewhere,
                 capture_output=True,
                 text=True,
@@ -1389,6 +1409,10 @@ def npm_cache_dir() -> str | None:
     value = out.stdout.strip()
     # npm prints the string `undefined` for a config it has no value for.
     return value if value and value != "undefined" else None
+
+
+def npm_cache_dir() -> str | None:
+    return npm_config("cache")
 
 
 def npm_cache_env(cfg: cfgmod.Config | None, scratch: str) -> dict[str, str] | None:
