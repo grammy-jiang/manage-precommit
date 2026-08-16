@@ -392,6 +392,7 @@ def npm_fields(stderr: str) -> dict[str, str]:
 
 
 PUBLIC_NPM_HOST = "registry.npmjs.org"
+DEFAULT_PORTS = {"https": 443, "http": 80}
 
 
 def is_public_registry(url: str) -> bool:
@@ -404,8 +405,16 @@ def is_public_registry(url: str) -> bool:
     fact, so it is settled here rather than described there.
     """
     try:
-        return urlsplit(url).hostname == PUBLIC_NPM_HOST
-    except ValueError:  # a URL malformed enough that urlsplit refuses it
+        parts = urlsplit(url)
+        if parts.hostname != PUBLIC_NPM_HOST or parts.scheme not in DEFAULT_PORTS:
+            return False
+        # A port says something local is answering for that name -- a proxy on
+        # 4873, a hosts-file override -- and the whole value of this field is
+        # telling "npmjs said no" apart from "your mirror said no". Wrong in
+        # this direction is the expensive one: it sends someone to report a bug
+        # here about a package their registry simply does not carry.
+        return parts.port in (None, DEFAULT_PORTS[parts.scheme])
+    except ValueError:  # a malformed URL, or a port that is not a number
         return False
 
 

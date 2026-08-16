@@ -940,6 +940,14 @@ def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_
         pytest.param("HTTPS://Registry.NPMJS.org/", True, id="npmjs, shouted"),
         pytest.param("https://npm.corp.invalid/", False, id="a company mirror"),
         pytest.param("https://registry.npmjs.org.evil.invalid/", False, id="a lookalike host"),
+        # The name alone is not the endpoint: a port means something local is
+        # answering for it, and this field exists to tell "npmjs said no" apart
+        # from "your mirror said no".
+        pytest.param("https://registry.npmjs.org:4873/", False, id="a proxy on npmjs's name"),
+        pytest.param("https://registry.npmjs.org:443/", True, id="the default port, spelled out"),
+        pytest.param("http://registry.npmjs.org/", True, id="npmjs over plain http"),
+        pytest.param("ftp://registry.npmjs.org/", False, id="not a scheme npm speaks"),
+        pytest.param("https://registry.npmjs.org:nope/", False, id="a port that is not a number"),
     ],
 )
 def test_whether_the_registry_was_npms_own_is_decided_here(
