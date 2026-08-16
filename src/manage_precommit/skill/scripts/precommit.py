@@ -268,14 +268,29 @@ def seal_scratch(where: str, source: str, target: str) -> None:
 
     Fails closed: an unsealed scratch is not one to pin from.
     """
+    reason = try_seal(where)
+    if reason:
+        pin_failed(
+            source, target, f"could not isolate a scratch directory: {reason}", "not-isolated"
+        )
+
+
+def try_seal(where: str) -> str:
+    """Plant the markers, and say what stopped it if either did not land.
+
+    Split from `seal_scratch` because not every scratch belongs to a pin.
+    `npm_config` asks npm a question and degrades to "no answer"; turning a
+    failure there into exit 6 would report a pin failure for a probe.
+    """
     rc, _, err = git(where, "init", "--quiet", isolated=True)
     if rc != 0:
-        pin_failed(source, target, f"could not isolate a scratch directory: {err}", "not-isolated")
+        return err or "git init failed"
     try:
         for name, body in (("package.json", b"{}\n"), (".npmrc", b"")):
             atomic_write_bytes(os.path.join(where, name), body)
     except OSError as exc:  # pragma: no cover - a directory just created
-        pin_failed(source, target, f"could not isolate a scratch directory: {exc}", "not-isolated")
+        return str(exc)
+    return ""
 
 
 def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
@@ -1843,6 +1858,13 @@ def npm_config(key: str) -> str | None:
     """
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
+            # Sealed like a pin's scratch, and for the same reason: unsealed,
+            # the project enclosing whatever TMPDIR names gets to answer this,
+            # and the registry reported to the user is then a stranger's rather
+            # than the one npm asked. A probe that cannot be isolated answers
+            # nothing rather than answering wrongly.
+            if try_seal(elsewhere):
+                return None
             out = subprocess.run(
                 [
                     "npm",

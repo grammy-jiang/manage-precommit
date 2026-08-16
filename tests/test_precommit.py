@@ -1475,6 +1475,81 @@ def test_a_tmpdir_inside_someones_repository_cannot_reach_the_pin(
     assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
 
 
+def test_a_probe_that_cannot_be_sealed_answers_nothing(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """Sealing the probe is only half of it; the other half is what happens when
+    the seal fails.
+
+    An unsealed probe that answers anyway reports whichever registry the
+    enclosing project names, which is worse than reporting none: SKILL.md reads
+    an empty `registry` as "npm would not say" and attributes nothing, and reads
+    a filled one as fact. The stub lets the pin's own seal succeed and fails
+    every one after it, which is the only way to reach the probe's.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmprobeunsealed",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then printf \'"https://npm.corp.invalid/"\\n\'; exit 0; fi\n'
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    counter = tmp_path / "init-count"
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "init" ]; then\n'
+        f'    n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{counter}"\n'
+        '    [ "$n" -le 1 ] || { echo "fatal: no more repositories for you" >&2; exit 128; }\n'
+        "  fi\n"
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "", "an unsealed probe must not name a registry"
+    assert "registry_is_public" not in got
+
+
+def test_the_registry_probe_is_sealed_like_the_pin_is(repo, keys_file, facts_path, tmp_path, stubs):
+    """`npm config get registry` is asked in a scratch too, and it decides what
+    the user is told about who refused their package.
+
+    Unsealed, the project enclosing whatever TMPDIR names answers it, and the
+    registry reported is a stranger's rather than the one npm asked -- which is
+    the exact wrongness the field exists to prevent, one function away from the
+    seal that prevents it.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmprobeseal",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  [ -f "$PWD/package.json" ] || { echo "probe scratch not sealed" >&2; exit 9; }\n'
+        '  [ -f "$PWD/.npmrc" ] || { echo "probe scratch not sealed" >&2; exit 9; }\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://npm.corp.invalid/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+
+
 def test_the_scratch_carries_the_marker_npm_stops_at(repo, keys_file, facts_path, stubs, tmp_path):
     """git's half of the seal and npm's are separate, and so are their proofs.
 
