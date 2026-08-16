@@ -723,6 +723,12 @@ NPM_FAILURES = [
     # `timeout` bucket with almost nothing that could land in it.
     pytest.param("npm error code ETIMEDOUT\n", "timeout", "", id="npm gave up on the socket"),
     pytest.param("npm ERR! code ERR_SOCKET_TIMEOUT\n", "timeout", "", id="socket timeout"),
+    # @npmcli/agent's own four, for connect, idle, response and transfer. Each
+    # exits normally, so none of them reaches the TimeoutExpired handler either.
+    pytest.param("npm error code ECONNECTIONTIMEOUT\n", "timeout", "", id="agent: connect"),
+    pytest.param("npm error code EIDLETIMEOUT\n", "timeout", "", id="agent: idle"),
+    pytest.param("npm error code ERESPONSETIMEOUT\n", "timeout", "", id="agent: response"),
+    pytest.param("npm error code ETRANSFERTIMEOUT\n", "timeout", "", id="agent: transfer"),
     pytest.param(
         "npm error code ENOSPC\nnpm error path /tmp/x/npm-cache\n",
         "filesystem",
@@ -919,6 +925,47 @@ def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_
     got = out_json(proc)
     assert got["cause"] == "not-found"
     assert got["registry"] == "https://npm.corp.invalid/"
+
+
+@pytest.mark.parametrize(
+    "answered,public",
+    [
+        pytest.param("https://registry.npmjs.org/", True, id="npmjs, as npm writes it"),
+        pytest.param("https://registry.npmjs.org", True, id="npmjs, no trailing slash"),
+        pytest.param("HTTPS://Registry.NPMJS.org/", True, id="npmjs, shouted"),
+        pytest.param("https://npm.corp.invalid/", False, id="a company mirror"),
+        pytest.param("https://registry.npmjs.org.evil.invalid/", False, id="a lookalike host"),
+    ],
+)
+def test_whether_the_registry_was_npms_own_is_decided_here(
+    repo, keys_file, facts_path, tmp_path, stubs, answered, public
+):
+    """One registry, several spellings, and the agent must not be comparing them.
+
+    `npm config get registry` returns whatever the user wrote, so npmjs itself
+    arrives with or without a trailing slash -- and a string test in SKILL.md
+    then reads it as a company mirror and tells someone that a bug in this
+    catalog is theirs to go and fix. The lookalike host is here because a
+    substring test would call it npmjs, which is the other way to get it wrong.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmspelling",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        f'    *) echo "{answered}" ;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert out_json(proc)["registry_is_public"] is public
 
 
 def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_path, stubs):

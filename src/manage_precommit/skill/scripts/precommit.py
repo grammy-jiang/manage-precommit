@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, NoReturn
+from urllib.parse import urlsplit
 
 import config as cfgmod
 from hookoutput import is_vacuous, skipped_hooks
@@ -190,7 +191,16 @@ PIN_CAUSES = (
 # never told about is a field it will not read: `registry` was added because a
 # 404 from a mirror is not a 404 from npmjs, and that distinction is worth
 # nothing if SKILL.md does not name the key that draws it.
-PIN_FIELDS = ("source", "target", "cause", "npm_code", "npm_path", "detail", "registry")
+PIN_FIELDS = (
+    "source",
+    "target",
+    "cause",
+    "npm_code",
+    "npm_path",
+    "detail",
+    "registry",
+    "registry_is_public",
+)
 
 
 def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
@@ -308,7 +318,22 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
     # whole command outlives NPM_TIMEOUT. Reported as `network` these were a
     # `timeout` bucket that almost nothing could ever land in, under a code
     # literally named ETIMEDOUT.
-    ("timeout", frozenset({"ETIMEDOUT", "ERR_SOCKET_TIMEOUT"})),
+    # ETIMEDOUT is the socket's; the four E*TIMEOUTs are @npmcli/agent's own
+    # names for giving up on connect, idle, response and transfer. All of them
+    # exit normally, so none reaches the TimeoutExpired handler.
+    (
+        "timeout",
+        frozenset(
+            {
+                "ETIMEDOUT",
+                "ERR_SOCKET_TIMEOUT",
+                "ECONNECTIONTIMEOUT",
+                "EIDLETIMEOUT",
+                "ERESPONSETIMEOUT",
+                "ETRANSFERTIMEOUT",
+            }
+        ),
+    ),
     # ENOENT belongs here rather than under "missing": npm reports the failure to
     # create its own cache directory that way, which is the whole of issue #16.
     (
@@ -321,6 +346,24 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
 def npm_fields(stderr: str) -> dict[str, str]:
     """npm's `code`/`syscall`/`path` lines, last one winning."""
     return {key: value.strip() for key, value in NPM_FIELD_RE.findall(ANSI_RE.sub("", stderr))}
+
+
+PUBLIC_NPM_HOST = "registry.npmjs.org"
+
+
+def is_public_registry(url: str) -> bool:
+    """Whether that is npm's own registry, however it happens to be spelled.
+
+    `npm config get registry` returns what the user wrote, so the same registry
+    arrives with or without a trailing slash -- and comparing the string in
+    SKILL.md then reads npmjs as a company mirror and tells someone a bug in
+    this catalog is theirs to go and fix. Whether two URLs name one host is a
+    fact, so it is settled here rather than described there.
+    """
+    try:
+        return urlsplit(url).hostname == PUBLIC_NPM_HOST
+    except ValueError:  # a URL malformed enough that urlsplit refuses it
+        return False
 
 
 def npm_registry_for(pkg: str) -> str:
@@ -460,7 +503,9 @@ def npm_latest(pkg: str) -> str:
             # carry a package answers E404 exactly like a wrong package name.
             # Asked only here: it costs a subprocess, and only this one cause
             # cannot be acted on without knowing.
-            extra["registry"] = clean(npm_registry_for(name))
+            registry = npm_registry_for(name)
+            extra["registry"] = clean(registry)
+            extra["registry_is_public"] = is_public_registry(registry)
         pin_failed(
             "npm",
             name,

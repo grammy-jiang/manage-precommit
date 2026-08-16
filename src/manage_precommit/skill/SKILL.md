@@ -208,17 +208,20 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     change `NPM_CONFIG_CACHE` or `HOME` is advice that cannot work. Name the
     path npm named and say which of the two it is.
   - `auth` — the registry wants credentials this environment does not have.
-  - `not-found` — a registry answered that there is no such package, and
-    `registry` says **which** one. This skill deliberately does not override the
-    user's registry, so if that is not `https://registry.npmjs.org/` the likely
-    cause is a mirror or proxy that does not carry this package — theirs to fix
-    by pointing npm somewhere that does, and not a bad package name. Only when
-    the public registry is the one that answered is the catalog itself wrong,
-    and that is a bug here rather than anything they can do.
+  - `not-found` — a registry answered that there is no such package. `registry`
+    names it and **`registry_is_public` says whether it was npm's own** — do not
+    compare the URL yourself, the same registry is written several ways. False
+    means the likely cause is a mirror or proxy that does not carry this
+    package: theirs to fix by pointing npm somewhere that does, and not a bad
+    package name — this skill deliberately does not override their registry.
+    Only when it is true is the catalog itself wrong, and that is a bug here
+    rather than anything they can do.
   - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
     reachability problem and not their repository.
-  - `timeout` — the registry answered too slowly, not "not at all", whether npm
-    gave up on the socket or the whole command outlived its limit. Same advice.
+  - `timeout` — a remote answered too slowly rather than not at all. **Say which
+    one, from `source`**: `npm` is the registry, `git` is the hook repository's
+    host, and sending someone to check the wrong service is worse than saying
+    nothing. Otherwise the same advice as `network`.
   - `npm-missing` / `unrunnable` — `npm` is absent or would not start. Only
     `mermaid` needs it; every other selection succeeds without it.
   - `invalid-version` — the registry answered with something that is not a
