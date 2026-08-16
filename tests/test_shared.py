@@ -519,3 +519,29 @@ def test_a_git_call_that_hangs_is_stopped_and_named(monkeypatch):
     git = shared.make_git(stopper)
     with pytest.raises(Stop, match="timed out after"):
         git("/tmp", "status")
+
+
+def test_a_hanging_git_can_be_routed_somewhere_other_than_die(monkeypatch):
+    """A stalled remote is a different answer from a git that refused.
+
+    Version pinning reports the two as different causes, and it must not tell
+    them apart by reading the wording of this message -- that is classifying by
+    prose, one file away from the code that produces it. Without the hook, a
+    remote that hangs leaves through the plain die() and the caller loses the
+    machine-readable failure it was promised.
+    """
+
+    def hang(argv, **kwargs):
+        raise shared.subprocess.TimeoutExpired(argv, kwargs.get("timeout", 120))
+
+    monkeypatch.setattr(shared.subprocess, "run", hang)
+    routed = []
+
+    def elsewhere(message):
+        routed.append(message)
+        raise Stop(message)
+
+    git = shared.make_git(stopper, on_timeout=elsewhere)
+    with pytest.raises(Stop, match="timed out after"):
+        git("/tmp", "status")
+    assert routed, "on_timeout was declared and then not consulted"

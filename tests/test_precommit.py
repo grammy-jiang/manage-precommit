@@ -863,6 +863,33 @@ def test_the_whole_tls_verify_family_is_reachability_advice(
     assert not unclassified, f"TLS codes that got the unclassified answer: {unclassified}"
 
 
+def test_a_coloured_npm_is_still_classified(repo, keys_file, facts_path, tmp_path, stubs):
+    """`color=always` in a user .npmrc is configuration this skill honours.
+
+    npm then writes escapes into a pipe, between `npm` and `error` -- straight
+    through the middle of the line the cause is read from. Every classified
+    failure would arrive `unknown`, which is the answer that fits none of
+    SKILL.md's advice, on a machine whose only fault is a colour preference.
+
+    The stub also proves `--no-color` was passed, since prevention and the
+    strip are meant to be belt and braces rather than one dressed as two.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmcolour",
+        "#!/bin/sh\n"
+        'case " $* " in *" --no-color "*) ;; *) echo "no --no-color" >&2; exit 7;; esac\n'
+        'printf "npm \\033[31merror\\033[0m code E403\\n" >&2\n'
+        'printf "npm \\033[31merror\\033[0m 403 Forbidden\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert out_json(proc)["cause"] == "auth"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
 def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_path, stubs):
     """Every npm package this catalog pins is scoped, so this is the usual case.
 

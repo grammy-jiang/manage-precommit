@@ -401,7 +401,10 @@ def safe_porcelain(
 
 
 def make_git(
-    die: Callable[[str], NoReturn], *, timeout: int = 120
+    die: Callable[[str], NoReturn],
+    *,
+    timeout: int = 120,
+    on_timeout: Callable[[str], NoReturn] | None = None,
 ) -> Callable[..., tuple[int, str, str]]:
     """Build a hardened `git` runner bound to a script's own die().
 
@@ -502,7 +505,11 @@ def make_git(
         except FileNotFoundError:
             die("git not found")
         except subprocess.TimeoutExpired:
-            die(f"git {' '.join(args)} timed out after {timeout}s")
+            # Separable because a stalled remote is a different answer from a
+            # git that refused: version pinning reports the two as different
+            # causes, and telling them apart by the wording of this string
+            # would be classifying by prose.
+            (on_timeout or die)(f"git {' '.join(args)} timed out after {timeout}s")
         # git's stderr can carry text straight from a remote server, so it is
         # neutralised before it is printed or stored, like any other display string.
         err = bounded_err(proc.stderr) if proc.stderr.strip() else ""

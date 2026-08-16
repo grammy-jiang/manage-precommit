@@ -232,11 +232,24 @@ def latest_tag(repo_url: str) -> str:
     `v2-beta` ref can never be pinned as though it were a release.
     """
     url = refuse_option_like(repo_url, "repo url", die)
+
+    # A remote that stalls past make_git's timeout used to leave through the
+    # plain die(): exit 1 with no JSON, losing the exit-6 contract in the case
+    # where a caller most wants to be told it was reachability and not their
+    # repository. Only the timeout is rerouted -- make_git's other refusal is a
+    # missing git, which is a prerequisite this run never had and not a pin that
+    # failed. Untested here for the reason the npm timeout is: reaching it costs
+    # a real two-minute wait. `make_git` dispatching to the hook at all is
+    # tested in test_shared.py, which can fake the clock.
+    def stalled(msg: str) -> NoReturn:  # pragma: no cover - see above
+        pin_failed("git", url, msg, "timeout")
+
     # In a scratch directory, with no system or global config: see make_git's
     # `isolated`. Running this under the target repo's config would let that
     # repo decide which server answers for a catalog URL.
+    pinning_git = make_git(die, on_timeout=stalled)
     with tempfile.TemporaryDirectory() as elsewhere:
-        rc, out, err = git(elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True)
+        rc, out, err = pinning_git(elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True)
     if rc != 0:
         pin_failed(
             "git",
@@ -271,6 +284,14 @@ def latest_tag(repo_url: str) -> str:
 # versions outlives one npm major.
 NPM_FIELD_RE = re.compile(r"^npm (?:ERR!|error) (code|syscall|path) (.+)$", re.M)
 
+# npm colours that prefix, and `color=always` in a user or global .npmrc makes
+# it do so into a pipe -- which this deliberately honours, like the rest of
+# their npm configuration. The escapes land between `npm` and `error`, so the
+# pattern above matches nothing and every classified failure arrives `unknown`.
+# `--no-color` on the command line prevents it and this removes what prevention
+# missed, because the two together are cheap and the parse decides the advice.
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
 # Each cause is a different sentence to the user: a cache they cannot write is
 # theirs to fix, a 404 means the package name is wrong, and a network failure is
 # worth simply retrying. `unknown` is a bucket on purpose -- an unmatched code
@@ -299,7 +320,7 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
 
 def npm_fields(stderr: str) -> dict[str, str]:
     """npm's `code`/`syscall`/`path` lines, last one winning."""
-    return {key: value.strip() for key, value in NPM_FIELD_RE.findall(stderr)}
+    return {key: value.strip() for key, value in NPM_FIELD_RE.findall(ANSI_RE.sub("", stderr))}
 
 
 def npm_registry_for(pkg: str) -> str:
@@ -400,7 +421,9 @@ def npm_latest(pkg: str) -> str:
         with tempfile.TemporaryDirectory() as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")
             out = subprocess.run(
-                ["npm", "view", name, "version", "--cache", cache],
+                # --no-color beats a `color=always` config, which would
+                # otherwise put escapes through the middle of `npm error code`.
+                ["npm", "view", name, "version", "--cache", cache, "--no-color"],
                 cwd=elsewhere,
                 capture_output=True,
                 text=True,
@@ -1455,7 +1478,13 @@ def npm_config(key: str) -> str | None:
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
             out = subprocess.run(
-                ["npm", "config", "get", refuse_option_like(key, "npm config key", die)],
+                [
+                    "npm",
+                    "config",
+                    "get",
+                    refuse_option_like(key, "npm config key", die),
+                    "--no-color",
+                ],
                 cwd=elsewhere,
                 capture_output=True,
                 text=True,
