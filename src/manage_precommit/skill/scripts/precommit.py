@@ -45,6 +45,7 @@ from shared import (
     Recommendation,
     RecommendReport,
     atomic_write_bytes,
+    bounded_err,
     clean,
     default_file_mode,
     emit,
@@ -163,10 +164,6 @@ def version_key(tag: str) -> list[int]:
     return [int(n) for n in re.findall(r"\d+", tag)]
 
 
-# Enough of the failure to act on, and not a repository-controlled channel of
-# unbounded length into the agent's context.
-MAX_PIN_DETAIL = 2000
-
 # Long enough for a registry that is slow rather than absent.
 NPM_TIMEOUT = 90
 
@@ -215,7 +212,7 @@ def latest_tag(repo_url: str) -> str:
             url,
             f"git ls-remote failed for {repo_url}: {err}",
             "git-ls-remote",
-            detail=clean(err)[:MAX_PIN_DETAIL],
+            detail=err,
         )
     tags = []
     for line in out.splitlines():
@@ -261,8 +258,6 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
                 "ETIMEDOUT",
                 "ERR_SOCKET_TIMEOUT",
                 "EPROTO",
-                "SELF_SIGNED_CERT_IN_CHAIN",
-                "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
             }
         ),
     ),
@@ -280,10 +275,22 @@ def npm_fields(stderr: str) -> dict[str, str]:
     return {key: value.strip() for key, value in NPM_FIELD_RE.findall(stderr)}
 
 
+# TLS as a family rather than a list. OpenSSL's certificate-verify codes alone
+# run to dozens -- CERT_HAS_EXPIRED, UNABLE_TO_GET_ISSUER_CERT_LOCALLY,
+# DEPTH_ZERO_SELF_SIGNED_CERT -- and node adds ERR_TLS_*/ERR_SSL_* on top, so an
+# enumeration is a list that is wrong the next time openssl adds one, and wrong
+# silently: the code lands in `unknown` while SKILL.md promises that TLS is
+# reachability advice. Still npm's code and not its prose, which is the property
+# that matters.
+TLS_CODE_RE = re.compile(r"(^|_)(CERT|TLS|SSL)(_|$)")
+
+
 def npm_cause(code: str) -> str:
     for cause, codes in NPM_CAUSES:
         if code in codes:
             return cause
+    if TLS_CODE_RE.search(code):
+        return "network"
     return "unknown"
 
 
@@ -330,23 +337,28 @@ def npm_latest(pkg: str) -> str:
     if out.returncode != 0:
         fields = npm_fields(out.stderr)
         code = fields.get("code", "")
+        # Bound once and used twice. npm's stderr is a registry's text, the
+        # same category as git's remote-server text, and SKILL.md relays the
+        # sentence as well as the field.
+        detail = bounded_err(out.stderr)
         pin_failed(
             "npm",
             name,
-            f"npm view {pkg} failed: {clean(out.stderr)}",
+            f"npm view {pkg} failed: {detail}",
             npm_cause(code),
             npm_code=code,
             npm_path=clean(fields.get("path", "")),
-            detail=clean(out.stderr)[:MAX_PIN_DETAIL],
+            detail=detail,
         )
     version = out.stdout.strip()
     if not VER_RE.match(version):
+        answered = bounded_err(version)
         pin_failed(
             "npm",
             name,
-            f"npm returned an unexpected version for {pkg}: {clean(version)!r}",
+            f"npm returned an unexpected version for {pkg}: {answered!r}",
             "invalid-version",
-            detail=clean(version)[:MAX_PIN_DETAIL],
+            detail=answered,
         )
     return version
 

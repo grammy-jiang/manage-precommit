@@ -320,6 +320,21 @@ def porcelain_path(line: str) -> str:
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 
 
+def bounded_err(text: str) -> str:
+    """Foreign stderr, neutralised and capped, ready to print or store.
+
+    git and npm both hand back text written by a server the user did not
+    choose, and both of those strings end up in the agent's context, because
+    SKILL.md relays them. One cap and one marker, in one place: bounding the
+    copy that goes into JSON while the copy that goes to stderr runs free
+    bounds nothing.
+    """
+    err = clean(text)
+    if len(err) > MAX_ERR_LEN:
+        err = err[:MAX_ERR_LEN] + " ...(truncated)"
+    return err
+
+
 # The file this whole skill is about. Declared once: precommit.py and gitwork.py
 # each had their own literal under a different name (TARGET_NAME, CONFIG_NAME),
 # which is two places to change one fact.
@@ -490,9 +505,7 @@ def make_git(
             die(f"git {' '.join(args)} timed out after {timeout}s")
         # git's stderr can carry text straight from a remote server, so it is
         # neutralised before it is printed or stored, like any other display string.
-        err = clean(proc.stderr) if proc.stderr.strip() else ""
-        if len(err) > MAX_ERR_LEN:
-            err = err[:MAX_ERR_LEN] + " ...(truncated)"
+        err = bounded_err(proc.stderr) if proc.stderr.strip() else ""
         if check and proc.returncode != 0:
             die(f"git {' '.join(args)} failed (exit {proc.returncode}): {err}")
         out = proc.stdout.strip() if strip else proc.stdout.rstrip("\n")

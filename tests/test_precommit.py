@@ -722,6 +722,25 @@ NPM_FAILURES = [
     ),
     pytest.param("npm error code EWEIRDNESS\n", "unknown", "", id="a code with no bucket"),
     pytest.param("something went wrong\n", "unknown", "", id="npm said nothing machine-readable"),
+    # SKILL.md promises that `network` covers TLS, and openssl's verify codes
+    # are far too many to enumerate -- so the family is matched as a family, and
+    # these are the ones a corporate middlebox actually produces.
+    pytest.param("npm error code CERT_HAS_EXPIRED\n", "network", "", id="expired certificate"),
+    pytest.param(
+        "npm error code UNABLE_TO_GET_ISSUER_CERT_LOCALLY\n",
+        "network",
+        "",
+        id="an intercepting proxy's root is not trusted",
+    ),
+    pytest.param(
+        "npm error code ERR_TLS_CERT_ALTNAME_INVALID\n", "network", "", id="wrong hostname"
+    ),
+    pytest.param(
+        "npm error code SELF_SIGNED_CERT_IN_CHAIN\n", "network", "", id="self-signed chain"
+    ),
+    pytest.param(
+        "npm error code ERR_SSL_WRONG_VERSION_NUMBER\n", "network", "", id="not actually TLS"
+    ),
 ]
 
 
@@ -750,6 +769,33 @@ def test_a_failed_pin_names_its_cause(
     assert got["npm_path"] == path
     # Whatever the classification, npm's own words survive it.
     assert got["detail"], "the raw complaint must not be swallowed by the label"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_huge_npm_complaint_is_bounded_in_both_places_it_is_relayed(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The sentence and the JSON field are the same channel.
+
+    npm's stderr is a registry's text, and SKILL.md relays the failure message
+    as well as the structured fields -- so capping `detail` while the message it
+    is printed beside runs free caps nothing. A verbose npm, or a registry that
+    answers with a megabyte, reaches the agent's context either way.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmshouty",
+        "#!/bin/sh\n"
+        'i=0; while [ $i -lt 400 ]; do printf "npm error xxxxxxxxxxxxxxxxxxxx\\n" >&2; i=$((i+1)); done\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert len(got["detail"]) < 600, "the JSON field is unbounded"
+    assert len(proc.stderr) < 600, "the printed sentence is unbounded"
+    assert "(truncated)" in proc.stderr
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
