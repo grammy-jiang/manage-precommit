@@ -320,6 +320,19 @@ def porcelain_path(line: str) -> str:
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 
 
+# `https://token@host/...`. npm and git both accept credentials in a URL and
+# both print the URL back -- in an error, in a remote, in a summary line. What
+# sits between `://` and `@` is a username, a token, or a user:password pair,
+# and none of the three has any business in a string that is about to become an
+# agent's context and somebody's session log.
+URL_CREDENTIALS_RE = re.compile(r"(?<=://)[^/\s@]*@")
+
+
+def redact_urls(text: str) -> str:
+    """The same text with any credentials inside URLs replaced."""
+    return URL_CREDENTIALS_RE.sub("***@", text)
+
+
 def bounded_err(text: str) -> str:
     """Foreign stderr, neutralised and capped, ready to print or store.
 
@@ -328,8 +341,13 @@ def bounded_err(text: str) -> str:
     SKILL.md relays them. One cap and one marker, in one place: bounding the
     copy that goes into JSON while the copy that goes to stderr runs free
     bounds nothing.
+
+    Credentials go before anything else touches the text. `clean` replaces a
+    control character with a space, and a space ends the run this pattern
+    matches -- so cleaning first turns `://tok\x00en@` into `tok ***@` and
+    leaves half the token behind.
     """
-    err = clean(text)
+    err = clean(redact_urls(text))
     if len(err) > MAX_ERR_LEN:
         err = err[:MAX_ERR_LEN] + " ...(truncated)"
     return err

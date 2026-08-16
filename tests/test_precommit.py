@@ -1016,6 +1016,44 @@ def test_whether_the_registry_was_npms_own_is_decided_here(
     assert out_json(proc)["registry_is_public"] is public
 
 
+def test_a_token_in_the_registry_url_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
+    """npm returns the registry exactly as configured, credentials and all.
+
+    SKILL.md hands `registry` to the agent, so an unredacted one puts a token
+    into the model's context and into whatever log the session writes -- and
+    `clean()` only removes control characters. The classification still runs on
+    the whole URL, so allowing credentials there (they change who is asking, not
+    who answers) does not have to mean printing them.
+
+    npm's own error text is redacted too: it quotes the URL it requested.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmtoken",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://s3cr3t-token@registry.npmjs.org/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        'printf "npm error 404 GET https://s3cr3t-token@registry.npmjs.org/x\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert "s3cr3t-token" not in proc.stdout
+    assert "s3cr3t-token" not in proc.stderr
+    assert got["registry"] == "https://***@registry.npmjs.org/"
+    assert "s3cr3t-token" not in got["detail"]
+    # And redacting the copy that leaves did not blind the copy that decides.
+    assert got["registry_is_public"] is True
+
+
 def test_a_registry_npm_will_not_name_is_reported_as_unknown_not_as_a_mirror(
     repo, keys_file, facts_path, tmp_path, stubs
 ):

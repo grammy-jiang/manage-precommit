@@ -497,6 +497,43 @@ def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
     assert shared.porcelain_path(' M "' + escaped + '"') == escaped
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        pytest.param(
+            "https://token@registry.npmjs.org/",
+            "https://***@registry.npmjs.org/",
+            id="a bare token",
+        ),
+        pytest.param(
+            "fatal: https://user:pw@github.com/x.git denied",
+            "fatal: https://***@github.com/x.git denied",
+            id="user and password, mid-sentence",
+        ),
+        pytest.param(
+            "https://registry.npmjs.org/",
+            "https://registry.npmjs.org/",
+            id="nothing to redact",
+        ),
+        pytest.param("mail me at a@b.com", "mail me at a@b.com", id="an at-sign that is not a URL"),
+    ],
+)
+def test_url_credentials_are_removed_before_anything_is_relayed(text, expected):
+    """git and npm both take credentials in a URL and both print the URL back."""
+    assert shared.redact_urls(text) == expected
+
+
+def test_credentials_are_removed_before_control_characters_are(monkeypatch):
+    """Order, and it is not cosmetic.
+
+    `clean` turns a control character into a space, and a space ends the run
+    this pattern matches -- so cleaning first leaves `tok ***@` and half the
+    token behind. bounded_err redacts first for that reason.
+    """
+    assert "en@" not in shared.bounded_err("fatal: https://tok\x00en@host/repo denied")
+    assert shared.bounded_err("https://tok\x00en@host/x") == "https://***@host/x"
+
+
 def test_a_missing_git_binary_stops_with_a_sentence(monkeypatch):
     def absent(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory")
