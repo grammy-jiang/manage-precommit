@@ -383,7 +383,6 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset(
             {
                 "ENOTFOUND",
-                "EAI_AGAIN",
                 "ECONNREFUSED",
                 "ECONNRESET",
                 "ECONNABORTED",
@@ -411,6 +410,7 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset(
             {
                 "ETIMEDOUT",
+                "ESOCKETTIMEDOUT",
                 "ERR_SOCKET_TIMEOUT",
                 "ECONNECTIONTIMEOUT",
                 "EIDLETIMEOUT",
@@ -637,12 +637,19 @@ OPENSSL_VERIFY_CODES = frozenset(
 # A pattern is right here for the same reason it was wrong above.
 TLS_CODE_RE = re.compile(r"^ERR_(TLS|SSL)_")
 
+# getaddrinfo's whole family, an open-ended prefix the way node's own TLS
+# errors are: EAI_AGAIN, EAI_FAIL, EAI_NONAME and a dozen more, every one of
+# them a name that would not resolve and every one the same advice. A family
+# rather than the members I happened to have met, which is how EAI_FAIL was
+# missing while EAI_AGAIN was not.
+RESOLVER_CODE_RE = re.compile(r"^EAI_")
+
 
 def npm_cause(code: str) -> str:
     for cause, codes in NPM_CAUSES:
         if code in codes:
             return cause
-    if code in OPENSSL_VERIFY_CODES or TLS_CODE_RE.match(code):
+    if code in OPENSSL_VERIFY_CODES or TLS_CODE_RE.match(code) or RESOLVER_CODE_RE.match(code):
         return "network"
     return "unknown"
 

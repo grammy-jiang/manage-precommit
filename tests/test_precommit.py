@@ -717,6 +717,12 @@ NPM_FAILURES = [
     pytest.param("npm error code E404\n", "not-found", "", id="no such package"),
     pytest.param("npm ERR! code E401\n", "auth", "", id="registry wants credentials"),
     pytest.param("npm error code ENOTFOUND\n", "network", "", id="dns"),
+    # getaddrinfo's family, matched as a family: EAI_AGAIN was in the set and
+    # EAI_FAIL was not, which is the difference between a rule and a memory.
+    pytest.param("npm error code EAI_AGAIN\n", "network", "", id="resolver: try again"),
+    pytest.param("npm error code EAI_FAIL\n", "network", "", id="resolver: gave up"),
+    pytest.param("npm ERR! code EAI_NONAME\n", "network", "", id="resolver: no such name"),
+    pytest.param("npm error code ESOCKETTIMEDOUT\n", "timeout", "", id="socket timed out"),
     pytest.param("npm ERR! code ECONNREFUSED\n", "network", "", id="connection refused"),
     # The kernel's answer when there is no route at all, which is what a laptop
     # off the VPN reports rather than any of the friendlier ones above.
