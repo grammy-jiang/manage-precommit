@@ -503,8 +503,14 @@ def npm_error(stdout: str, stderr: str) -> tuple[dict[str, str], str]:
             for key in ("summary", "detail")
             if isinstance(reported.get(key), str) and reported[key].strip()
         )
-    if not fields:
-        fields = npm_fields(stderr)
+    # Merged, not chosen between. npm's JSON error carries `code` but not
+    # `path`, which only ever appears on stderr -- so taking the object whole
+    # when it had anything at all dropped the one field SKILL.md tells the agent
+    # to name, and dropped it into a meaning: an empty `npm_path` is documented
+    # as "the scratch directory could not be made", which is a different failure
+    # from a write inside one that was.
+    for key, value in npm_fields(stderr).items():
+        fields.setdefault(key, value)
     return fields, stderr if stderr.strip() else words
 
 

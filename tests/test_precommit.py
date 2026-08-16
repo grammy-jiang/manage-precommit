@@ -1068,6 +1068,60 @@ def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_pat
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_the_path_survives_when_json_supplied_the_code(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """npm splits one failure across both streams, so both have to be read.
+
+    Its JSON error object carries `code`, `summary` and `detail`; `path` is only
+    ever logged to stderr. Taking the object whole when it had anything at all
+    therefore dropped `path` -- and dropped it into a meaning, because SKILL.md
+    documents an empty `npm_path` as "the scratch directory could not be made",
+    which is a different failure from a write that failed inside one that was.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmsplit",
+        "#!/bin/sh\n"
+        'printf "npm error path /tmp/x/npm-cache\\n" >&2\n'
+        'printf \'%s\' \'{"error":{"code":"ENOSPC","summary":"no space"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "filesystem"
+    assert got["npm_code"] == "ENOSPC"
+    assert got["npm_path"] == "/tmp/x/npm-cache", "the stream that has it is the one it came on"
+
+
+def test_the_json_copy_wins_where_the_two_streams_disagree(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """Merging needs a direction, and stderr is the copy the user can reshape.
+
+    `heading`, `loglevel` and `color` all rewrite the stderr lines; nothing
+    the user configures touches the JSON error object. So where both name a
+    field, the object is the one to believe -- filling gaps from stderr must
+    not become overwriting from it.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmdisagree",
+        "#!/bin/sh\n"
+        'printf "npm error code E404\\n" >&2\n'
+        'printf \'%s\' \'{"error":{"code":"E401","summary":"Unauthorized"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["npm_code"] == "E401"
+    assert got["cause"] == "auth"
+
+
 def test_non_json_on_stdout_does_not_stop_the_classification(
     repo, keys_file, facts_path, tmp_path, stubs
 ):
