@@ -302,21 +302,82 @@ def npm_fields(stderr: str) -> dict[str, str]:
     return {key: value.strip() for key, value in NPM_FIELD_RE.findall(stderr)}
 
 
-# TLS as a family rather than a list. OpenSSL's certificate-verify codes alone
-# run to dozens -- CERT_HAS_EXPIRED, UNABLE_TO_GET_ISSUER_CERT_LOCALLY,
-# DEPTH_ZERO_SELF_SIGNED_CERT -- and node adds ERR_TLS_*/ERR_SSL_* on top, so an
-# enumeration is a list that is wrong the next time openssl adds one, and wrong
-# silently: the code lands in `unknown` while SKILL.md promises that TLS is
-# reachability advice. Still npm's code and not its prose, which is the property
-# that matters.
-TLS_CODE_RE = re.compile(r"(^|_)(CERT|TLS|SSL)(_|$)")
+def npm_registry_for(pkg: str) -> str:
+    """The registry npm would ask for THIS package, not the default one.
+
+    `@scope:registry` routes a scoped package on its own while `registry` still
+    reads as npmjs -- and every npm package this catalog pins is scoped. Asking
+    only the default therefore names the wrong server in the one field SKILL.md
+    uses to decide whether a 404 is the user's mirror or a bug in this catalog,
+    and names it confidently.
+    """
+    if pkg.startswith("@") and "/" in pkg:
+        scoped = npm_config(f"{pkg.split('/', 1)[0]}:registry")
+        if scoped:
+            return scoped
+    return npm_config("registry") or ""
+
+
+# node surfaces OpenSSL's certificate-verify strings verbatim, and they are NOT
+# recognisable by name: UNABLE_TO_VERIFY_LEAF_SIGNATURE, CRL_HAS_EXPIRED,
+# SUBJECT_ISSUER_MISMATCH and half the rest carry no CERT/TLS/SSL token at all.
+# A first attempt at "a family, not a list" matched on those three words and
+# quietly dropped UNABLE_TO_VERIFY_LEAF_SIGNATURE from `network` into `unknown`,
+# which is the failure an intercepting proxy actually produces.
+#
+# So: the closed list where the list is closed. These come from OpenSSL's
+# X509_verify_cert_error_string and change about once a decade, and a code that
+# is missed still arrives as `unknown` with npm's own words attached -- an
+# unhelpful answer rather than a wrong one.
+OPENSSL_VERIFY_CODES = frozenset(
+    {
+        "UNABLE_TO_GET_ISSUER_CERT",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "UNABLE_TO_GET_CRL",
+        "UNABLE_TO_GET_CRL_ISSUER",
+        "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+        "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+        "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "CERT_SIGNATURE_FAILURE",
+        "CRL_SIGNATURE_FAILURE",
+        "CERT_NOT_YET_VALID",
+        "CERT_HAS_EXPIRED",
+        "CRL_NOT_YET_VALID",
+        "CRL_HAS_EXPIRED",
+        "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+        "ERROR_IN_CERT_NOT_AFTER_FIELD",
+        "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+        "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
+        "DEPTH_ZERO_SELF_SIGNED_CERT",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "CERT_CHAIN_TOO_LONG",
+        "CERT_REVOKED",
+        "CERT_UNTRUSTED",
+        "CERT_REJECTED",
+        "INVALID_CA",
+        "INVALID_PURPOSE",
+        "PATH_LENGTH_EXCEEDED",
+        "HOSTNAME_MISMATCH",
+        "SUBJECT_ISSUER_MISMATCH",
+        "AKID_SKID_MISMATCH",
+        "AKID_ISSUER_SERIAL_MISMATCH",
+        "KEYUSAGE_NO_CERTSIGN",
+        "UNHANDLED_CRITICAL_EXTENSION",
+    }
+)
+
+# node's own TLS errors, which unlike OpenSSL's *are* a prefix family and an
+# open-ended one -- ERR_TLS_CERT_ALTNAME_INVALID, ERR_SSL_WRONG_VERSION_NUMBER.
+# A pattern is right here for the same reason it was wrong above.
+TLS_CODE_RE = re.compile(r"^ERR_(TLS|SSL)_")
 
 
 def npm_cause(code: str) -> str:
     for cause, codes in NPM_CAUSES:
         if code in codes:
             return cause
-    if TLS_CODE_RE.search(code):
+    if code in OPENSSL_VERIFY_CODES or TLS_CODE_RE.match(code):
         return "network"
     return "unknown"
 
@@ -376,7 +437,7 @@ def npm_latest(pkg: str) -> str:
             # carry a package answers E404 exactly like a wrong package name.
             # Asked only here: it costs a subprocess, and only this one cause
             # cannot be acted on without knowing.
-            extra["registry"] = clean(npm_config("registry") or "")
+            extra["registry"] = clean(npm_registry_for(name))
         pin_failed(
             "npm",
             name,

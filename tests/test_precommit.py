@@ -753,6 +753,20 @@ NPM_FAILURES = [
     pytest.param(
         "npm error code ERR_SSL_WRONG_VERSION_NUMBER\n", "network", "", id="not actually TLS"
     ),
+    # The three that carry no CERT/TLS/SSL token at all, which is why matching
+    # on those words was the wrong shape: the first of these is what an
+    # intercepting proxy usually produces, and it had been classified correctly
+    # until a "family, not a list" rewrite dropped it into `unknown`.
+    pytest.param(
+        "npm error code UNABLE_TO_VERIFY_LEAF_SIGNATURE\n",
+        "network",
+        "",
+        id="the proxy's chain cannot be verified",
+    ),
+    pytest.param("npm error code CRL_HAS_EXPIRED\n", "network", "", id="stale revocation list"),
+    pytest.param(
+        "npm error code SUBJECT_ISSUER_MISMATCH\n", "network", "", id="chain does not join up"
+    ),
 ]
 
 
@@ -784,6 +798,102 @@ def test_a_failed_pin_names_its_cause(
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+# Written out here rather than read from the source, deliberately: a test that
+# imports the same set it is checking proves only that a set equals itself. This
+# is the list from node's own documentation of what TLS verification can fail
+# with, and it is the outside opinion the classifier is measured against.
+TLS_CODES_FROM_NODE_DOCS = [
+    "UNABLE_TO_GET_ISSUER_CERT",
+    "UNABLE_TO_GET_CRL",
+    "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+    "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+    "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+    "CERT_SIGNATURE_FAILURE",
+    "CRL_SIGNATURE_FAILURE",
+    "CERT_NOT_YET_VALID",
+    "CERT_HAS_EXPIRED",
+    "CRL_NOT_YET_VALID",
+    "CRL_HAS_EXPIRED",
+    "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+    "ERROR_IN_CERT_NOT_AFTER_FIELD",
+    "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+    "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "CERT_CHAIN_TOO_LONG",
+    "CERT_REVOKED",
+    "INVALID_CA",
+    "PATH_LENGTH_EXCEEDED",
+    "INVALID_PURPOSE",
+    "CERT_UNTRUSTED",
+    "CERT_REJECTED",
+    "HOSTNAME_MISMATCH",
+]
+
+
+def test_the_whole_tls_verify_family_is_reachability_advice(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """SKILL.md promises `network` for TLS, and half these codes are not named
+    for it.
+
+    The previous attempt matched any code containing CERT, TLS or SSL, which
+    reads as thorough and silently loses UNABLE_TO_VERIFY_LEAF_SIGNATURE,
+    CRL_HAS_EXPIRED and SUBJECT_ISSUER_MISMATCH -- the first being what a
+    corporate middlebox actually reports. One case per code, so a rewrite of the
+    classifier has to keep the whole family and not the recognisable half.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmtls",
+        '#!/bin/sh\nprintf "npm error code %s\\n" "$(cat "$MP_TLS_CODE")" >&2\nexit 1\n',
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    code_file = tmp_path / "tls-code.txt"
+    monkeypatch.setenv("MP_TLS_CODE", str(code_file))
+    unclassified = []
+    for code in TLS_CODES_FROM_NODE_DOCS:
+        code_file.write_text(code)
+        proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+        assert proc.returncode == 6, proc.stderr
+        if out_json(proc)["cause"] != "network":
+            unclassified.append(code)
+    assert not unclassified, f"TLS codes that got the unclassified answer: {unclassified}"
+
+
+def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_path, stubs):
+    """Every npm package this catalog pins is scoped, so this is the usual case.
+
+    `@scope:registry` routes a scoped package on its own while `registry` still
+    reads as npmjs -- so asking only the default reports npmjs confidently, and
+    SKILL.md then blames this catalog for a package the company mirror simply
+    does not carry. Which is precisely the misdiagnosis the `registry` field was
+    added to prevent.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmscoped",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        '    @*:registry) echo "https://npm.corp.invalid/" ;;\n'
+        '    *) echo "https://registry.npmjs.org/" ;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+
+
 def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_path, stubs):
     """Honouring the user's registry makes this the ordinary case, not an edge.
 
@@ -797,7 +907,15 @@ def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_pat
         tmp_path,
         "npmmirror",
         "#!/bin/sh\n"
-        'if [ "$1" = "config" ]; then echo "https://npm.corp.invalid/"; exit 0; fi\n'
+        # A scope with no registry of its own: npm answers `undefined`, and the
+        # default is what actually served the request.
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        '    *) echo "https://npm.corp.invalid/" ;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
         'printf "npm error code E404\\n" >&2\n'
         "exit 1\n",
     )
