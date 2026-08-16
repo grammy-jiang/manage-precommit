@@ -403,7 +403,27 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
     # create its own cache directory that way, which is the whole of issue #16.
     (
         "filesystem",
-        frozenset({"EACCES", "EPERM", "EROFS", "ENOSPC", "EISDIR", "ENOTDIR", "ENOENT"}),
+        frozenset(
+            {
+                "EACCES",
+                "EPERM",
+                "EROFS",
+                "ENOSPC",
+                "EDQUOT",
+                "EFBIG",
+                "EIO",
+                "ELOOP",
+                "ENAMETOOLONG",
+                "ENOTEMPTY",
+                "EEXIST",
+                "EXDEV",
+                "EBUSY",
+                "ETXTBSY",
+                "EISDIR",
+                "ENOTDIR",
+                "ENOENT",
+            }
+        ),
     ),
 )
 

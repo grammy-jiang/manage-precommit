@@ -229,7 +229,15 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     `mermaid` needs it; every other selection succeeds without it.
   - `invalid-version` — the registry answered with something that is not a
     version, and it was refused rather than written into their config.
-  - `git-ls-remote` / `no-version-tags` — the same, for a hook repository.
+  - `git-ls-remote` — the hook repository's lookup failed, and that is *all*
+    this one means. git offers no machine-readable code the way npm does, so
+    everything the run knows is in `detail` — **relay it verbatim.** It covers
+    an unreachable host, TLS, credentials and a repository that is not there,
+    none of which is a version-tag problem, and none of which is worth guessing
+    at from the wording.
+  - `no-version-tags` — the repository answered, and carries no tag that is
+    purely a version. Nothing to retry: either this catalog's `rev_repo` is
+    wrong, which is a bug here, or upstream has stopped tagging releases.
   - `unknown` — an npm code with no bucket here. Relay `npm_code` and `detail`
     verbatim and say it is unclassified, rather than picking the nearest label.
 - **anything else** — report it verbatim and end the run. Two of these happen

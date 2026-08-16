@@ -740,6 +740,16 @@ NPM_FAILURES = [
         "/tmp/x/npm-cache",
         id="the scratch cache filled the disk",
     ),
+    # The disk has room and the user does not: a quota is the same advice as a
+    # full filesystem and arrives under a different name.
+    pytest.param(
+        "npm error code EDQUOT\nnpm error path /tmp/x\n",
+        "filesystem",
+        "/tmp/x",
+        id="the quota ran out",
+    ),
+    pytest.param("npm error code EIO\n", "filesystem", "", id="the device errored"),
+    pytest.param("npm ERR! code ENAMETOOLONG\n", "filesystem", "", id="path too long"),
     pytest.param(
         "npm error code EACCES\nnpm error path /opt/x\n", "filesystem", "/opt/x", id="perm"
     ),
@@ -2204,6 +2214,14 @@ def test_a_failing_install_stops_before_any_json(repo, keys_file, facts_path, st
 
 
 def test_a_failing_ls_remote_is_reported(repo, keys_file, facts_path, tmp_path):
+    """`git-ls-remote` is a bucket with nothing in it but git's own words.
+
+    git has no machine-readable code line to classify on, so unreachable host,
+    TLS, credentials and a repository that is not there all arrive under this
+    one cause -- and SKILL.md's answer is to relay `detail` verbatim rather than
+    guess from the wording. That only works if `detail` is actually populated,
+    which is what this pins.
+    """
     fake = tmp_path / "badremote"
     fake.mkdir()
     g = fake / "git"
@@ -2216,8 +2234,12 @@ def test_a_failing_ls_remote_is_reported(repo, keys_file, facts_path, tmp_path):
     )
     g.chmod(0o755)
     proc = generate(repo, keys_file, facts_path, fake, "hygiene")
-    assert proc.returncode != 0
+    assert proc.returncode == 6
     assert "ls-remote failed" in proc.stderr
+    got = out_json(proc)
+    assert got["source"] == "git"
+    assert got["cause"] == "git-ls-remote"
+    assert "unreachable" in got["detail"], "git's own message is the whole of what is known"
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
