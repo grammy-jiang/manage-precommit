@@ -299,8 +299,9 @@ def latest_tag(repo_url: str) -> str:
     # `isolated`. Running this under the target repo's config would let that
     # repo decide which server answers for a catalog URL.
     pinning_git = make_git(die, on_timeout=stalled)
+    scratch = scratch_or_pin_failed("git", url)
     try:
-        with scratch_or_pin_failed("git", url) as elsewhere:
+        with scratch as elsewhere:
             try:
                 rc, out, err = pinning_git(
                     elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True
@@ -320,7 +321,15 @@ def latest_tag(repo_url: str) -> str:
                 # this run makes, long before pinning.
                 pin_failed("git", url, f"could not run git for {repo_url}: {exc}", "unrunnable")
     except OSError as exc:  # pragma: no cover - only the cleanup reaches here
-        pin_failed("git", url, f"scratch directory would not go away: {exc}", "filesystem")
+        # With the path: an empty `npm_path` is documented as "no scratch
+        # directory could be made", and this one was made and would not go.
+        pin_failed(
+            "git",
+            url,
+            f"scratch directory would not go away: {exc}",
+            "filesystem",
+            npm_path=clean(scratch.name),
+        )
     if rc != 0:
         pin_failed(
             "git",
@@ -373,7 +382,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # worth simply retrying. `unknown` is a bucket on purpose -- an unmatched code
 # must still arrive named rather than disappear into the default.
 NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("auth", frozenset({"E401", "E403", "ENEEDAUTH", "EAUTHUNKNOWN", "EOTP"})),
+    ("auth", frozenset({"E401", "E403", "ENEEDAUTH", "EAUTHUNKNOWN", "EAUTHIP", "EOTP"})),
     ("not-found", frozenset({"E404"})),
     # Name resolution, then the connect errnos the kernel hands back when the
     # route or the host is not there. All of these exit normally, which is why
@@ -637,19 +646,20 @@ OPENSSL_VERIFY_CODES = frozenset(
 # A pattern is right here for the same reason it was wrong above.
 TLS_CODE_RE = re.compile(r"^ERR_(TLS|SSL)_")
 
-# getaddrinfo's whole family, an open-ended prefix the way node's own TLS
-# errors are: EAI_AGAIN, EAI_FAIL, EAI_NONAME and a dozen more, every one of
-# them a name that would not resolve and every one the same advice. A family
-# rather than the members I happened to have met, which is how EAI_FAIL was
-# missing while EAI_AGAIN was not.
-RESOLVER_CODE_RE = re.compile(r"^EAI_")
+# getaddrinfo's codes that mean "the name did not resolve", and only those.
+# `^EAI_` looked like a family the way `ERR_TLS_*` is one, and it is not: the
+# prefix also covers EAI_BADFLAGS, EAI_MEMORY and EAI_OVERFLOW, which are bad
+# arguments, no memory and a full buffer -- none of them reachability, and all
+# of them told to go and retry the network. Enumerated, like the OpenSSL codes
+# and for the same reason: the shared prefix is not a shared meaning.
+RESOLVER_CODES = frozenset({"EAI_AGAIN", "EAI_FAIL", "EAI_NONAME", "EAI_NODATA"})
 
 
 def npm_cause(code: str) -> str:
     for cause, codes in NPM_CAUSES:
         if code in codes:
             return cause
-    if code in OPENSSL_VERIFY_CODES or TLS_CODE_RE.match(code) or RESOLVER_CODE_RE.match(code):
+    if code in OPENSSL_VERIFY_CODES or code in RESOLVER_CODES or TLS_CODE_RE.match(code):
         return "network"
     return "unknown"
 
@@ -738,7 +748,14 @@ def npm_latest(pkg: str) -> str:
             except (OSError, subprocess.SubprocessError) as exc:
                 pin_failed("npm", name, f"could not run npm for {pkg}: {exc}", "unrunnable")
     except OSError as exc:  # pragma: no cover - only the cleanup reaches here
-        pin_failed("npm", name, f"scratch directory would not go away: {exc}", "filesystem")
+        # See latest_tag: the directory existed, so it is named.
+        pin_failed(
+            "npm",
+            name,
+            f"scratch directory would not go away: {exc}",
+            "filesystem",
+            npm_path=clean(scratch.name),
+        )
     if out.returncode != 0:
         fields, words = npm_error(out.stdout, out.stderr)
         code = fields.get("code", "")

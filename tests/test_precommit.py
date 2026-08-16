@@ -722,6 +722,14 @@ NPM_FAILURES = [
     pytest.param("npm error code EAI_AGAIN\n", "network", "", id="resolver: try again"),
     pytest.param("npm error code EAI_FAIL\n", "network", "", id="resolver: gave up"),
     pytest.param("npm ERR! code EAI_NONAME\n", "network", "", id="resolver: no such name"),
+    pytest.param("npm error code EAI_NODATA\n", "network", "", id="resolver: no address"),
+    # The same prefix, and not the same meaning: bad arguments, no memory and a
+    # full buffer are not reachability, and "retry the network" is the wrong
+    # sentence for all three. A shared prefix is not a shared cause.
+    pytest.param("npm error code EAI_BADFLAGS\n", "unknown", "", id="resolver: bad arguments"),
+    pytest.param("npm error code EAI_MEMORY\n", "unknown", "", id="resolver: out of memory"),
+    pytest.param("npm error code EAI_OVERFLOW\n", "unknown", "", id="resolver: buffer too small"),
+    pytest.param("npm error code EAUTHIP\n", "auth", "", id="the registry refused this IP"),
     pytest.param("npm error code ESOCKETTIMEDOUT\n", "timeout", "", id="socket timed out"),
     pytest.param("npm ERR! code ECONNREFUSED\n", "network", "", id="connection refused"),
     # The kernel's answer when there is no route at all, which is what a laptop
