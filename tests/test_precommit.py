@@ -1056,9 +1056,44 @@ def test_a_token_in_the_registry_url_is_not_relayed(repo, keys_file, facts_path,
     assert "s3cr3t-token" not in proc.stdout
     assert "s3cr3t-token" not in proc.stderr
     assert got["registry"] == "https://***@registry.npmjs.org/"
+    assert "?" not in got["registry"]
     assert "s3cr3t-token" not in got["detail"]
     # And redacting the copy that leaves did not blind the copy that decides.
     assert got["registry_is_public"] is True
+
+
+def test_a_token_in_the_registry_query_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
+    """A query carries a secret as readily as userinfo does.
+
+    `https://registry.example/?token=...` is a shape real registries use, and
+    the earlier redaction only looked before the authority's at-sign. What the
+    agent needs from this field is which server answered, which the query never
+    tells it.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmquerytoken",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.corp.invalid/?token=sekrit\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        'printf "npm error 404 GET https://registry.corp.invalid/?token=sekrit\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert "sekrit" not in proc.stdout
+    assert "sekrit" not in proc.stderr
+    got = out_json(proc)
+    assert got["registry"] == "https://registry.corp.invalid/?***"
+    assert "sekrit" not in got["detail"]
+    assert got["registry_is_public"] is False
 
 
 def test_a_registry_npm_will_not_name_is_reported_as_unknown_not_as_a_mirror(

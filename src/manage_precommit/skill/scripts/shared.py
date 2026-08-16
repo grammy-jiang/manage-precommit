@@ -325,17 +325,45 @@ MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 # sits between `://` and `@` is a username, a token, or a user:password pair,
 # and none of the three has any business in a string that is about to become an
 # agent's context and somebody's session log.
-# Through the LAST at-sign before the path, not the first: an unescaped `@` is
-# legal in userinfo, so `https://user@example.com@host/` and
-# `https://user:p@ss@host/` both have everything up to the final `@` as the
-# credential. Stopping at the first left `example.com@` and `ss@` behind --
-# still the secret, just the tail of it.
-URL_CREDENTIALS_RE = re.compile(r"(?<=://)[^/\s]*@")
+# Any URL in relayed text, stopping at whitespace or a quote. Matched whole,
+# because the parts that can carry a secret are not all in one place: userinfo
+# before the authority, and a token in a query or fragment after it.
+URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"'<>]+")
+
+
+def _redact_one_url(match: re.Match[str]) -> str:
+    """One URL with everything that can be a credential taken out of it.
+
+    Through the LAST at-sign, not the first: an unescaped `@` is legal in
+    userinfo, so `https://user@example.com@host/` has everything up to the final
+    one as the credential and stopping early leaves the tail of it behind.
+
+    Query and fragment go wholesale rather than by parameter name. Deciding
+    which keys are secret means keeping a list of the ones I have met --
+    `token`, `apikey`, `auth` -- and the first name missing from it leaks in
+    full. Nothing downstream needs those values; `?***` says one was there.
+    """
+    url = match.group(0)
+    scheme, sep, rest = url.partition("://")
+    end = len(rest)
+    for ch in "/?#":
+        at = rest.find(ch)
+        if at >= 0:
+            end = min(end, at)
+    authority, tail = rest[:end], rest[end:]
+    if "@" in authority:
+        authority = "***@" + authority.rsplit("@", 1)[1]
+    for ch in "?#":
+        at = tail.find(ch)
+        if at >= 0:
+            tail = tail[:at] + ch + "***"
+            break
+    return scheme + sep + authority + tail
 
 
 def redact_urls(text: str) -> str:
     """The same text with any credentials inside URLs replaced."""
-    return URL_CREDENTIALS_RE.sub("***@", text)
+    return URL_RE.sub(_redact_one_url, text)
 
 
 def bounded_err(text: str) -> str:

@@ -534,6 +534,27 @@ def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
             "https://host/path@x",
             id="an at-sign in the path is not userinfo",
         ),
+        # A query carries a token as easily as userinfo does, and taking it out
+        # by parameter name means keeping a list of the names I have met.
+        pytest.param(
+            "https://registry.example/?token=sekrit",
+            "https://registry.example/?***",
+            id="a token in the query",
+        ),
+        pytest.param(
+            "https://host?token=x", "https://host?***", id="a query with no path before it"
+        ),
+        pytest.param(
+            "https://user:p@ss@host/x?k=v#f",
+            "https://***@host/x?***",
+            id="userinfo and query together",
+        ),
+        pytest.param("https://host/x#frag", "https://host/x#***", id="a fragment"),
+        pytest.param(
+            "a https://u@h1/?k=1 and https://v@h2/?k=2 b",
+            "a https://***@h1/?*** and https://***@h2/?*** b",
+            id="two of them in one line",
+        ),
     ],
 )
 def test_url_credentials_are_removed_before_anything_is_relayed(text, expected):
