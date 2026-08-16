@@ -199,8 +199,9 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   version is fetched before the first byte of config, so this is always a repo
   left exactly as it was found; say so, because "it failed partway" is the
   reasonable assumption and it is wrong. The JSON on stdout carries `source`
-  (`npm` or `git`), `target` (the package or repository), and `cause`. Use the
-  cause — do not re-derive it from the English:
+  (`npm`, `git`, or `scratch` for a failure that precedes both), `target` (the
+  package or repository), and `cause`. Use the cause — do not re-derive it from
+  the English:
   - `filesystem` — something could not be written. **Read `npm_path` before
     saying what to fix, and check whether it is set at all.** Pinning always
     works in a temporary directory and passes its own `--cache` inside it, so
@@ -211,6 +212,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     could not be made, so there is no path to name: say that the temporary
     filesystem is unusable and quote the message, which carries the error.
   - `auth` — the registry wants credentials this environment does not have.
+  - `forbidden` — the registry refused the request, and that is *not* the same
+    as wanting credentials: npm labels any HTTP failure `E<status>`, so a 403 is
+    as likely a company registry blocking a package by policy, or an account
+    that authenticated and is not permitted. Say both possibilities and let them
+    tell which; do not send them to fix a login that may be working.
   - `not-found` — a registry answered that there is no such package. `registry`
     names it and **`registry_is_public` says whether it was npm's own** — do not
     compare the URL yourself, the same registry is written several ways. False
@@ -245,6 +251,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   - `no-version-tags` — the repository answered, and carries no tag that is
     purely a version. Nothing to retry: either this catalog's `rev_repo` is
     wrong, which is a bug here, or upstream has stopped tagging releases.
+  - `not-isolated` — nothing was attempted. Temporary directories land inside
+    the repository being configured, so pinning would read that repository's own
+    git and npm configuration and let it choose which server answers for a
+    catalog URL. `target` names the repository and the message names the path.
+    Tell them to point `TMPDIR` outside the repository and start again.
   - `unknown` — an npm code with no bucket here. Relay `npm_code` and `detail`
     verbatim and say it is unclassified, rather than picking the nearest label.
 - **anything else** — report it verbatim and end the run. Two of these happen

@@ -716,6 +716,10 @@ NPM_FAILURES = [
     ),
     pytest.param("npm error code E404\n", "not-found", "", id="no such package"),
     pytest.param("npm ERR! code E401\n", "auth", "", id="registry wants credentials"),
+    # Not auth: npm labels any HTTP failure E<status> and special-cases only
+    # 401, so a 403 is as likely a company registry blocking a package by
+    # policy for an account that authenticated perfectly well.
+    pytest.param("npm error code E403\n", "forbidden", "", id="refused, not unauthenticated"),
     pytest.param("npm error code ENOTFOUND\n", "network", "", id="dns"),
     # getaddrinfo's family, matched as a family: EAI_AGAIN was in the set and
     # EAI_FAIL was not, which is the difference between a rule and a memory.
@@ -921,7 +925,7 @@ def test_a_coloured_npm_is_still_classified(repo, keys_file, facts_path, tmp_pat
     (fake / "git").symlink_to(stubs / "git")
     proc = generate(repo, keys_file, facts_path, fake, "mermaid")
     assert proc.returncode == 6
-    assert out_json(proc)["cause"] == "auth"
+    assert out_json(proc)["cause"] == "forbidden"
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
@@ -1291,7 +1295,7 @@ def test_the_cause_survives_npms_logging_configuration(
     proc = generate(repo, keys_file, facts_path, fake, "mermaid")
     assert proc.returncode == 6
     got = out_json(proc)
-    assert got["cause"] == "auth", label
+    assert got["cause"] == "forbidden", label
     assert got["npm_code"] == "E403"
     assert got["detail"], "something of npm's own must survive to be quoted"
     assert not (repo / ".pre-commit-config.yaml").exists()
@@ -1373,6 +1377,30 @@ def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, s
     )
     assert proc.returncode == 6
     assert out_json(proc)["cause"] == "npm-missing"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_tmpdir_inside_the_repo_stops_the_run_before_anything_is_pinned(
+    repo, keys_file, facts_path, stubs, monkeypatch
+):
+    """The scratch cwd is the whole of pinning's isolation, so where it lands
+    decides whether that isolation exists.
+
+    `isolated=True` turns off git's system and global config and not the
+    enclosing worktree's, and npm walks up from cwd for a project `.npmrc` --
+    so a TMPDIR inside the repository being configured hands that repository
+    the vote the scratch directory exists to deny it, and the pin it produces
+    looks like any other. Refused before the first version is fetched, which is
+    before anything is written.
+    """
+    inside = repo / "tmp"
+    inside.mkdir()
+    monkeypatch.setenv("TMPDIR", str(inside))
+    proc = generate(repo, keys_file, facts_path, stubs, "hygiene")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-isolated"
+    assert got["source"] == "scratch"
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 

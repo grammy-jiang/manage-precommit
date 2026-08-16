@@ -186,6 +186,8 @@ PIN_CAUSES = (
     "invalid-version",
     "git-ls-remote",
     "no-version-tags",
+    "not-isolated",
+    "forbidden",
     "unknown",
 )
 
@@ -383,7 +385,13 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # worth simply retrying. `unknown` is a bucket on purpose -- an unmatched code
 # must still arrive named rather than disappear into the default.
 NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("auth", frozenset({"E401", "E403", "ENEEDAUTH", "EAUTHUNKNOWN", "EAUTHIP", "EOTP"})),
+    ("auth", frozenset({"E401", "ENEEDAUTH", "EAUTHUNKNOWN", "EAUTHIP", "EOTP"})),
+    # Not `auth`. npm labels any HTTP failure `E<status>` and special-cases
+    # only 401, so a 403 is as likely a corporate registry refusing a package
+    # by policy to an account that authenticated perfectly well. "Your
+    # credentials are missing" is the wrong sentence for that, and the wrong
+    # thing to go and check.
+    ("forbidden", frozenset({"E403"})),
     ("not-found", frozenset({"E404"})),
     # Name resolution, then the connect errnos the kernel hands back when the
     # route or the host is not there. All of these exit normally, which is why
@@ -1052,6 +1060,33 @@ def present_keys(cfg: cfgmod.Config | None) -> list[str]:
     return have
 
 
+def refuse_scratch_inside(directory: str) -> None:
+    """Refuse to pin at all if a scratch directory would land in the repository.
+
+    Pinning's isolation from the repository being configured is entirely the
+    scratch cwd: `isolated=True` turns off git's system and global config but
+    not the enclosing worktree's, and npm walks up from cwd for a project
+    `.npmrc`. So a TMPDIR inside that repository hands it exactly the vote the
+    scratch directory exists to deny it -- it can name the server that answers
+    for a catalog URL, and the pin it produces looks like any other.
+
+    Once, before the first version is fetched, which is before anything is
+    written: this refusal always leaves the tree untouched.
+    """
+    with tempfile.TemporaryDirectory() as probe:
+        where = os.path.realpath(probe)
+    root = os.path.realpath(directory)
+    if where == root or where.startswith(root + os.sep):
+        pin_failed(
+            "scratch",
+            root,
+            f"temporary directories land inside the repository being configured "
+            f"({clean(where)}), so version pinning would read that repository's "
+            f"own git and npm configuration. Point TMPDIR outside it.",
+            "not-isolated",
+        )
+
+
 def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
     """The catalog fragment's text, its parsed entry, and the version pinned.
 
@@ -1488,6 +1523,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
+    # Before the first version is fetched, and therefore before anything is
+    # written: the scratch directory is the whole of pinning's isolation.
+    refuse_scratch_inside(directory)
     planned, report, versions, intended = plan(cfg, keys, pre_existing=existing is not None)
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)
