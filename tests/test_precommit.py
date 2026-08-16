@@ -969,7 +969,10 @@ def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_
         # from "your mirror said no".
         pytest.param("https://registry.npmjs.org:4873/", False, id="a proxy on npmjs's name"),
         pytest.param("https://registry.npmjs.org:443/", True, id="the default port, spelled out"),
-        pytest.param("http://registry.npmjs.org/", True, id="npmjs over plain http"),
+        # Not over plain http: nothing authenticates the far end, so a proxy
+        # can answer for that name -- including with a 404 -- and this field
+        # exists to tell "npmjs said no" from "something else said no".
+        pytest.param("http://registry.npmjs.org/", False, id="npmjs over plain http"),
         pytest.param("ftp://registry.npmjs.org/", False, id="not a scheme npm speaks"),
         pytest.param("https://registry.npmjs.org:nope/", False, id="a port that is not a number"),
         # npm keeps the base path and appends the package to it, so a path is a

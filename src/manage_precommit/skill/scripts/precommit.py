@@ -530,7 +530,8 @@ def npm_error(stdout: str, stderr: str) -> tuple[dict[str, str], str]:
 
 
 PUBLIC_NPM_HOST = "registry.npmjs.org"
-DEFAULT_PORTS = {"https": 443, "http": 80}
+PUBLIC_NPM_SCHEME = "https"
+PUBLIC_NPM_PORT = 443
 
 
 def is_public_registry(url: str) -> bool:
@@ -550,7 +551,13 @@ def is_public_registry(url: str) -> bool:
     and anything a future reader adds to that list defaults to "must be empty".
 
     Userinfo is the one deliberate exception: credentials change who is asking,
-    not who answers, and npmjs with a token in front of it is still npmjs.
+    not who answers, and npmjs with a token in front of it is still npmjs. (The
+    payload gets that URL redacted; see `redact_urls`.)
+
+    https only. Over plain http nothing authenticates the far end, so a proxy or
+    any intermediary can answer for that name -- including with a 404 -- and
+    this field's whole job is telling "npmjs said no" apart from "something else
+    said no". An unencrypted endpoint cannot support the claim.
 
     Wrong in the `True` direction is the expensive one -- it sends someone to
     report a bug here about a package their own registry does not carry -- so
@@ -562,9 +569,9 @@ def is_public_registry(url: str) -> bool:
     except ValueError:
         return False
     return (
-        parts.scheme in DEFAULT_PORTS
+        parts.scheme == PUBLIC_NPM_SCHEME
         and parts.hostname == PUBLIC_NPM_HOST
-        and port in (None, DEFAULT_PORTS[parts.scheme])
+        and port in (None, PUBLIC_NPM_PORT)
         and parts.path in ("", "/")
         and not parts.query
         and not parts.fragment
