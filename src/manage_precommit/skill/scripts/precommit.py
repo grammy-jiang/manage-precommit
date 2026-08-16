@@ -396,31 +396,41 @@ DEFAULT_PORTS = {"https": 443, "http": 80}
 
 
 def is_public_registry(url: str) -> bool:
-    """Whether that is npm's own registry, however it happens to be spelled.
+    """Whether that is npm's own registry root, however it happens to be spelled.
 
     `npm config get registry` returns what the user wrote, so the same registry
     arrives with or without a trailing slash -- and comparing the string in
     SKILL.md then reads npmjs as a company mirror and tells someone a bug in
-    this catalog is theirs to go and fix. Whether two URLs name one host is a
-    fact, so it is settled here rather than described there.
+    this catalog is theirs to go and fix. Whether two URLs name one endpoint is
+    a fact, so it is settled here rather than described there.
+
+    Exhaustive by construction, not clause by clause. This grew a rule per
+    review round -- hostname, then port, then path, then query and fragment --
+    because npm appends the package name to the configured string whole, so
+    every part of that string is a part that can make it a different endpoint
+    wearing npmjs's name. So each component `urlsplit` produces is named below,
+    and anything a future reader adds to that list defaults to "must be empty".
+
+    Userinfo is the one deliberate exception: credentials change who is asking,
+    not who answers, and npmjs with a token in front of it is still npmjs.
+
+    Wrong in the `True` direction is the expensive one -- it sends someone to
+    report a bug here about a package their own registry does not carry -- so
+    anything unrecognised is `False`.
     """
     try:
         parts = urlsplit(url)
-        if parts.hostname != PUBLIC_NPM_HOST or parts.scheme not in DEFAULT_PORTS:
-            return False
-        # npm keeps the base path and appends the package to it, so
-        # `.../custom/` is a different endpoint wearing the same name -- the
-        # same way a port is.
-        if parts.path not in ("", "/"):
-            return False
-        # A port says something local is answering for that name -- a proxy on
-        # 4873, a hosts-file override -- and the whole value of this field is
-        # telling "npmjs said no" apart from "your mirror said no". Wrong in
-        # this direction is the expensive one: it sends someone to report a bug
-        # here about a package their registry simply does not carry.
-        return parts.port in (None, DEFAULT_PORTS[parts.scheme])
-    except ValueError:  # a malformed URL, or a port that is not a number
+        port = parts.port  # a property, and it raises on a port that is not one
+    except ValueError:
         return False
+    return (
+        parts.scheme in DEFAULT_PORTS
+        and parts.hostname == PUBLIC_NPM_HOST
+        and port in (None, DEFAULT_PORTS[parts.scheme])
+        and parts.path in ("", "/")
+        and not parts.query
+        and not parts.fragment
+    )
 
 
 def npm_registry_for(pkg: str) -> str:
