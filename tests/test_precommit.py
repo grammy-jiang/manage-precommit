@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -717,6 +718,17 @@ NPM_FAILURES = [
     pytest.param("npm ERR! code E401\n", "auth", "", id="registry wants credentials"),
     pytest.param("npm error code ENOTFOUND\n", "network", "", id="dns"),
     pytest.param("npm ERR! code ECONNREFUSED\n", "network", "", id="connection refused"),
+    # npm gives up on the socket itself and exits normally, so this never
+    # reaches the TimeoutExpired handler. Reported as `network` it left the
+    # `timeout` bucket with almost nothing that could land in it.
+    pytest.param("npm error code ETIMEDOUT\n", "timeout", "", id="npm gave up on the socket"),
+    pytest.param("npm ERR! code ERR_SOCKET_TIMEOUT\n", "timeout", "", id="socket timeout"),
+    pytest.param(
+        "npm error code ENOSPC\nnpm error path /tmp/x/npm-cache\n",
+        "filesystem",
+        "/tmp/x/npm-cache",
+        id="the scratch cache filled the disk",
+    ),
     pytest.param(
         "npm error code EACCES\nnpm error path /opt/x\n", "filesystem", "/opt/x", id="perm"
     ),
@@ -2538,6 +2550,32 @@ def test_the_mermaid_prerequisite_is_reported_rather_than_probed(repo, stubs):
     assert got["prerequisites"]["mermaid"] in ("binaries present",) or got["prerequisites"][
         "mermaid"
     ].startswith("missing: ")
+
+
+def test_every_pin_cause_has_its_own_advice_in_SKILL_md():
+    """The taxonomy and the procedure are one contract in two files.
+
+    A cause added to the code without a sentence beside it in SKILL.md fails
+    the way a renamed sentinel does -- the agent falls through to wording that
+    does not fit, and nothing about the run looks wrong. Read out of the source
+    rather than restated here, so adding one and forgetting the other is red
+    instead of a second list to keep in step.
+    """
+    tree = ast.parse((SKILL / "scripts" / "precommit.py").read_text(encoding="utf-8"))
+    declared = [
+        [el.value for el in node.value.elts]
+        for stmt in tree.body
+        if isinstance(stmt, ast.Assign)
+        for node in [stmt]
+        if any(getattr(t, "id", "") == "PIN_CAUSES" for t in stmt.targets)
+        and isinstance(node.value, ast.Tuple)
+    ]
+    assert declared, "PIN_CAUSES is not a plain tuple literal any more"
+    causes = declared[0]
+    assert len(causes) >= 10
+    advice = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    missing = [c for c in causes if f"`{c}`" not in advice]
+    assert not missing, f"causes the procedure says nothing about: {missing}"
 
 
 def test_the_prerequisite_sentinel_is_the_string_SKILL_md_branches_on(repo, stubs):

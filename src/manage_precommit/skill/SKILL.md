@@ -201,14 +201,19 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   reasonable assumption and it is wrong. The JSON on stdout carries `source`
   (`npm` or `git`), `target` (the package or repository), and `cause`. Use the
   cause — do not re-derive it from the English:
-  - `filesystem` — npm could not write where it caches. `npm_path` names the
-    directory. Their `NPM_CONFIG_CACHE`/`HOME` is the thing to fix.
+  - `filesystem` — npm could not write somewhere. **Read `npm_path` before
+    saying what to fix.** Pinning always passes its own `--cache` under a
+    temporary directory, so this is usually the *temporary filesystem* — full,
+    read-only, or a `TMPDIR` this process cannot use — and telling them to
+    change `NPM_CONFIG_CACHE` or `HOME` is advice that cannot work. Name the
+    path npm named and say which of the two it is.
   - `auth` — the registry wants credentials this environment does not have.
   - `not-found` — the registry has no such package. If a catalog key was
     involved this is a bug here, not something the user can fix.
   - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
     reachability problem and not their repository.
-  - `timeout` — the registry answered too slowly, not "not at all". Same advice.
+  - `timeout` — the registry answered too slowly, not "not at all", whether npm
+    gave up on the socket or the whole command outlived its limit. Same advice.
   - `npm-missing` / `unrunnable` — `npm` is absent or would not start. Only
     `mermaid` needs it; every other selection succeeds without it.
   - `invalid-version` — the registry answered with something that is not a

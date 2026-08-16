@@ -168,6 +168,25 @@ def version_key(tag: str) -> list[int]:
 NPM_TIMEOUT = 90
 
 
+# Every value `cause` can take, in one place. SKILL.md turns each into different
+# advice and a test reads this tuple against that list, because a cause added
+# here without a sentence there fails the way a renamed sentinel does: the agent
+# falls through to wording that does not fit, and nothing looks wrong.
+PIN_CAUSES = (
+    "filesystem",
+    "auth",
+    "not-found",
+    "network",
+    "timeout",
+    "npm-missing",
+    "unrunnable",
+    "invalid-version",
+    "git-ls-remote",
+    "no-version-tags",
+    "unknown",
+)
+
+
 def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
     """Refuse a pin, saying what could not be pinned and why, machine-readably.
 
@@ -183,6 +202,8 @@ def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object)
     failing are the same event to the caller, and a contract that numbered them
     differently would be one more thing to remember and get wrong.
     """
+    if cause not in PIN_CAUSES:  # impossible, and asserted rather than relayed
+        die(f"internal: {cause!r} is not one of the declared pin causes")
     die(
         msg,
         code=EXIT_PIN_FAILED,
@@ -249,18 +270,14 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
     ("not-found", frozenset({"E404"})),
     (
         "network",
-        frozenset(
-            {
-                "ENOTFOUND",
-                "EAI_AGAIN",
-                "ECONNREFUSED",
-                "ECONNRESET",
-                "ETIMEDOUT",
-                "ERR_SOCKET_TIMEOUT",
-                "EPROTO",
-            }
-        ),
+        frozenset({"ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "EPROTO"}),
     ),
+    # npm gave up on a slow socket by itself, and exited normally doing it -- so
+    # this never reaches the TimeoutExpired handler, which only fires when the
+    # whole command outlives NPM_TIMEOUT. Reported as `network` these were a
+    # `timeout` bucket that almost nothing could ever land in, under a code
+    # literally named ETIMEDOUT.
+    ("timeout", frozenset({"ETIMEDOUT", "ERR_SOCKET_TIMEOUT"})),
     # ENOENT belongs here rather than under "missing": npm reports the failure to
     # create its own cache directory that way, which is the whole of issue #16.
     (
