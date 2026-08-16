@@ -681,7 +681,21 @@ def npm_latest(pkg: str) -> str:
                     timeout=NPM_TIMEOUT,
                 )
             except FileNotFoundError:
-                pin_failed("npm", name, f"npm not found; it is needed to pin {pkg}", "npm-missing")
+                # An npm on PATH whose shebang interpreter is gone raises the
+                # same FileNotFoundError as no npm at all, and the contract
+                # distinguishes them: `npm-missing` says install it,
+                # `unrunnable` says the one you have is broken. `which` is what
+                # tells them apart, since the exception cannot.
+                if shutil.which("npm") is None:
+                    pin_failed(
+                        "npm", name, f"npm not found; it is needed to pin {pkg}", "npm-missing"
+                    )
+                pin_failed(
+                    "npm",
+                    name,
+                    f"npm is on PATH but would not start; it is needed to pin {pkg}",
+                    "unrunnable",
+                )
             except subprocess.TimeoutExpired:  # pragma: no cover - see below
                 # Before the generic handler: TimeoutExpired is a SubprocessError,
                 # and "could not run npm" is the wrong sentence for a registry

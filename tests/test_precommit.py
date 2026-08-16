@@ -1127,6 +1127,36 @@ def test_a_huge_npm_complaint_is_bounded_in_both_places_it_is_relayed(
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_an_npm_that_will_not_start_is_not_reported_as_missing(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The exception cannot tell these apart, and the advice differs.
+
+    An npm on PATH whose shebang interpreter is gone raises the same
+    FileNotFoundError as no npm at all -- so "install npm" was the answer given
+    to someone whose npm is installed and broken. `only_path`, because exec
+    walks past a file it cannot start and would otherwise find the real npm
+    behind this one, and the test would pass by asking that.
+    """
+    fake = _fake_bin(tmp_path, "npmbroken", "#!/nonexistent/interpreter\n")
+    (fake / "git").symlink_to(stubs / "git")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=fake,
+        only_path=True,
+    )
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "unrunnable"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
 def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, stubs):
     """Only `mermaid` needs npm; the agent has to be able to say that rather
     than report a generic failure over the whole selection."""
