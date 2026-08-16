@@ -1036,6 +1036,70 @@ def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_pat
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_non_json_on_stdout_does_not_stop_the_classification(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """`--json` is asked for, not guaranteed.
+
+    An npm that answers a failure with something other than a JSON object --
+    an older one, or a wrapper script on PATH -- must not turn a parse error
+    into a crash. The stderr lines are still there, and they still say E401.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmjunkout",
+        '#!/bin/sh\necho "not json at all"\nprintf "npm error code E401\\n" >&2\nexit 1\n',
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "auth"
+    assert got["npm_code"] == "E401"
+
+
+@pytest.mark.parametrize(
+    "stderr_line,label",
+    [
+        pytest.param("corp error code E403", "a renamed heading", id="heading=corp"),
+        pytest.param("", "nothing on stderr at all", id="loglevel=silent"),
+    ],
+)
+def test_the_cause_survives_npms_logging_configuration(
+    repo, keys_file, facts_path, tmp_path, stubs, stderr_line, label
+):
+    """`^npm error code` assumed two settings that are the user's to change.
+
+    `heading` is the string npm puts in front of every log line -- `npm` by
+    default and anything at all if they say so -- and `loglevel=silent` removes
+    the lines entirely. Both are honoured here like the rest of their npm
+    configuration, so a pattern anchored on `npm` was reading `unknown` off a
+    machine whose only fault was a logging preference.
+
+    Under `--json` npm reports the failure as an object on stdout, which no
+    logging setting touches. The stub emits that and whatever stderr the setting
+    would have left.
+    """
+    emit = f"printf \"%s\\n\" '{stderr_line}' >&2\n" if stderr_line else ""
+    fake = _fake_bin(
+        tmp_path,
+        "npmlogcfg",
+        "#!/bin/sh\n"
+        'case " $* " in *" --loglevel=error "*) ;; *) echo "no --loglevel" >&2; exit 7;; esac\n'
+        + emit
+        + 'printf \'%s\' \'{"error":{"code":"E403","summary":"Forbidden"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "auth", label
+    assert got["npm_code"] == "E403"
+    assert got["detail"], "something of npm's own must survive to be quoted"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
 def test_a_huge_npm_complaint_is_bounded_in_both_places_it_is_relayed(
     repo, keys_file, facts_path, tmp_path, stubs
 ):

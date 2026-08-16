@@ -471,6 +471,43 @@ def npm_fields(stderr: str) -> dict[str, str]:
     return {key: value.strip() for key, value in NPM_FIELD_RE.findall(ANSI_RE.sub("", stderr))}
 
 
+def npm_error(stdout: str, stderr: str) -> tuple[dict[str, str], str]:
+    """What npm said went wrong: its fields, and its own words.
+
+    Two sources, because npm has two and the user's configuration decides which
+    one carries anything. Under `--json` the failure arrives as an object on
+    stdout, and that is the copy to trust: the stderr lines are prefixed with
+    whatever the `heading` config says -- `npm` by default, but it is a string
+    a user may set to anything -- and suppressed altogether by
+    `loglevel=silent`. Both are honoured here like the rest of their npm
+    configuration, so neither can be assumed, and a pattern anchored on `^npm`
+    was assuming both.
+
+    stderr stays as the fallback rather than the source, for an npm whose
+    `--json` does not carry the error.
+    """
+    fields: dict[str, str] = {}
+    words = ""
+    try:
+        payload = json.loads(stdout.strip() or "null")
+    except ValueError:
+        payload = None
+    reported = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(reported, dict):
+        for key in ("code", "syscall", "path"):
+            value = reported.get(key)
+            if isinstance(value, str) and value.strip():
+                fields[key] = value.strip()
+        words = " ".join(
+            reported[key]
+            for key in ("summary", "detail")
+            if isinstance(reported.get(key), str) and reported[key].strip()
+        )
+    if not fields:
+        fields = npm_fields(stderr)
+    return fields, stderr if stderr.strip() else words
+
+
 PUBLIC_NPM_HOST = "registry.npmjs.org"
 DEFAULT_PORTS = {"https": 443, "http": 80}
 
@@ -632,6 +669,9 @@ def npm_latest(pkg: str) -> str:
                         cache,
                         "--json",
                         "--no-color",
+                        # `loglevel=silent` otherwise leaves nothing on stderr
+                        # to fall back to, and nothing to quote to the user.
+                        "--loglevel=error",
                     ],
                     cwd=elsewhere,
                     capture_output=True,
@@ -658,12 +698,12 @@ def npm_latest(pkg: str) -> str:
     except OSError as exc:  # pragma: no cover - only the cleanup reaches here
         pin_failed("npm", name, f"scratch directory would not go away: {exc}", "filesystem")
     if out.returncode != 0:
-        fields = npm_fields(out.stderr)
+        fields, words = npm_error(out.stdout, out.stderr)
         code = fields.get("code", "")
         # Bound once and used twice. npm's stderr is a registry's text, the
         # same category as git's remote-server text, and SKILL.md relays the
         # sentence as well as the field.
-        detail = bounded_err(out.stderr)
+        detail = bounded_err(words)
         cause = npm_cause(code)
         extra: dict[str, object] = {}
         if cause == "not-found":
