@@ -65,8 +65,12 @@ def test_generate_pins_the_newest_version_tag_only(repo, keys_file, facts_path, 
 
 def test_generate_refuses_when_no_release_tag_exists(repo, keys_file, facts_path, no_tags_stub):
     proc = generate(repo, keys_file, facts_path, no_tags_stub, "hygiene")
-    assert proc.returncode == 1
+    assert proc.returncode == 6
     assert "no version tags" in proc.stderr
+    got = out_json(proc)
+    assert got["reason"] == "version_pin_failed"
+    assert got["cause"] == "no-version-tags"
+    assert got["source"] == "git"
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
@@ -692,9 +696,198 @@ def test_a_garbage_npm_version_is_refused(repo, keys_file, facts_path, tmp_path,
     fake = _fake_bin(tmp_path, "npmjunk", "#!/bin/sh\necho not-a-version\n")
     (fake / "git").symlink_to(stubs / "git")
     proc = generate(repo, keys_file, facts_path, fake, "mermaid")
-    assert proc.returncode != 0
+    assert proc.returncode == 6
     assert "unexpected version" in proc.stderr
+    assert out_json(proc)["cause"] == "invalid-version"
     assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+# npm's `code` line, verbatim from the failures each one names. `npm error` is
+# npm 9 and later; `npm ERR!` is npm 8 and earlier, and both are still in the
+# wild, so the parser is asked about both here rather than about whichever one
+# happens to be installed.
+NPM_FAILURES = [
+    pytest.param(
+        "npm error code ENOENT\nnpm error syscall mkdir\nnpm error path /root/.npm\n",
+        "filesystem",
+        "/root/.npm",
+        id="unwritable cache (the report this exit exists for)",
+    ),
+    pytest.param("npm error code E404\n", "not-found", "", id="no such package"),
+    pytest.param("npm ERR! code E401\n", "auth", "", id="registry wants credentials"),
+    pytest.param("npm error code ENOTFOUND\n", "network", "", id="dns"),
+    pytest.param("npm ERR! code ECONNREFUSED\n", "network", "", id="connection refused"),
+    pytest.param(
+        "npm error code EACCES\nnpm error path /opt/x\n", "filesystem", "/opt/x", id="perm"
+    ),
+    pytest.param("npm error code EWEIRDNESS\n", "unknown", "", id="a code with no bucket"),
+    pytest.param("something went wrong\n", "unknown", "", id="npm said nothing machine-readable"),
+]
+
+
+@pytest.mark.parametrize("stderr,cause,path", NPM_FAILURES)
+def test_a_failed_pin_names_its_cause(
+    repo, keys_file, facts_path, tmp_path, stubs, stderr, cause, path
+):
+    """Five different remedies, and the agent should not be guessing which.
+
+    An unwritable cache is the user's to fix, a 404 is a bug in this catalog, a
+    dropped connection is worth retrying -- and npm says which in a `code` line
+    that means the same thing in every locale, unlike the sentence beside it.
+    `unknown` is a bucket rather than a default, because the failure that
+    matches no rule is exactly the one that must not disappear.
+    """
+    quoted = stderr.replace("\n", "\\n")
+    fake = _fake_bin(tmp_path, "npmcoded", f'#!/bin/sh\nprintf "{quoted}" >&2\nexit 1\n')
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["reason"] == "version_pin_failed"
+    assert got["source"] == "npm"
+    assert got["target"] == "@mermaid-js/mermaid-cli"
+    assert got["cause"] == cause
+    assert got["npm_path"] == path
+    # Whatever the classification, npm's own words survive it.
+    assert got["detail"], "the raw complaint must not be swallowed by the label"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, stubs):
+    """Only `mermaid` needs npm; the agent has to be able to say that rather
+    than report a generic failure over the whole selection."""
+    bare = tmp_path / "nonpm"
+    bare.mkdir()
+    (bare / "git").symlink_to(stubs / "git")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=bare,
+        only_path=True,
+    )
+    assert proc.returncode == 6
+    assert out_json(proc)["cause"] == "npm-missing"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_the_pin_runs_where_the_repos_own_npmrc_cannot_reach_it(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The repository being configured does not get a vote on the registry.
+
+    npm reads `.npmrc` from the directory it is run in and from that project's
+    ancestors, so pinning inside the target repo would let the repo name the
+    server that answers for a catalog package. The scratch cwd is the whole of
+    the defence, and nothing asserted it -- so `cwd=elsewhere` could have been
+    dropped as a tidy-up with the suite still green.
+
+    Note what is NOT claimed: the user's own npm configuration is deliberately
+    honoured, no `--registry` is forced, and the proxy variables are passed
+    through. See `npm_latest`.
+
+    `cwd=repo` on the run itself is load-bearing, and this test was wrong once
+    without it: a child with no cwd of its own inherits the parent's, and the
+    parent here is pytest sitting in the checkout. So deleting `cwd=elsewhere`
+    still put npm somewhere outside the repository and the test passed while
+    proving nothing. Started from inside the repo, the same deletion fails.
+    """
+    (repo / ".npmrc").write_text("registry=http://not-the-registry.invalid/\n")
+    fake = _fake_bin(
+        tmp_path,
+        "npmcwd",
+        f'#!/bin/sh\nprintf "%s" "$PWD" > "$MP_CWD_LOG"\necho {NPM_VERSION}\n',
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    cwd_log = tmp_path / "npm-cwd.txt"
+    monkeypatch.setenv("MP_CWD_LOG", str(cwd_log))
+
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=fake,
+        cwd=repo,
+    )
+    assert proc.returncode == 0, proc.stderr
+    where = os.path.realpath(cwd_log.read_text())
+    root = os.path.realpath(repo)
+    assert where != root
+    assert not where.startswith(root + os.sep)
+    # And the bait was really there, so a run that stopped calling npm at all
+    # could not pass this by doing nothing.
+    assert (repo / ".npmrc").is_file()
+    assert not os.path.exists(os.path.join(where, ".npmrc"))
+
+
+def test_the_pin_does_not_need_a_writable_home(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """`--cache` was the point, but HOME is the thing that was really missing.
+
+    npm's cache defaults under `$HOME`, and its log directory hangs off the
+    cache -- so with the cache named explicitly, nothing in the pin should need
+    a home directory it can write to. That is a deduction until something runs
+    it: the environment in the report had `HOME=/root` and no way to create
+    anything beneath it.
+    """
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    nowhere = str(blocker / "home")
+    fake = _fake_bin(
+        tmp_path,
+        "npmnohome",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f'[ "$HOME" = "{nowhere}" ] || {{ echo "HOME was repaired for us" >&2; exit 5; }}\n'
+        f"echo {NPM_VERSION}\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    monkeypatch.setenv("HOME", nowhere)
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_the_pin_names_its_cache_even_when_nothing_was_inherited(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The ordinary environment, stated rather than assumed.
+
+    Every other test here runs with `NPM_CONFIG_CACHE` unset, which makes this
+    the case that is covered everywhere and asserted nowhere -- and a "fix" that
+    only passed `--cache` when it saw a hostile value would sail through all of
+    them.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmnoenv",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        '[ -z "${NPM_CONFIG_CACHE-}" ] || { echo "expected it unset" >&2; exit 5; }\n'
+        'case " $* " in *" --cache "*) ;; *) echo "no --cache" >&2; exit 6;; esac\n'
+        f"echo {NPM_VERSION}\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    monkeypatch.delenv("NPM_CONFIG_CACHE", raising=False)
+    monkeypatch.delenv("npm_config_cache", raising=False)
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
 
 
 def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(

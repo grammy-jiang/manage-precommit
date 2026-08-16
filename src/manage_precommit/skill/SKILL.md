@@ -195,6 +195,27 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   contains one and that this skill will not carry it forward. Otherwise tell the
   user the hook has to be added by hand, or the construct simplified. Do not
   edit the file yourself.
+- **exit 6, a version could not be pinned** — **nothing was written.** Every
+  version is fetched before the first byte of config, so this is always a repo
+  left exactly as it was found; say so, because "it failed partway" is the
+  reasonable assumption and it is wrong. The JSON on stdout carries `source`
+  (`npm` or `git`), `target` (the package or repository), and `cause`. Use the
+  cause — do not re-derive it from the English:
+  - `filesystem` — npm could not write where it caches. `npm_path` names the
+    directory. Their `NPM_CONFIG_CACHE`/`HOME` is the thing to fix.
+  - `auth` — the registry wants credentials this environment does not have.
+  - `not-found` — the registry has no such package. If a catalog key was
+    involved this is a bug here, not something the user can fix.
+  - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
+    reachability problem and not their repository.
+  - `timeout` — the registry answered too slowly, not "not at all". Same advice.
+  - `npm-missing` / `unrunnable` — `npm` is absent or would not start. Only
+    `mermaid` needs it; every other selection succeeds without it.
+  - `invalid-version` — the registry answered with something that is not a
+    version, and it was refused rather than written into their config.
+  - `git-ls-remote` / `no-version-tags` — the same, for a hook repository.
+  - `unknown` — an npm code with no bucket here. Relay `npm_code` and `detail`
+    verbatim and say it is unclassified, rather than picking the nearest label.
 - **anything else** — report it verbatim and end the run. Two of these happen
   *after* the config has been written, and the message says so: a foreign
   executable asset appearing between the pre-check and the copy ("The config has

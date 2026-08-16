@@ -20,6 +20,7 @@ Exit codes:
   3  unknown catalog key -- recoverable; re-ask with the near matches printed
   4  a file this run would write already carries an uncommitted change
   5  the existing config uses YAML this tool will not guess at
+  6  a version could not be pinned -- nothing was written; `cause` says why
 """
 
 from __future__ import annotations
@@ -70,6 +71,7 @@ EXIT_ERROR = 1
 EXIT_UNKNOWN_KEY = 3
 EXIT_DIRTY = 4
 EXIT_REFUSED = 5
+EXIT_PIN_FAILED = 6
 
 # A hook can print a whole file -- gitleaks echoes match context, markdownlint
 # lists every violation. The agent reads this to judge the run, so it is bounded
@@ -161,6 +163,40 @@ def version_key(tag: str) -> list[int]:
     return [int(n) for n in re.findall(r"\d+", tag)]
 
 
+# Enough of the failure to act on, and not a repository-controlled channel of
+# unbounded length into the agent's context.
+MAX_PIN_DETAIL = 2000
+
+# Long enough for a registry that is slow rather than absent.
+NPM_TIMEOUT = 90
+
+
+def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
+    """Refuse a pin, saying what could not be pinned and why, machine-readably.
+
+    Nothing has been written at this point and nothing will be: every version is
+    fetched before the first byte of config, so this exit is always a repository
+    left exactly as it was found. That half was already true; what was missing
+    is a `cause` the agent can act on. An unwritable cache, a 404 and a dropped
+    connection each need a different sentence to the user, and working that out
+    from npm's stderr is a guess -- which is the one thing SKILL.md is not
+    supposed to ask a model to do.
+
+    Both pin sources exit the same way. `git ls-remote` failing and `npm view`
+    failing are the same event to the caller, and a contract that numbered them
+    differently would be one more thing to remember and get wrong.
+    """
+    die(
+        msg,
+        code=EXIT_PIN_FAILED,
+        reason="version_pin_failed",
+        source=source,
+        target=clean(target),
+        cause=cause,
+        **fields,
+    )
+
+
 def latest_tag(repo_url: str) -> str:
     """The newest release tag on a hook repository, fetched live.
 
@@ -174,7 +210,13 @@ def latest_tag(repo_url: str) -> str:
     with tempfile.TemporaryDirectory() as elsewhere:
         rc, out, err = git(elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True)
     if rc != 0:
-        die(f"git ls-remote failed for {repo_url}: {err}")
+        pin_failed(
+            "git",
+            url,
+            f"git ls-remote failed for {repo_url}: {err}",
+            "git-ls-remote",
+            detail=clean(err)[:MAX_PIN_DETAIL],
+        )
     tags = []
     for line in out.splitlines():
         if "refs/tags/" not in line:
@@ -183,9 +225,66 @@ def latest_tag(repo_url: str) -> str:
         if VER_RE.match(ref):
             tags.append(ref)
     if not tags:
-        die(f"no version tags found for {repo_url}")
+        pin_failed(
+            "git",
+            url,
+            f"no version tags found for {repo_url}",
+            "no-version-tags",
+        )
     tags.sort(key=version_key)
     return tags[-1]
+
+
+# npm's own machine-readable discriminants, not its prose. Classifying by
+# English sentence is how an outcome ends up matching no bucket and vanishing;
+# these three lines are a stable contract that says the same thing in every
+# locale. Both prefixes are matched because npm 8 and earlier print `npm ERR!`
+# where npm 9 and later print `npm error`, and a tool that exists to pin
+# versions outlives one npm major.
+NPM_FIELD_RE = re.compile(r"^npm (?:ERR!|error) (code|syscall|path) (.+)$", re.M)
+
+# Each cause is a different sentence to the user: a cache they cannot write is
+# theirs to fix, a 404 means the package name is wrong, and a network failure is
+# worth simply retrying. `unknown` is a bucket on purpose -- an unmatched code
+# must still arrive named rather than disappear into the default.
+NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("auth", frozenset({"E401", "E403", "ENEEDAUTH", "EAUTHUNKNOWN", "EOTP"})),
+    ("not-found", frozenset({"E404"})),
+    (
+        "network",
+        frozenset(
+            {
+                "ENOTFOUND",
+                "EAI_AGAIN",
+                "ECONNREFUSED",
+                "ECONNRESET",
+                "ETIMEDOUT",
+                "ERR_SOCKET_TIMEOUT",
+                "EPROTO",
+                "SELF_SIGNED_CERT_IN_CHAIN",
+                "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+            }
+        ),
+    ),
+    # ENOENT belongs here rather than under "missing": npm reports the failure to
+    # create its own cache directory that way, which is the whole of issue #16.
+    (
+        "filesystem",
+        frozenset({"EACCES", "EPERM", "EROFS", "ENOSPC", "EISDIR", "ENOTDIR", "ENOENT"}),
+    ),
+)
+
+
+def npm_fields(stderr: str) -> dict[str, str]:
+    """npm's `code`/`syscall`/`path` lines, last one winning."""
+    return {key: value.strip() for key, value in NPM_FIELD_RE.findall(stderr)}
+
+
+def npm_cause(code: str) -> str:
+    for cause, codes in NPM_CAUSES:
+        if code in codes:
+            return cause
+    return "unknown"
 
 
 def npm_latest(pkg: str) -> str:
@@ -194,6 +293,14 @@ def npm_latest(pkg: str) -> str:
     # supply an .npmrc. Pinning also sets an explicit cache path in that scratch
     # directory so inherited npm cache settings (for example an unwritable
     # NPM_CONFIG_CACHE) cannot break version lookup.
+    #
+    # The registry is deliberately NOT forced. The isolation this wants is from
+    # the *repository being configured*, and cwd is the whole of that. The
+    # user's own npm configuration -- a user or global .npmrc, NPM_CONFIG_REGISTRY,
+    # the proxy variables -- is honoured, because on the machines this failure
+    # was reported from a mirror or proxy is the only route to a registry at
+    # all, and a hardcoded --registry would turn a working environment into a
+    # broken one to defend against a threat the user already controls.
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")
@@ -204,17 +311,43 @@ def npm_latest(pkg: str) -> str:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=90,
+                timeout=NPM_TIMEOUT,
             )
     except FileNotFoundError:
-        die(f"npm not found; it is needed to pin {pkg}")
+        pin_failed("npm", name, f"npm not found; it is needed to pin {pkg}", "npm-missing")
+    except subprocess.TimeoutExpired:  # pragma: no cover - see below
+        # Before the generic handler: TimeoutExpired is a SubprocessError, and
+        # "could not run npm" is the wrong sentence for a registry that answered
+        # too slowly rather than not at all.
+        #
+        # Untested on purpose. Reaching it costs a real 90-second wait, and the
+        # alternative is a test-only override of NPM_TIMEOUT in shipped code --
+        # the first environment knob in these scripts that exists for the suite
+        # rather than for a user. A two-line handler is not worth either.
+        pin_failed("npm", name, f"npm view {pkg} timed out after {NPM_TIMEOUT}s", "timeout")
     except (OSError, subprocess.SubprocessError) as exc:
-        die(f"could not run npm for {pkg}: {exc}")
+        pin_failed("npm", name, f"could not run npm for {pkg}: {exc}", "unrunnable")
     if out.returncode != 0:
-        die(f"npm view {pkg} failed: {clean(out.stderr)}")
+        fields = npm_fields(out.stderr)
+        code = fields.get("code", "")
+        pin_failed(
+            "npm",
+            name,
+            f"npm view {pkg} failed: {clean(out.stderr)}",
+            npm_cause(code),
+            npm_code=code,
+            npm_path=clean(fields.get("path", "")),
+            detail=clean(out.stderr)[:MAX_PIN_DETAIL],
+        )
     version = out.stdout.strip()
     if not VER_RE.match(version):
-        die(f"npm returned an unexpected version for {pkg}: {clean(version)!r}")
+        pin_failed(
+            "npm",
+            name,
+            f"npm returned an unexpected version for {pkg}: {clean(version)!r}",
+            "invalid-version",
+            detail=clean(version)[:MAX_PIN_DETAIL],
+        )
     return version
 
 
