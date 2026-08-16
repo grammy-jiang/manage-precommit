@@ -225,8 +225,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     one, from `source`**: `npm` is the registry, `git` is the hook repository's
     host, and sending someone to check the wrong service is worse than saying
     nothing. Otherwise the same advice as `network`.
-  - `npm-missing` / `unrunnable` — `npm` is absent or would not start. Only
-    `mermaid` needs it; every other selection succeeds without it.
+  - `npm-missing` / `unrunnable` — the tool named by `source` is absent, or is
+    there and would not start. For `npm` that is only `mermaid`'s problem: every
+    other selection succeeds without it. For `git` it stops the whole run, and
+    "would not start" means something on their PATH is broken rather than
+    missing — quote the message, which names it.
   - `invalid-version` — the registry answered with something that is not a
     version, and it was refused rather than written into their config.
   - `git-ls-remote` — the hook repository's lookup failed, and that is *all*

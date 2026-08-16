@@ -301,9 +301,24 @@ def latest_tag(repo_url: str) -> str:
     pinning_git = make_git(die, on_timeout=stalled)
     try:
         with scratch_or_pin_failed("git", url) as elsewhere:
-            rc, out, err = pinning_git(
-                elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True
-            )
+            try:
+                rc, out, err = pinning_git(
+                    elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True
+                )
+            except OSError as exc:  # pragma: no cover - see below
+                # make_git handles a git that is absent and one that hangs; a
+                # git that is *there and will not start* -- the wrong bits on
+                # the file, a bad interpreter -- comes out of it as a plain
+                # OSError. Caught here rather than by the cleanup handler
+                # below, which would tell the user their temporary filesystem
+                # was at fault and send them to look at the wrong thing
+                # entirely.
+                #
+                # Untested: exec walks PATH past a file it cannot start, so a
+                # broken git first on PATH finds the real one behind it, and a
+                # PATH holding only the broken one fails at the first git call
+                # this run makes, long before pinning.
+                pin_failed("git", url, f"could not run git for {repo_url}: {exc}", "unrunnable")
     except OSError as exc:  # pragma: no cover - only the cleanup reaches here
         pin_failed("git", url, f"scratch directory would not go away: {exc}", "filesystem")
     if rc != 0:
