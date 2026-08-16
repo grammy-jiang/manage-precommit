@@ -550,20 +550,26 @@ def is_public_registry(url: str) -> bool:
     )
 
 
-def npm_registry_for(pkg: str) -> str:
-    """The registry npm would ask for THIS package, not the default one.
+def npm_registry_for(pkg: str) -> str | None:
+    """The registry npm would ask for THIS package, or None if it will not say.
 
     `@scope:registry` routes a scoped package on its own while `registry` still
     reads as npmjs -- and every npm package this catalog pins is scoped. Asking
     only the default therefore names the wrong server in the one field SKILL.md
     uses to decide whether a 404 is the user's mirror or a bug in this catalog,
     and names it confidently.
+
+    None, and not `""`, when the answer cannot be had. An empty string flowed
+    into `is_public_registry` and came back False, which reads as "a mirror
+    answered" -- inventing the very fact this field exists to supply, in the
+    direction that sends someone to fix a registry that may be fine. Nothing
+    known is reported as nothing known.
     """
     if pkg.startswith("@") and "/" in pkg:
         scoped = npm_config(f"{pkg.split('/', 1)[0]}:registry")
         if scoped:
             return scoped
-    return npm_config("registry") or ""
+    return npm_config("registry")
 
 
 # node surfaces OpenSSL's certificate-verify strings verbatim, and they are NOT
@@ -727,8 +733,11 @@ def npm_latest(pkg: str) -> str:
             # Asked only here: it costs a subprocess, and only this one cause
             # cannot be acted on without knowing.
             registry = npm_registry_for(name)
-            extra["registry"] = clean(registry)
-            extra["registry_is_public"] = is_public_registry(registry)
+            extra["registry"] = clean(registry or "")
+            # Omitted rather than guessed when npm would not say which registry
+            # it asked. A `False` here is a claim, and SKILL.md acts on it.
+            if registry:
+                extra["registry_is_public"] = is_public_registry(registry)
         pin_failed(
             "npm",
             name,

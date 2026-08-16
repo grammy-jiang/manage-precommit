@@ -1002,6 +1002,38 @@ def test_whether_the_registry_was_npms_own_is_decided_here(
     assert out_json(proc)["registry_is_public"] is public
 
 
+def test_a_registry_npm_will_not_name_is_reported_as_unknown_not_as_a_mirror(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """Not knowing is not the same as knowing it was a mirror.
+
+    npm withholds a registry that carries credentials, and the empty string it
+    left behind went through `is_public_registry` and came back False -- which
+    SKILL.md reads as "their mirror said no", so someone is sent to fix a
+    registry that may be perfectly fine while a real catalog bug goes
+    unreported. The field is now absent rather than false, and `registry` is
+    empty, which the procedure treats as "attribute nothing".
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmcoy",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  echo "The registry option is protected, and can not be retrieved in this way." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == ""
+    assert "registry_is_public" not in got, "a False here is a claim the run cannot make"
+
+
 def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_path, stubs):
     """Honouring the user's registry makes this the ordinary case, not an edge.
 

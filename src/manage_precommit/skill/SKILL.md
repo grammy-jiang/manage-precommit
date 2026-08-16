@@ -218,7 +218,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     package: theirs to fix by pointing npm somewhere that does, and not a bad
     package name — this skill deliberately does not override their registry.
     Only when it is true is the catalog itself wrong, and that is a bug here
-    rather than anything they can do.
+    rather than anything they can do. **An empty `registry`, with no
+    `registry_is_public` beside it, means npm would not say which registry it
+    asked** — it withholds one carrying credentials. Attribute nothing then:
+    report that the package was not found and that the registry could not be
+    identified, and let them check `npm config get registry` themselves.
   - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
     reachability problem and not their repository.
   - `timeout` — a remote answered too slowly rather than not at all. **Say which
