@@ -516,6 +516,24 @@ def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
             id="nothing to redact",
         ),
         pytest.param("mail me at a@b.com", "mail me at a@b.com", id="an at-sign that is not a URL"),
+        # An unescaped @ is legal in userinfo and parsers take the LAST one as
+        # the authority delimiter, so stopping at the first leaves the tail of
+        # the secret behind.
+        pytest.param(
+            "https://user@example.com@host/",
+            "https://***@host/",
+            id="an email-shaped username",
+        ),
+        pytest.param(
+            "https://user:p@ss@host/x",
+            "https://***@host/x",
+            id="an at-sign inside the password",
+        ),
+        pytest.param(
+            "https://host/path@x",
+            "https://host/path@x",
+            id="an at-sign in the path is not userinfo",
+        ),
     ],
 )
 def test_url_credentials_are_removed_before_anything_is_relayed(text, expected):

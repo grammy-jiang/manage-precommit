@@ -236,7 +236,7 @@ def scratch_or_pin_failed(source: str, target: str) -> tempfile.TemporaryDirecto
     classification is the whole point of it.
     """
     try:
-        return tempfile.TemporaryDirectory()
+        holder = tempfile.TemporaryDirectory()
     except OSError as exc:  # pragma: no cover - see above
         pin_failed(
             source,
@@ -245,6 +245,37 @@ def scratch_or_pin_failed(source: str, target: str) -> tempfile.TemporaryDirecto
             "filesystem",
             npm_path=clean(scratch_root()),
         )
+    seal_scratch(holder.name, source, target)
+    return holder
+
+
+def seal_scratch(where: str, source: str, target: str) -> None:
+    """Stop git and npm walking out of the scratch directory into a project.
+
+    Neither can be told to ignore an enclosing one: git discovers the first
+    `.git` above cwd and npm the first `package.json`, and a TMPDIR under
+    anybody's repository -- not only the one being configured -- therefore hands
+    that repository the vote this directory exists to deny it. It can rewrite a
+    catalog URL with `url.<other>.insteadOf` or name the registry, and the pin
+    that comes back looks like any other.
+
+    Both tools stop at the first marker they find, so the scratch is given its
+    own: an empty repository and an empty project, whose configuration is
+    nothing. Sealing rather than refusing, because the location is the
+    environment's to choose -- `/tmp` is itself inside a git repository on at
+    least one machine this was written on -- and a run that can make itself
+    isolated has no business demanding the machine be rearranged.
+
+    Fails closed: an unsealed scratch is not one to pin from.
+    """
+    rc, _, err = git(where, "init", "--quiet", isolated=True)
+    if rc != 0:
+        pin_failed(source, target, f"could not isolate a scratch directory: {err}", "not-isolated")
+    try:
+        for name, body in (("package.json", b"{}\n"), (".npmrc", b"")):
+            atomic_write_bytes(os.path.join(where, name), body)
+    except OSError as exc:  # pragma: no cover - a directory just created
+        pin_failed(source, target, f"could not isolate a scratch directory: {exc}", "not-isolated")
 
 
 def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
@@ -1060,33 +1091,6 @@ def present_keys(cfg: cfgmod.Config | None) -> list[str]:
     return have
 
 
-def refuse_scratch_inside(directory: str) -> None:
-    """Refuse to pin at all if a scratch directory would land in the repository.
-
-    Pinning's isolation from the repository being configured is entirely the
-    scratch cwd: `isolated=True` turns off git's system and global config but
-    not the enclosing worktree's, and npm walks up from cwd for a project
-    `.npmrc`. So a TMPDIR inside that repository hands it exactly the vote the
-    scratch directory exists to deny it -- it can name the server that answers
-    for a catalog URL, and the pin it produces looks like any other.
-
-    Once, before the first version is fetched, which is before anything is
-    written: this refusal always leaves the tree untouched.
-    """
-    with tempfile.TemporaryDirectory() as probe:
-        where = os.path.realpath(probe)
-    root = os.path.realpath(directory)
-    if where == root or where.startswith(root + os.sep):
-        pin_failed(
-            "scratch",
-            root,
-            f"temporary directories land inside the repository being configured "
-            f"({clean(where)}), so version pinning would read that repository's "
-            f"own git and npm configuration. Point TMPDIR outside it.",
-            "not-isolated",
-        )
-
-
 def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
     """The catalog fragment's text, its parsed entry, and the version pinned.
 
@@ -1523,9 +1527,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
-    # Before the first version is fetched, and therefore before anything is
-    # written: the scratch directory is the whole of pinning's isolation.
-    refuse_scratch_inside(directory)
     planned, report, versions, intended = plan(cfg, keys, pre_existing=existing is not None)
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)

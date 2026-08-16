@@ -251,11 +251,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   - `no-version-tags` — the repository answered, and carries no tag that is
     purely a version. Nothing to retry: either this catalog's `rev_repo` is
     wrong, which is a bug here, or upstream has stopped tagging releases.
-  - `not-isolated` — nothing was attempted. Temporary directories land inside
-    the repository being configured, so pinning would read that repository's own
-    git and npm configuration and let it choose which server answers for a
-    catalog URL. `target` names the repository and the message names the path.
-    Tell them to point `TMPDIR` outside the repository and start again.
+  - `not-isolated` — nothing was attempted. The scratch directory pinning works
+    in could not be sealed off from whatever project encloses it, so git or npm
+    might have taken configuration from a repository that has no business
+    choosing which server answers for a catalog URL. The message says what
+    failed. Not the user's configuration to fix — relay it and stop.
   - `unknown` — an npm code with no bucket here. Relay `npm_code` and `detail`
     verbatim and say it is unclassified, rather than picking the nearest label.
 - **anything else** — report it verbatim and end the run. Two of these happen

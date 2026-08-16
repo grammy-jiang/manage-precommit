@@ -1380,27 +1380,111 @@ def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, s
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
-def test_a_tmpdir_inside_the_repo_stops_the_run_before_anything_is_pinned(
-    repo, keys_file, facts_path, stubs, monkeypatch
+def test_a_tmpdir_inside_someones_repository_cannot_reach_the_pin(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
 ):
-    """The scratch cwd is the whole of pinning's isolation, so where it lands
-    decides whether that isolation exists.
+    """The scratch cwd is pinning's isolation, and where it lands is not ours.
 
-    `isolated=True` turns off git's system and global config and not the
-    enclosing worktree's, and npm walks up from cwd for a project `.npmrc` --
-    so a TMPDIR inside the repository being configured hands that repository
-    the vote the scratch directory exists to deny it, and the pin it produces
-    looks like any other. Refused before the first version is fetched, which is
-    before anything is written.
+    git discovers the first `.git` above cwd and npm the first `package.json`,
+    so a TMPDIR under any repository -- the target, or a stranger's -- lets that
+    repository rewrite a catalog URL with `url.<other>.insteadOf` or name the
+    registry, and the pin that comes back looks like any other. `/tmp` is itself
+    a git repository on at least one machine this was written on, so refusing
+    such a TMPDIR would refuse the machine; the scratch is sealed instead, with
+    its own empty repository and empty project for both tools to stop at.
+
+    The stub asks real git, from its own cwd, whether the hostile setting is
+    visible -- so this fails if the seal ever stops working, rather than
+    asserting that a flag was passed.
     """
-    inside = repo / "tmp"
-    inside.mkdir()
-    monkeypatch.setenv("TMPDIR", str(inside))
-    proc = generate(repo, keys_file, facts_path, stubs, "hygiene")
+    hostile = tmp_path / "someones-repo"
+    (hostile / "tmp").mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(hostile)], check=True)
+    subprocess.run(
+        ["git", "-C", str(hostile), "config", "url.https://evil.invalid/.insteadOf", "https://"],
+        check=True,
+    )
+    (hostile / "package.json").write_text("{}\n")
+    (hostile / ".npmrc").write_text("registry=https://evil.invalid/\n")
+
+    fake = tmp_path / "sealcheck"
+    fake.mkdir()
+    g = fake / "git"
+    # `-C <dir>` moves git's idea of where it is, not this script's, so the
+    # check has to be made in that directory or it inspects the wrong one --
+    # which is how the first version of this test passed while proving nothing.
+    g.write_text(
+        "#!/bin/sh\n"
+        'here=""; prev=""; want=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-C" ]; then here="$a"; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then want=yes; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'if [ "$want" = yes ]; then\n'
+        f'  if {REAL_GIT} -C "$here" config --get url.https://evil.invalid/.insteadOf >/dev/null 2>&1\n'
+        "  then\n"
+        '    echo "the enclosing repository is visible from $here" >&2; exit 9\n'
+        "  fi\n"
+        "  printf '%s\\n' "
+        '"1111111111111111111111111111111111111111\trefs/tags/v10.0.1"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    monkeypatch.setenv("TMPDIR", str(hostile / "tmp"))
+
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 0, proc.stderr
+    assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
+
+
+def test_the_scratch_carries_the_marker_npm_stops_at(repo, keys_file, facts_path, stubs, tmp_path):
+    """git's half of the seal and npm's are separate, and so are their proofs.
+
+    npm walks up for a `package.json` and reads the `.npmrc` beside it, so the
+    scratch needs both of its own or the enclosing project's registry is the one
+    it asks. The stub checks its own cwd, which is the scratch, rather than
+    trusting that planting them happened.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmsealed",
+        "#!/bin/sh\n"
+        '[ -f "$PWD/package.json" ] || { echo "no package.json in the scratch" >&2; exit 9; }\n'
+        '[ -f "$PWD/.npmrc" ] || { echo "no .npmrc in the scratch" >&2; exit 9; }\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_a_scratch_that_cannot_be_sealed_stops_the_run(repo, keys_file, facts_path, tmp_path):
+    """An unsealed scratch is not one to pin from.
+
+    If the seal cannot be applied there is no isolation, and pinning anyway
+    would produce a version that looks exactly like a trustworthy one. Fails
+    closed, before any version is fetched and so before anything is written.
+    """
+    fake = tmp_path / "gitnoinit"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "init" ]; then echo "fatal: cannot init" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
     assert proc.returncode == 6, proc.stderr
-    got = out_json(proc)
-    assert got["cause"] == "not-isolated"
-    assert got["source"] == "scratch"
+    assert out_json(proc)["cause"] == "not-isolated"
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
