@@ -955,7 +955,8 @@ def test_whether_the_registry_was_npms_own_is_decided_here(
         'if [ "$1" = "config" ]; then\n'
         '  case "$3" in\n'
         "    @*:registry) echo undefined ;;\n"
-        f'    *) echo "{answered}" ;;\n'
+        # Quoted, because `--json` is passed and this is what npm answers with.
+        f"    *) printf '\"{answered}\"\\n' ;;\n"
         "  esac\n"
         "  exit 0\n"
         "fi\n"
@@ -1214,6 +1215,55 @@ def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(
     assert cache
     assert cache != "/root/.npm"
     assert not os.path.exists(cache), "temporary npm cache should be cleaned up"
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_the_pin_asks_for_latest_and_for_a_shape_it_chose(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """npm reads the tag AND the output format out of the user's .npmrc.
+
+    `tag=next` makes `npm view <pkg> version` answer for that tag instead, and
+    a prerelease that happens to look like a version is written into their
+    config as though it were the latest release -- the quiet half. `json=true`
+    is the loud half: every answer comes back quoted, the version check calls a
+    perfectly good lookup garbage, and mermaid can never be installed at all.
+
+    Both are asked for explicitly rather than hoped for, so the stub refuses
+    anything else and answers in JSON as npm would.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmspec",
+        "#!/bin/sh\n"
+        'case " $* " in *" @mermaid-js/mermaid-cli@latest "*) ;; *)\n'
+        '  echo "asked for the configured tag, not latest" >&2; exit 5;; esac\n'
+        'case " $* " in *" --json "*) ;; *) echo "no --json" >&2; exit 6;; esac\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_an_npm_that_ignores_the_format_flag_still_works(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The flag is prevention, and prevention that has no fallback is a bet.
+
+    An npm old or odd enough to print a bare version despite `--json` should
+    keep working rather than fail in a new way -- the parse falls back to the
+    raw text, which is what every npm printed before this branch existed.
+    """
+    fake = _fake_bin(tmp_path, "npmbare", f"#!/bin/sh\necho {NPM_VERSION}\n")
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
     assert (
         f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
     )

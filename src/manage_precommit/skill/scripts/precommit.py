@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -343,6 +344,29 @@ NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
 )
 
 
+def npm_scalar(out: str) -> str:
+    """npm's answer as a plain string, whether or not it came back as JSON.
+
+    The format is asked for rather than assumed. A `json=true` in a user or
+    global .npmrc -- configuration this deliberately honours -- otherwise quotes
+    every value npm prints, and the version check then rejects a perfectly good
+    lookup as garbage and refuses to write anything at all. Asking for `--json`
+    and parsing makes the shape ours instead of theirs, and covers `parseable`
+    and `long` in the same move rather than one config at a time.
+
+    Falling back to the raw text, because an npm that does not honour the flag
+    should keep working rather than fail differently.
+    """
+    text = out.strip()
+    if not text:
+        return ""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    return value if isinstance(value, str) else ""
+
+
 def npm_fields(stderr: str) -> dict[str, str]:
     """npm's `code`/`syscall`/`path` lines, last one winning."""
     return {key: value.strip() for key, value in NPM_FIELD_RE.findall(ANSI_RE.sub("", stderr))}
@@ -464,9 +488,22 @@ def npm_latest(pkg: str) -> str:
         with tempfile.TemporaryDirectory() as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")
             out = subprocess.run(
-                # --no-color beats a `color=always` config, which would
-                # otherwise put escapes through the middle of `npm error code`.
-                ["npm", "view", name, "version", "--cache", cache, "--no-color"],
+                # Every part of this is spelled out because each is otherwise
+                # taken from the user's npm configuration, which this honours:
+                # `@latest` because a `tag=next` would pin whatever that points
+                # at, `--json` because `json=true` quotes the answer, and
+                # `--no-color` because `color=always` writes escapes through the
+                # middle of `npm error code`.
+                [
+                    "npm",
+                    "view",
+                    f"{name}@latest",
+                    "version",
+                    "--cache",
+                    cache,
+                    "--json",
+                    "--no-color",
+                ],
                 cwd=elsewhere,
                 capture_output=True,
                 text=True,
@@ -516,7 +553,7 @@ def npm_latest(pkg: str) -> str:
             detail=detail,
             **extra,
         )
-    version = out.stdout.strip()
+    version = npm_scalar(out.stdout)
     if not VER_RE.match(version):
         answered = bounded_err(version)
         pin_failed(
@@ -1528,6 +1565,7 @@ def npm_config(key: str) -> str | None:
                     "config",
                     "get",
                     refuse_option_like(key, "npm config key", die),
+                    "--json",
                     "--no-color",
                 ],
                 cwd=elsewhere,
@@ -1541,7 +1579,7 @@ def npm_config(key: str) -> str | None:
         return None
     if out.returncode != 0:
         return None
-    value = out.stdout.strip()
+    value = npm_scalar(out.stdout)
     # npm prints the string `undefined` for a config it has no value for.
     return value if value and value != "undefined" else None
 
