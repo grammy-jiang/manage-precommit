@@ -1096,6 +1096,62 @@ def test_the_path_survives_when_json_supplied_the_code(
     assert got["npm_path"] == "/tmp/x/npm-cache", "the stream that has it is the one it came on"
 
 
+def test_the_path_survives_a_renamed_log_heading(repo, keys_file, facts_path, tmp_path, stubs):
+    """The word at the front of every npm log line is the user's to choose.
+
+    Reading the cause from the JSON object fixed `heading=corp` for
+    classification, but `path` is only ever on stderr, so a pattern anchored on
+    `npm` still lost it -- and an empty `npm_path` is documented as "the scratch
+    directory could not be made", which is a different failure from a write
+    inside one that was. Two earlier fixes leaving a gap between them.
+
+    The stub answers with a renamed heading *despite* being asked for
+    `--heading=npm`, which is the case the flag cannot cover: an npm that does
+    not honour it. The flag itself is pinned by the sibling test.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmheading",
+        "#!/bin/sh\n"
+        'printf "corp error path /tmp/pin/npm-cache\\n" >&2\n'
+        'printf \'%s\' \'{"error":{"code":"EACCES","summary":"denied"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "filesystem"
+    assert got["npm_path"] == "/tmp/pin/npm-cache"
+
+
+def test_the_pin_asks_npm_for_a_stable_log_heading(repo, keys_file, facts_path, tmp_path, stubs):
+    """Prevention as well as recovery, since the loosened pattern is a fallback
+    and a fallback nobody needs is cheaper than one everybody does.
+
+    The decoy line guards the other direction: loosening the prefix must not
+    become matching any sentence that happens to contain the word `path`, which
+    would take a warning's filename over the one npm reported the error for.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmheadflag",
+        "#!/bin/sh\n"
+        'case " $* " in *" --heading=npm "*) ;; *) echo "no --heading" >&2; exit 8;; esac\n'
+        'printf "npm error code EACCES\\nnpm error path /tmp/pin/npm-cache\\n" >&2\n'
+        # A decoy after the real line, because these are read last-one-wins: a
+        # pattern loose enough to match ordinary prose would take this instead.
+        'printf "npm warn deprecated check the path /not/the/cache\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "filesystem"
+    assert got["npm_path"] == "/tmp/pin/npm-cache"
+
+
 def test_the_json_copy_wins_where_the_two_streams_disagree(
     repo, keys_file, facts_path, tmp_path, stubs
 ):

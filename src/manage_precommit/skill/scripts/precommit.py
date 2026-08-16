@@ -353,7 +353,12 @@ def latest_tag(repo_url: str) -> str:
 # locale. Both prefixes are matched because npm 8 and earlier print `npm ERR!`
 # where npm 9 and later print `npm error`, and a tool that exists to pin
 # versions outlives one npm major.
-NPM_FIELD_RE = re.compile(r"^npm (?:ERR!|error) (code|syscall|path) (.+)$", re.M)
+#
+# `\S+` and not `npm`, because the word at the front is the `heading` config and
+# a user may set it to anything. `--heading=npm` is passed as well; this is the
+# half that holds when a flag is not honoured, the way the ANSI strip backs up
+# `--no-color`.
+NPM_FIELD_RE = re.compile(r"^\S+ (?:ERR!|error) (code|syscall|path) (.+)$", re.M)
 
 # npm colours that prefix, and `color=always` in a user or global .npmrc makes
 # it do so into a pipe -- which this deliberately honours, like the rest of
@@ -684,6 +689,10 @@ def npm_latest(pkg: str) -> str:
                         # `loglevel=silent` otherwise leaves nothing on stderr
                         # to fall back to, and nothing to quote to the user.
                         "--loglevel=error",
+                        # The word npm puts at the front of every log line, which
+                        # is otherwise theirs to choose -- and `path` is only
+                        # ever on stderr, so losing the prefix loses the field.
+                        "--heading=npm",
                     ],
                     cwd=elsewhere,
                     capture_output=True,
