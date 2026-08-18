@@ -550,6 +550,36 @@ def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
             id="userinfo and query together",
         ),
         pytest.param("https://host/x#frag", "https://host/x#***", id="a fragment"),
+        # An apostrophe is a valid sub-delimiter in userinfo and in a query, so
+        # treating it as a delimiter truncated the match inside the credential:
+        # the first of these went out untouched and the second went out looking
+        # redacted with the tail of the secret still on it.
+        pytest.param(
+            "https://sec'ret@host/", "https://***@host/", id="an apostrophe in the credential"
+        ),
+        pytest.param(
+            "https://host/?token=sec'ret",
+            "https://host/?***",
+            id="an apostrophe in the query token",
+        ),
+        pytest.param(
+            "said 'https://a@h/x' ok",
+            "said 'https://***@h/x' ok",
+            id="a quoted URL still keeps its quotes",
+        ),
+        pytest.param(
+            'json "https://a@h/x" end',
+            'json "https://***@h/x" end',
+            id="a double-quoted URL is not swallowed",
+        ),
+        # With a query, and that is the case that tells the two delimiters
+        # apart: `"` still ends the match so the closing quote survives the
+        # truncation, where the apostrophe deliberately does not.
+        pytest.param(
+            'npm said "https://h/?k=v" once',
+            'npm said "https://h/?***" once',
+            id="a double-quoted URL with a query keeps its quote",
+        ),
         pytest.param(
             "a https://u@h1/?k=1 and https://v@h2/?k=2 b",
             "a https://***@h1/?*** and https://***@h2/?*** b",

@@ -348,10 +348,23 @@ MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 # sits between `://` and `@` is a username, a token, or a user:password pair,
 # and none of the three has any business in a string that is about to become an
 # agent's context and somebody's session log.
-# Any URL in relayed text, stopping at whitespace or a quote. Matched whole,
-# because the parts that can carry a secret are not all in one place: userinfo
-# before the authority, and a token in a query or fragment after it.
-URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"'<>]+")
+# Any URL in relayed text. Matched whole, because the parts that can carry a
+# secret are not all in one place: userinfo before the authority, and a token in
+# a query or fragment after it.
+#
+# What ends the match is only what cannot appear in a URI -- whitespace, and the
+# `"` `<` `>` that text uses to wrap one. An apostrophe is NOT excluded, however
+# much it looks like a delimiter: it is a valid sub-delimiter in userinfo and in
+# a query, so excluding it truncated the match inside the credential. That left
+# `https://sec'ret@host/` untouched, and `?token=sec'ret` as `?***'ret` -- which
+# is the worse of the two, because it looks redacted.
+#
+# The cost is that a single-quoted URL carrying a query loses its closing quote:
+# `'https://h/?k=v'` relays as `'https://h/?***`. Left that way on purpose --
+# putting the quote back means keeping a trailing apostrophe that the URL might
+# equally have owned, and one character of a secret is worse than one unbalanced
+# quote in an error message.
+URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"<>]+")
 
 
 def _redact_one_url(match: re.Match[str]) -> str:
