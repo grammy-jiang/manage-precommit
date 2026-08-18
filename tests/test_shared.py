@@ -550,6 +550,14 @@ def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
             id="userinfo and query together",
         ),
         pytest.param("https://host/x#frag", "https://host/x#***", id="a fragment"),
+        # A question mark is legal fragment data, so looking for `?` first cut
+        # after the secret and left it in front of a `***` claiming otherwise.
+        pytest.param(
+            "https://host/#token=sekrit?next",
+            "https://host/#***",
+            id="a question mark inside the fragment",
+        ),
+        pytest.param("https://host?a#b", "https://host?***", id="query first, no path between"),
         # An apostrophe is a valid sub-delimiter in userinfo and in a query, so
         # treating it as a delimiter truncated the match inside the credential:
         # the first of these went out untouched and the second went out looking

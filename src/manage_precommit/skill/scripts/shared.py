@@ -389,11 +389,13 @@ def _redact_one_url(match: re.Match[str]) -> str:
     authority, tail = rest[:end], rest[end:]
     if "@" in authority:
         authority = "***@" + authority.rsplit("@", 1)[1]
-    for ch in "?#":
-        at = tail.find(ch)
-        if at >= 0:
-            tail = tail[:at] + ch + "***"
-            break
+    # The EARLIEST of the two, not `?` first. A fragment may legally contain a
+    # question mark, so `#token=sekrit?next` was cut at the `?` -- leaving the
+    # fragment's secret in front of a `***` that says it was handled.
+    cuts = [at for at in (tail.find("?"), tail.find("#")) if at >= 0]
+    if cuts:
+        at = min(cuts)
+        tail = tail[:at] + tail[at] + "***"
     return scheme + sep + authority + tail
 
 
