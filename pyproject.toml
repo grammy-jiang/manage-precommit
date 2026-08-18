@@ -54,7 +54,7 @@ dev = [
     # changes between releases, so a floor means a ruff release can turn
     # `ruff format --check` red on code nobody touched. The version moves when
     # somebody decides to move it, not when PyPI publishes.
-    "ruff==0.16.1",
+    "ruff==0.16.2",
     "mypy>=1.8",
     # Test-only, both of them. SKILL.md's frontmatter is a contract with any
     # host that reads the Agent Skills format, and those hosts parse it with a
