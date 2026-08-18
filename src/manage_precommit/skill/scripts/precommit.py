@@ -282,7 +282,13 @@ def try_seal(where: str) -> str:
     `npm_config` asks npm a question and degrades to "no answer"; turning a
     failure there into exit 6 would report a pin failure for a probe.
     """
-    rc, _, err = git(where, "init", "--quiet", isolated=True)
+    # `--template=` empty, because `git init` copies a template directory into
+    # the new repository and that template may contain a `config`. `isolated`
+    # turns off the system and global files; GIT_TEMPLATE_DIR is a third way in
+    # that it does not cover, and a template carrying `url.<other>.insteadOf`
+    # would be copied straight into the repository this seal just created --
+    # defeating the seal with the very command that applies it.
+    rc, _, err = git(where, "init", "--quiet", "--template=", isolated=True)
     if rc != 0:
         return err or "git init failed"
     try:

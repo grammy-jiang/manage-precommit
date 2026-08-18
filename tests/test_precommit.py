@@ -1415,6 +1415,56 @@ def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, s
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_a_git_template_cannot_smuggle_config_into_the_seal(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """The command that applies the seal can carry the thing it seals against.
+
+    `git init` copies a template directory into the new repository, and that
+    template may hold a `config`. `isolated` turns off the system and global
+    files; GIT_TEMPLATE_DIR is a third way in that it does not cover, so a
+    template carrying `url.<other>.insteadOf` was copied straight into the
+    scratch repository the seal had just made -- leaving the seal in place and
+    the redirect inside it.
+
+    The stub asks real git, in the directory git was pointed at, so this fails
+    if `--template=` is ever dropped rather than asserting that a flag was
+    passed.
+    """
+    tpl = tmp_path / "tpl"
+    tpl.mkdir()
+    (tpl / "config").write_text('[url "https://evil.invalid/"]\n\tinsteadOf = https://\n')
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(tpl))
+
+    fake = tmp_path / "templatecheck"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'here=""; prev=""; want=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-C" ]; then here="$a"; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then want=yes; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'if [ "$want" = yes ]; then\n'
+        f'  if {REAL_GIT} -C "$here" config --get url.https://evil.invalid/.insteadOf >/dev/null 2>&1\n'
+        "  then\n"
+        '    echo "the template config is inside the sealed scratch $here" >&2; exit 9\n'
+        "  fi\n"
+        "  printf '%s\\n' "
+        '"1111111111111111111111111111111111111111\trefs/tags/v10.0.1"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 0, proc.stderr
+    assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
+
+
 def test_a_tmpdir_inside_someones_repository_cannot_reach_the_pin(
     repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
 ):
