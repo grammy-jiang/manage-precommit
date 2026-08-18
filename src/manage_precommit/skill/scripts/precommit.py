@@ -661,10 +661,20 @@ def npm_registry_for(pkg: str) -> str | None:
     known is reported as nothing known.
     """
     if pkg.startswith("@") and "/" in pkg:
-        scoped = npm_config(f"{pkg.split('/', 1)[0]}:registry")
+        answered, scoped = npm_config(f"{pkg.split('/', 1)[0]}:registry")
+        if not answered:
+            # Not the same as unset. Falling through here would name the default
+            # registry as the one that served a scoped package whose routing
+            # could not be read -- and a private mirror reported as npmjs sends
+            # the user to blame this catalog.
+            return None
         if scoped:
             return scoped
-    return npm_config("registry")
+    # No `answered` guard on this one: a query npm would not answer yields None
+    # for the value too, so the fallback is already "nothing known". The scoped
+    # guard above is the load-bearing one, because there a refusal would
+    # otherwise fall THROUGH to a different question.
+    return npm_config("registry")[1]
 
 
 # node surfaces OpenSSL's certificate-verify strings verbatim, and they are NOT
@@ -1857,8 +1867,14 @@ def creatable_dir(path: str) -> bool:
         probe = parent
 
 
-def npm_config(key: str) -> str | None:
-    """What npm says one of its settings is, or None if it will not say.
+def npm_config(key: str) -> tuple[bool, str | None]:
+    """Whether npm answered, and what it said.
+
+    Two outcomes, not one. `None` alone meant both "npm says this is unset" and
+    "npm would not tell me", and a caller that falls back on the first is wrong
+    to fall back on the second -- a scoped key that could not be read is not a
+    scoped key that is absent, and treating it as absent names the default
+    registry as the one that served a package it never saw.
 
     Asked rather than reconstructed. npm resolves each of these from the command
     line, the environment, a user `.npmrc` and a global one, in that order, and
@@ -1877,7 +1893,7 @@ def npm_config(key: str) -> str | None:
             # than the one npm asked. A probe that cannot be isolated answers
             # nothing rather than answering wrongly.
             if try_seal(elsewhere):
-                return None
+                return False, None
             out = subprocess.run(
                 [
                     "npm",
@@ -1895,16 +1911,17 @@ def npm_config(key: str) -> str | None:
                 timeout=90,
             )
     except (OSError, subprocess.SubprocessError):
-        return None
+        return False, None
     if out.returncode != 0:
-        return None
+        return False, None
     value = npm_scalar(out.stdout)
     # npm prints the string `undefined` for a config it has no value for.
-    return value if value and value != "undefined" else None
+    return True, (value if value and value != "undefined" else None)
 
 
 def npm_cache_dir() -> str | None:
-    return npm_config("cache")
+    _, value = npm_config("cache")
+    return value
 
 
 def npm_cache_env(cfg: cfgmod.Config | None, scratch: str) -> dict[str, str] | None:

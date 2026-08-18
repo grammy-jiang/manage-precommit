@@ -1096,6 +1096,76 @@ def test_a_token_in_the_registry_query_is_not_relayed(repo, keys_file, facts_pat
     assert got["registry_is_public"] is False
 
 
+def test_an_empty_scoped_answer_means_unset_and_does_fall_back(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The other half of the tri-state: answered-with-nothing is not refused.
+
+    npm printing nothing for a key is npm saying the key is unset, and the
+    default registry is then the right one to report. Reading that as "could not
+    ask" would throw away an answer the run actually has -- the opposite error
+    to the one its sibling test guards, and equally a wrong report.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmscopedempty",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo ;;\n"
+        "    *) printf '\"https://npm.corp.invalid/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["registry"] == "https://npm.corp.invalid/"
+    assert got["registry_is_public"] is False
+
+
+def test_a_scoped_lookup_that_fails_does_not_fall_back_to_the_default(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """A scoped key that could not be read is not a scoped key that is absent.
+
+    npm answering "unset" and npm refusing to answer both arrived as `None`, and
+    the fallback treated them alike -- so a wrapper that rejects scoped config
+    queries made the default registry look like the one that served a scoped
+    package it never saw. With the default being npmjs, that reports
+    `registry_is_public=true` for a private mirror's 404 and sends the user to
+    blame this catalog.
+
+    Only the scoped query fails here; the default one answers perfectly well,
+    which is what makes the fallback look reasonable and be wrong.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmscopedfail",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        '    @*:registry) echo "scoped config is not permitted here" >&2; exit 1 ;;\n'
+        "    *) printf '\"https://registry.npmjs.org/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "", "a registry that could not be determined must not be named"
+    assert "registry_is_public" not in got, "and must not be called npmjs"
+
+
 def test_a_registry_npm_will_not_name_is_reported_as_unknown_not_as_a_mirror(
     repo, keys_file, facts_path, tmp_path, stubs
 ):
