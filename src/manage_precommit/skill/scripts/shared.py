@@ -317,6 +317,29 @@ def porcelain_path(line: str) -> str:
     return path
 
 
+# `git rev-parse --local-env-vars` on git 2.55.0 -- git's own answer to "what in
+# the environment selects a repository or supplies configuration". Written out
+# rather than queried so that isolation costs no subprocess, and paired with a
+# check that the seal actually landed, which catches anything a later git adds
+# to this list.
+GIT_LOCAL_ENV_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
 
 
@@ -526,6 +549,16 @@ def make_git(
             # inside any repository.
             env["GIT_CONFIG_NOSYSTEM"] = "1"
             env["GIT_CONFIG_GLOBAL"] = os.devnull
+            # And every variable that picks a repository or injects settings.
+            # GIT_DIR is the sharp one: exported, `git -C <elsewhere> init`
+            # reinitialises *that* repository, reports success, and leaves
+            # nothing behind in the directory that was supposed to be sealed --
+            # so the seal reads as applied while the other repository's config
+            # is still the one in force. GIT_CONFIG_COUNT and
+            # GIT_CONFIG_PARAMETERS are config injection outright, which no
+            # amount of turning off files defends against.
+            for name in GIT_LOCAL_ENV_VARS:
+                env.pop(name, None)
         # diff.external gets a flag, not a `-c`. Setting it empty does NOT
         # disable it: git then tries to EXEC the empty string and every diff
         # dies with "cannot run :". `--no-ext-diff` is the mechanism that works,

@@ -1415,6 +1415,85 @@ def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, s
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_a_git_init_that_seals_nothing_is_not_believed(repo, keys_file, facts_path, tmp_path):
+    """Exit zero is not evidence that this directory was sealed.
+
+    `git init` reports success for repositories other than the one asked for --
+    an exported GIT_DIR was one way, and clearing those variables closes that
+    way rather than the shape of it. The check is what notices a later git
+    growing a route nobody here knows about, so it is tested on its own terms:
+    a git that says yes and does nothing.
+    """
+    fake = tmp_path / "gitlyinginit"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "init" ]; then exit 0; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-isolated"
+    assert "left no repository" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_an_exported_git_dir_cannot_hollow_out_the_seal(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """`git init` reports success for a repository other than the one asked for.
+
+    With GIT_DIR exported, `git -C <scratch> init` reinitialises *that*
+    repository, exits 0, and leaves nothing in the scratch directory -- so the
+    seal read as applied while the other repository's config was still the one
+    in force, and its `url.<other>.insteadOf` could still redirect the lookup.
+    A guard that reports success having done nothing is worse than no guard.
+
+    The stub checks the two things that were false: that the lookup runs with no
+    repository-selecting variable in its environment, and that the scratch
+    really does hold a repository of its own.
+    """
+    external = tmp_path / "external"
+    external.mkdir()
+    subprocess.run(["git", "-C", str(external), "init", "--quiet"], check=True)
+    subprocess.run(
+        ["git", "-C", str(external), "config", "url.https://evil.invalid/.insteadOf", "https://"],
+        check=True,
+    )
+    monkeypatch.setenv("GIT_DIR", str(external / ".git"))
+
+    fake = tmp_path / "gitdircheck"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'here=""; prev=""; want=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-C" ]; then here="$a"; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then want=yes; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'if [ "$want" = yes ]; then\n'
+        '  [ -z "${GIT_DIR:-}" ] || { echo "GIT_DIR survived into the lookup" >&2; exit 9; }\n'
+        '  [ -e "$here/.git" ] || { echo "the scratch $here holds no repository" >&2; exit 9; }\n'
+        "  printf '%s\\n' "
+        '"1111111111111111111111111111111111111111\trefs/tags/v10.0.1"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 0, proc.stderr
+    assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
+
+
 def test_a_git_template_cannot_smuggle_config_into_the_seal(
     repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
 ):

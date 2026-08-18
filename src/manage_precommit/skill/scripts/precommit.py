@@ -291,6 +291,13 @@ def try_seal(where: str) -> str:
     rc, _, err = git(where, "init", "--quiet", "--template=", isolated=True)
     if rc != 0:
         return err or "git init failed"
+    # Checked, not assumed. `git init` reports success for repositories other
+    # than the one asked for -- an exported GIT_DIR sends it somewhere else
+    # entirely -- so the exit code says a repository was initialised, not that
+    # THIS directory was. `isolated` clears those variables; this is what
+    # notices if a later git grows one it does not know about.
+    if not os.path.isdir(os.path.join(where, ".git")):
+        return "git init reported success but left no repository in the scratch directory"
     try:
         for name, body in (("package.json", b"{}\n"), (".npmrc", b"")):
             atomic_write_bytes(os.path.join(where, name), body)
