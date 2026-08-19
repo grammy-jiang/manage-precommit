@@ -1353,6 +1353,54 @@ def test_the_path_survives_a_renamed_log_heading(repo, keys_file, facts_path, tm
     assert got["npm_path"] == "/tmp/pin/npm-cache"
 
 
+def test_both_npm_calls_refuse_to_be_a_workspace_member(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """A sealed scratch inside a workspace stops being sealed.
+
+    npm decides membership from the ROOT's glob, not from the member, so a
+    TMPDIR under `packages/` in a repo with `workspaces: ["packages/*"]` makes
+    the scratch a member -- and a member's project config is the root's, not the
+    two files planted beside it. Observed on npm 10.9.8: `npm view` in that
+    position answers nothing at all, and `npm config get` refuses outright;
+    npm 11 is reported to answer from the workspace's `.npmrc` instead, which is
+    the same seal failing more quietly.
+
+    Both npm calls are checked, because the pin and the registry probe are
+    separate commands and only one of them was covered when this was written.
+    """
+    root = tmp_path / "wsroot"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    (root / ".npmrc").write_text("registry=https://evil.invalid/\n")
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+
+    fake = _fake_bin(
+        tmp_path,
+        "npmworkspace",
+        "#!/bin/sh\n"
+        'case " $* " in *" --no-workspaces "*) ;; *)\n'
+        '  echo "asked without --no-workspaces: $*" >&2; exit 9;; esac\n'
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.npmjs.org/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    # Reached the registry probe, which means the pin call carried the flag too:
+    # without it the stub exits 9 and the cause would be `unknown`.
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://registry.npmjs.org/"
+
+
 def test_the_pin_asks_npm_for_a_stable_log_heading(repo, keys_file, facts_path, tmp_path, stubs):
     """Prevention as well as recovery, since the loosened pattern is a fallback
     and a fallback nobody needs is cheaper than one everybody does.

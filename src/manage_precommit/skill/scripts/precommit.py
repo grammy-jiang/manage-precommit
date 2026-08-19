@@ -796,6 +796,13 @@ def npm_latest(pkg: str) -> str:
                         # is otherwise theirs to choose -- and `path` is only
                         # ever on stderr, so losing the prefix loses the field.
                         "--heading=npm",
+                        # A scratch under a workspace root whose glob covers it
+                        # is read as a member, and a member's project config is
+                        # the ROOT's -- so the two files planted in the scratch
+                        # stop being the ones npm reads. On npm 10 this command
+                        # then answers nothing at all; npm 11 is reported to
+                        # answer from the workspace's .npmrc, which is worse.
+                        "--no-workspaces",
                     ],
                     cwd=elsewhere,
                     capture_output=True,
@@ -1906,6 +1913,9 @@ def npm_config(key: str) -> tuple[bool, str | None]:
                     refuse_option_like(key, "npm config key", die),
                     "--json",
                     "--no-color",
+                    # See npm_latest: a sealed scratch inside a workspace is a
+                    # member, and a member reads the root's config.
+                    "--no-workspaces",
                 ],
                 cwd=elsewhere,
                 capture_output=True,
