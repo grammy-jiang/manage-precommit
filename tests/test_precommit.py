@@ -1245,6 +1245,69 @@ def test_a_pin_refuses_when_the_global_config_cannot_be_pinned(
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_a_symlinked_root_manifest_still_counts_as_a_workspace(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """ "Could not read it" is not "there is nothing there".
+
+    npm follows a symlinked `package.json` quite happily; this reader refuses
+    one on a rule of its own. Counting that refusal as proof of no workspace let
+    an enclosing project redirect the pin it was supposed to be isolated from --
+    the same conflation of "no" with "don't know" that has bitten this branch
+    elsewhere, here between a reader's policy and a fact about the filesystem.
+
+    The stub demands `--prefix`, so this passes only if the unreadable manifest
+    was treated as a root.
+    """
+    root = tmp_path / "symlinkws"
+    (root / "packages").mkdir(parents=True)
+    real = tmp_path / "elsewhere-manifest.json"
+    real.write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    (root / "package.json").symlink_to(real)
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+
+    fake = _fake_bin(
+        tmp_path,
+        "npmsymlinkws",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then printf \'"/etc/npmrc"\\n\'; exit 0; fi\n'
+        'case " $* " in *" --prefix "*) ;; *)\n'
+        '  echo "a symlinked root was read as no workspace: $*" >&2; exit 9;; esac\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_an_unparseable_manifest_declares_nothing(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The other half, and it goes the other way.
+
+    A `package.json` that will not parse is not one npm would honour either, so
+    it declares no workspace and must not drag in `--prefix` and the globalconfig
+    question behind it. Unreadable and unparseable are different answers.
+    """
+    root = tmp_path / "brokenws"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text("{ this is not json\n")
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmbrokenws",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then echo "refused" >&2; exit 1; fi\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_a_workspaces_key_with_no_members_is_not_a_workspace(
     repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
 ):

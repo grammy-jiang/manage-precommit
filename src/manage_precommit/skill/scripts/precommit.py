@@ -1934,17 +1934,31 @@ def inside_a_workspace(where: str) -> bool:
     making every pin depend on it turned an unanswerable probe into a refusal
     for machines that were never at risk.
 
-    A manifest that will not parse is not one npm would honour either, so it
-    declares nothing here. The scratch's own manifest is skipped: the seal
-    plants it, and it names no workspaces.
+    A manifest that will not PARSE is not one npm would honour either, so it
+    declares nothing. A manifest that could not be READ is a different answer
+    and gets the opposite treatment: npm follows a symlinked `package.json`
+    quite happily, and this reader refuses one on a rule of its own -- so
+    "I could not look" was being counted as "there is nothing there", which is
+    how an enclosing workspace with a symlinked root went undetected and
+    redirected the pin it was supposed to be isolated from.
+
+    Unreadable therefore means "assume a root". The cost is a `--prefix` and
+    the question behind it; the alternative cost is the isolation itself.
+
+    The scratch's own manifest is skipped: the seal plants it, and it names no
+    workspaces.
     """
     probe = os.path.dirname(os.path.realpath(where))
     while True:
         manifest = os.path.join(probe, "package.json")
         if os.path.isfile(manifest):
             try:
-                data = json.loads(read_bytes_nofollow(manifest, max_bytes=1 << 20))
-            except (OSError, ValueError, SymlinkRefused, NotARegularFile, TooLarge):
+                raw = read_bytes_nofollow(manifest, max_bytes=1 << 20)
+            except (OSError, SymlinkRefused, NotARegularFile, TooLarge):
+                return True
+            try:
+                data = json.loads(raw)
+            except ValueError:
                 data = None
             if isinstance(data, dict) and data.get("workspaces"):
                 return True
