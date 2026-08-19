@@ -806,8 +806,7 @@ def npm_latest(pkg: str) -> str:
                         # `workspace=` selector, which a user or global .npmrc
                         # may set and this cannot rewrite. `--prefix` conflicts
                         # with nothing.
-                        "--prefix",
-                        elsewhere,
+                        *npm_root_args(elsewhere),
                     ],
                     cwd=elsewhere,
                     capture_output=True,
@@ -1883,7 +1882,33 @@ def creatable_dir(path: str) -> bool:
         probe = parent
 
 
-def npm_config(key: str) -> tuple[bool, str | None]:
+def npm_root_args(elsewhere: str, rooted: bool = True) -> list[str]:
+    """`--prefix`, and the global config file that `--prefix` might displace.
+
+    `--prefix` is what stops a scratch inside a workspace being read as a
+    member, whose project config is the ROOT's rather than the files planted
+    beside it. But npm documents `globalconfig` as defaulting to
+    `{prefix}/etc/npmrc`, so naming a prefix can silently move which global
+    file is read -- and the user's registry, proxy and credentials may live
+    only in that file, which this deliberately honours everywhere else.
+
+    So the path is pinned to whatever npm says it is when not asked to move.
+    Not reproduced on npm 10.9.8, where `--prefix` leaves globalconfig alone
+    and a planted `<prefix>/etc/npmrc` is ignored; kept because the
+    documentation defines it the other way, the cost is one question, and the
+    failure it prevents is silently ignoring the mirror a user is required to
+    go through.
+    """
+    if not rooted:
+        return []
+    args = ["--prefix", elsewhere]
+    answered, path = npm_config("globalconfig", rooted=False)
+    if answered and path:
+        args += ["--globalconfig", path]
+    return args
+
+
+def npm_config(key: str, *, rooted: bool = True) -> tuple[bool, str | None]:
     """Whether npm answered, and what it said.
 
     Two outcomes, not one. `None` alone meant both "npm says this is unset" and
@@ -1900,6 +1925,10 @@ def npm_config(key: str) -> tuple[bool, str | None]:
 
     Run in a scratch directory for the same reason `npm_latest` is: the
     repository being configured must not get a vote via its own `.npmrc`.
+
+    `rooted=False` asks without `--prefix`, which is how the globalconfig path
+    that `--prefix` might move is learned in the first place. One level only:
+    the unrooted call adds no flags and so asks nothing further.
     """
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
@@ -1918,10 +1947,7 @@ def npm_config(key: str) -> tuple[bool, str | None]:
                     refuse_option_like(key, "npm config key", die),
                     "--json",
                     "--no-color",
-                    # See npm_latest: a sealed scratch inside a workspace is
-                    # a member, and a member reads the root's config.
-                    "--prefix",
-                    elsewhere,
+                    *npm_root_args(elsewhere, rooted),
                 ],
                 cwd=elsewhere,
                 capture_output=True,

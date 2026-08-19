@@ -1373,6 +1373,12 @@ def test_both_npm_calls_refuse_to_be_a_workspace_member(
     and then refuses to run at all beside an inherited `workspace=` selector,
     which a user or global .npmrc may set and this cannot rewrite. Naming the
     project root outright conflicts with nothing.
+
+    And `--globalconfig` beside it, because npm documents that file as living
+    under the prefix -- so naming a prefix can move which global npmrc is read,
+    and the user's registry or proxy may live only there. The stub checks that
+    the probe which learns that path is itself unrooted, since a rooted one
+    would be asking the question it exists to answer.
     """
     root = tmp_path / "wsroot"
     (root / "packages").mkdir(parents=True)
@@ -1386,8 +1392,19 @@ def test_both_npm_calls_refuse_to_be_a_workspace_member(
         "#!/bin/sh\n"
         # The scratch is what --prefix must name, and the stub is run with the
         # scratch as its cwd -- so this checks the value, not just the flag.
+        # The globalconfig probe is the one call that must NOT be rooted --
+        # it is how the path --prefix might displace is learned.
+        'if [ "$3" = "globalconfig" ]; then\n'
+        '  case " $* " in *" --prefix "*)\n'
+        '    echo "the globalconfig probe must not be rooted" >&2; exit 8;; esac\n'
+        "  printf '\"/etc/npmrc\"\\n'; exit 0\n"
+        "fi\n"
         'case " $* " in *" --prefix $PWD "*) ;; *)\n'
         '  echo "not asked with --prefix at the scratch: $*" >&2; exit 9;; esac\n'
+        # Everything else must carry the pinned global config beside --prefix,
+        # or --prefix may quietly move which global npmrc npm reads.
+        'case " $* " in *" --globalconfig /etc/npmrc "*) ;; *)\n'
+        '  echo "global config not pinned: $*" >&2; exit 7;; esac\n'
         'if [ "$1" = "config" ]; then\n'
         '  case "$3" in\n'
         "    @*:registry) echo undefined ;;\n"
