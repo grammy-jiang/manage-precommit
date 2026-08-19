@@ -404,6 +404,47 @@ def redact_urls(text: str) -> str:
     return URL_RE.sub(_redact_one_url, text)
 
 
+def redact_registry(url: str) -> str:
+    """A registry URL cut down to the endpoint it names.
+
+    `redact_urls` takes out userinfo, query and fragment, which is the whole of
+    what can be a secret in an arbitrary URL appearing in someone's error text.
+    A *configured registry* has one more: registries do authenticate by path
+    segment, so `https://registry.example/npm/<key>/` puts the key in the path,
+    and relaying it names the server at the cost of handing over the key.
+
+    The path goes, because this field's job is saying WHICH SERVER answered and
+    scheme, host and port already say it. A bare root stays -- `/` is not a
+    secret, and keeping it means the common case reads unchanged.
+
+    Only the copy that leaves. `is_public_registry` still sees the whole URL,
+    so trimming here cannot change what the run decides.
+    """
+    trimmed = redact_urls(url)
+    scheme, sep, rest = trimmed.partition("://")
+    if not sep:
+        return trimmed
+    end = len(rest)
+    for ch in "/?#":
+        at = rest.find(ch)
+        if at >= 0:
+            end = min(end, at)
+    authority, tail = rest[:end], rest[end:]
+    cut = len(tail)
+    for ch in "?#":
+        at = tail.find(ch)
+        if at >= 0:
+            cut = min(cut, at)
+    path, suffix = tail[:cut], tail[cut:]
+    if path not in ("", "/"):
+        # Everything below the root goes, whatever it is. Picking out which
+        # segment is the key would mean keeping a list of the shapes I have met,
+        # and that is how every other redaction on this branch went wrong.
+        path = "/***"
+    tail = path + suffix
+    return scheme + sep + authority + tail
+
+
 def bounded_err(text: str) -> str:
     """Foreign stderr, neutralised and capped, ready to print or store.
 

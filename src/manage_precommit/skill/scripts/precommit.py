@@ -59,7 +59,7 @@ from shared import (
     read_bytes_nofollow,
     read_bytes_or_die,
     read_json_or_die,
-    redact_urls,
+    redact_registry,
     refuse_facts_inside_repo,
     refuse_option_like,
     safe_porcelain,
@@ -860,7 +860,7 @@ def npm_latest(pkg: str) -> str:
             # Redacted for the payload only. npm returns the registry exactly
             # as configured, credentials and all, and SKILL.md hands this field
             # to the agent -- classification below keeps the whole URL.
-            extra["registry"] = clean(redact_urls(registry or ""))
+            extra["registry"] = clean(redact_registry(registry or ""))
             # Omitted rather than guessed when npm would not say which registry
             # it asked. A `False` here is a claim, and SKILL.md acts on it.
             if registry:

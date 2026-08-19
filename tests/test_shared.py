@@ -600,6 +600,45 @@ def test_url_credentials_are_removed_before_anything_is_relayed(text, expected):
     assert shared.redact_urls(text) == expected
 
 
+@pytest.mark.parametrize(
+    "configured,relayed",
+    [
+        pytest.param(
+            "https://registry.example/npm/sekrit/",
+            "https://registry.example/***",
+            id="a key in the path",
+        ),
+        pytest.param(
+            "https://registry.npmjs.org/", "https://registry.npmjs.org/", id="a bare root stays"
+        ),
+        pytest.param(
+            "https://registry.npmjs.org", "https://registry.npmjs.org", id="no path at all stays"
+        ),
+        pytest.param("https://h:8443/a/b", "https://h:8443/***", id="the port is not a secret"),
+        pytest.param(
+            "https://u:p@h/npm/key/?t=1#f",
+            "https://***@h/***?***",
+            id="userinfo, path and query together",
+        ),
+        pytest.param("not a url", "not a url", id="not a URL at all"),
+    ],
+)
+def test_a_registry_path_can_be_a_credential_too(configured, relayed):
+    """Registries authenticate by path segment, and a registry is not any URL.
+
+    `redact_urls` removes what can be a secret in *any* URL -- userinfo, query,
+    fragment -- and a path is not that: in npm's own error text the path is the
+    package, and blanking it there would destroy the one part worth reading. A
+    configured registry is the exception, because a path-based key lives exactly
+    where npm's own package path would otherwise be, so the trim belongs to this
+    narrower helper rather than to redaction in general.
+
+    Which server answered is what the field is for, and scheme, host and port
+    already say it.
+    """
+    assert shared.redact_registry(configured) == relayed
+
+
 def test_credentials_are_removed_before_control_characters_are(monkeypatch):
     """Order, and it is not cosmetic.
 

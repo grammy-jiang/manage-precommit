@@ -8,10 +8,13 @@ import json
 import os
 import stat
 import subprocess
+import sys
 
 import pytest
 
 from conftest import NPM_VERSION, REAL_GIT, SKILL, out_json, run, stub_calls
+
+sys.path.insert(0, str(SKILL / "scripts"))
 
 
 def generate(repo, keys_file, facts_path, stubs, *names, force=False, scripts=None):
@@ -1060,6 +1063,32 @@ def test_a_token_in_the_registry_url_is_not_relayed(repo, keys_file, facts_path,
     assert "s3cr3t-token" not in got["detail"]
     # And redacting the copy that leaves did not blind the copy that decides.
     assert got["registry_is_public"] is True
+
+
+def test_a_token_in_the_registry_path_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
+    """End to end: the payload must not carry it, and classification must not
+    change because the payload stopped carrying it."""
+    fake = _fake_bin(
+        tmp_path,
+        "npmpathtoken",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.corp.invalid/npm/sekrit/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert "sekrit" not in proc.stdout
+    got = out_json(proc)
+    assert got["registry"] == "https://registry.corp.invalid/***"
+    assert got["registry_is_public"] is False
 
 
 def test_a_token_in_the_registry_query_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
