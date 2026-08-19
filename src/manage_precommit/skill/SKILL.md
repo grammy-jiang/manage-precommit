@@ -226,9 +226,12 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     Only when it is true is the catalog itself wrong, and that is a bug here
     rather than anything they can do. **An empty `registry`, with no
     `registry_is_public` beside it, means npm would not say which registry it
-    asked** — it withholds one carrying credentials. Attribute nothing then:
-    report that the package was not found and that the registry could not be
-    identified, and let them check `npm config get registry` themselves.
+    asked.** Attribute nothing then: report that the package was not found and
+    that the registry could not be identified. Two ordinary causes are worth
+    offering — npm withholds a registry carrying credentials, and it refuses
+    every `npm config` command outright when their npm configuration selects a
+    workspace (`workspace=` in an `.npmrc`). Either way it is theirs to look at
+    with `npm config get registry`, not something to guess at from here.
   - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
     reachability problem and not their repository.
   - `timeout` — a remote answered too slowly rather than not at all. **Say which

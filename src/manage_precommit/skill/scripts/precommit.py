@@ -597,6 +597,10 @@ def npm_error(stdout: str, stderr: str) -> tuple[dict[str, str], str]:
     return fields, stderr if stderr.strip() else words
 
 
+# Both spellings npm accepts for a selector, lower-cased for comparison:
+# npm reads `npm_config_*` environment names case-insensitively.
+NPM_WORKSPACE_VARS = frozenset({"npm_config_workspace", "npm_config_workspaces"})
+
 PUBLIC_NPM_HOST = "registry.npmjs.org"
 PUBLIC_NPM_SCHEME = "https"
 PUBLIC_NPM_PORT = 443
@@ -814,6 +818,7 @@ def npm_latest(pkg: str) -> str:
                         *npm_root_args(elsewhere),
                     ],
                     cwd=elsewhere,
+                    env=npm_env(),
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -1887,6 +1892,25 @@ def creatable_dir(path: str) -> bool:
         probe = parent
 
 
+def npm_env() -> dict[str, str]:
+    """The environment for an npm call, minus any workspace selector.
+
+    `npm config get` refuses to run at all when a workspace is selected --
+    `ENOWORKSPACES`, "This command does not support workspaces" -- so an
+    inherited `workspace=` costs the registry lookup entirely, and with it the
+    field that tells a 404 from a mirror apart from a bug in this catalog.
+
+    Only the environment layer, because it is the only one that can be cleared.
+    A selector in a user or global `.npmrc` cannot be: removing it means
+    rewriting their config, and even locating that file needs `npm config get
+    userconfig`, which the selector breaks in the same way. `npm config list`
+    and `ls` refuse too, so there is no second way to ask. When it comes from a
+    file the registry stays unknown, which the payload reports as unknown and
+    SKILL.md answers by attributing nothing.
+    """
+    return {k: v for k, v in os.environ.items() if k.lower() not in NPM_WORKSPACE_VARS}
+
+
 def npm_root_args(elsewhere: str, rooted: bool = True) -> list[str]:
     """`--prefix`, and the global config file that `--prefix` might displace.
 
@@ -1955,6 +1979,7 @@ def npm_config(key: str, *, rooted: bool = True) -> tuple[bool, str | None]:
                     *npm_root_args(elsewhere, rooted),
                 ],
                 cwd=elsewhere,
+                env=npm_env(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

@@ -1202,6 +1202,47 @@ def test_an_empty_scoped_answer_means_unset_and_does_fall_back(
     assert got["registry_is_public"] is False
 
 
+def test_an_inherited_workspace_selector_is_kept_out_of_npms_environment(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """`npm config get` refuses to run at all when a workspace is selected.
+
+    ENOWORKSPACES, "This command does not support workspaces" -- so an inherited
+    `workspace=` costs the registry lookup entirely, and with it the field that
+    tells a 404 from a mirror apart from a bug in this catalog. `npm view`
+    survives it; the probes do not, which is why fixing the pin last round left
+    this behind.
+
+    The environment is the only layer that can be cleared, and it is cleared.
+    A selector in a user or global `.npmrc` stays, and the registry stays
+    unknown -- reported as unknown rather than guessed.
+    """
+    monkeypatch.setenv("npm_config_workspace", "foo")
+    monkeypatch.setenv("NPM_CONFIG_WORKSPACES", "true")
+    fake = _fake_bin(
+        tmp_path,
+        "npmwsenv",
+        "#!/bin/sh\n"
+        '[ -z "${npm_config_workspace:-}" ] || { echo "selector survived" >&2; exit 9; }\n'
+        '[ -z "${NPM_CONFIG_WORKSPACES:-}" ] || { echo "selector survived" >&2; exit 9; }\n'
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://npm.corp.invalid/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+
+
 def test_a_scoped_lookup_that_fails_does_not_fall_back_to_the_default(
     repo, keys_file, facts_path, tmp_path, stubs
 ):
