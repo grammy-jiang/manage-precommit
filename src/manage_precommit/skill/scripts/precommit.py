@@ -638,7 +638,12 @@ def is_public_registry(url: str) -> bool:
         return False
     return (
         parts.scheme == PUBLIC_NPM_SCHEME
-        and parts.hostname == PUBLIC_NPM_HOST
+        # One trailing dot removed: `registry.npmjs.org.` is the same host
+        # written with the DNS root label, npm keeps the spelling, and the
+        # certificate is accepted for it. Exactly one, so `...org..` -- which is
+        # not a hostname at all -- stays refused, and a lookalike ending in a
+        # dot loses only its own root label and still fails on the name.
+        and (parts.hostname or "").removesuffix(".") == PUBLIC_NPM_HOST
         and port in (None, PUBLIC_NPM_PORT)
         and parts.path in ("", "/")
         and not parts.query

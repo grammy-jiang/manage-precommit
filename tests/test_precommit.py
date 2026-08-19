@@ -982,6 +982,16 @@ def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_
         pytest.param("http://registry.npmjs.org/", False, id="npmjs over plain http"),
         pytest.param("ftp://registry.npmjs.org/", False, id="not a scheme npm speaks"),
         pytest.param("https://registry.npmjs.org:nope/", False, id="a port that is not a number"),
+        # The DNS root label. Same host, npm keeps the spelling, and the
+        # certificate is accepted for it -- so refusing it told people an
+        # npmjs 404 probably came from their own mirror.
+        pytest.param("https://registry.npmjs.org./", True, id="written with the DNS root label"),
+        pytest.param("https://registry.npmjs.org../", False, id="two dots is not a hostname"),
+        pytest.param(
+            "https://registry.npmjs.org.evil.invalid./",
+            False,
+            id="a lookalike keeps failing on the name",
+        ),
         # npm keeps the base path and appends the package to it, so a path is a
         # different endpoint wearing the same name, exactly as a port is.
         pytest.param("https://registry.npmjs.org/custom/", False, id="a base path on npmjs's name"),
