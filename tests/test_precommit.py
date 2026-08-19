@@ -1368,6 +1368,11 @@ def test_both_npm_calls_refuse_to_be_a_workspace_member(
 
     Both npm calls are checked, because the pin and the registry probe are
     separate commands and only one of them was covered when this was written.
+
+    `--prefix` rather than `--no-workspaces`: the latter isolates just as well
+    and then refuses to run at all beside an inherited `workspace=` selector,
+    which a user or global .npmrc may set and this cannot rewrite. Naming the
+    project root outright conflicts with nothing.
     """
     root = tmp_path / "wsroot"
     (root / "packages").mkdir(parents=True)
@@ -1379,8 +1384,10 @@ def test_both_npm_calls_refuse_to_be_a_workspace_member(
         tmp_path,
         "npmworkspace",
         "#!/bin/sh\n"
-        'case " $* " in *" --no-workspaces "*) ;; *)\n'
-        '  echo "asked without --no-workspaces: $*" >&2; exit 9;; esac\n'
+        # The scratch is what --prefix must name, and the stub is run with the
+        # scratch as its cwd -- so this checks the value, not just the flag.
+        'case " $* " in *" --prefix $PWD "*) ;; *)\n'
+        '  echo "not asked with --prefix at the scratch: $*" >&2; exit 9;; esac\n'
         'if [ "$1" = "config" ]; then\n'
         '  case "$3" in\n'
         "    @*:registry) echo undefined ;;\n"
