@@ -992,6 +992,15 @@ def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_
             False,
             id="a lookalike keeps failing on the name",
         ),
+        # Spellings of the root that npm preserves and node resolves before
+        # asking. Normalised rather than matched one at a time -- this was the
+        # seventh spelling of the same endpoint to come through review.
+        pytest.param("https://registry.npmjs.org/./", True, id="a dot segment"),
+        pytest.param("https://registry.npmjs.org/%2e/", True, id="an encoded dot segment"),
+        pytest.param("https://registry.npmjs.org/a/../", True, id="up out of a segment"),
+        pytest.param(
+            "https://registry.npmjs.org/custom/./", False, id="a real path with a dot segment"
+        ),
         # npm keeps the base path and appends the package to it, so a path is a
         # different endpoint wearing the same name, exactly as a port is.
         pytest.param("https://registry.npmjs.org/custom/", False, id="a base path on npmjs's name"),
@@ -1023,7 +1032,10 @@ def test_whether_the_registry_was_npms_own_is_decided_here(
         '  case "$3" in\n'
         "    @*:registry) echo undefined ;;\n"
         # Quoted, because `--json` is passed and this is what npm answers with.
-        f"    *) printf '\"{answered}\"\\n' ;;\n"
+        # Passed as an ARGUMENT, not as printf's format string: a `%2e` in
+        # the URL is otherwise read as a conversion spec and the stub
+        # answers something this test never wrote.
+        f"    *) printf '\"%s\"\\n' '{answered}' ;;\n"
         "  esac\n"
         "  exit 0\n"
         "fi\n"

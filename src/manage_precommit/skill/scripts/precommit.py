@@ -30,13 +30,14 @@ import difflib
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Any, NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import config as cfgmod
 from hookoutput import is_vacuous, skipped_hooks
@@ -609,6 +610,18 @@ PUBLIC_NPM_SCHEME = "https"
 PUBLIC_NPM_PORT = 443
 
 
+def normalised_path(path: str) -> str:
+    """A URL path with percent-encoding and dot segments resolved.
+
+    Only for deciding whether a path IS the root. Decoding can change how the
+    segments read -- `%2f` becomes a separator -- and that is fine here, since
+    anything it turns into is still not the root and the answer stays on the
+    side that costs a minute rather than a misdirected bug report.
+    """
+    raw = unquote(path or "")
+    return posixpath.normpath(raw) if raw else ""
+
+
 def is_public_registry(url: str) -> bool:
     """Whether that is npm's own registry root, however it happens to be spelled.
 
@@ -652,7 +665,12 @@ def is_public_registry(url: str) -> bool:
         # dot loses only its own root label and still fails on the name.
         and (parts.hostname or "").removesuffix(".") == PUBLIC_NPM_HOST
         and port in (None, PUBLIC_NPM_PORT)
-        and parts.path in ("", "/")
+        # Normalised, not compared as written. `/./`, `/%2e/` and `/a/../` are
+        # all spellings of the root that npm preserves and node resolves before
+        # asking, and matching the literal made each one a new special case --
+        # this is the seventh spelling of "the same endpoint" to come through
+        # review. One normalisation ends the class instead.
+        and normalised_path(parts.path) in ("", "/")
         and not parts.query
         and not parts.fragment
     )
