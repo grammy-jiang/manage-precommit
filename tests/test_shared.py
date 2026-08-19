@@ -639,6 +639,35 @@ def test_a_registry_path_can_be_a_credential_too(configured, relayed):
     assert shared.redact_registry(configured) == relayed
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        pytest.param(
+            "npm error 403 Forbidden - GET https://registry.example/npm/sekrit/@sc%2fname",
+            "npm error 403 Forbidden - GET https://registry.example/***",
+            id="a registry that authenticates by path",
+        ),
+        pytest.param(
+            "GET https://registry.npmjs.org/@sc%2fname",
+            "GET https://registry.npmjs.org/***",
+            id="the ordinary case loses the package path too",
+        ),
+        pytest.param("nothing to see here", "nothing to see here", id="no URL at all"),
+    ],
+)
+def test_npm_error_text_is_cut_down_to_the_server(text, expected):
+    """npm quotes the URL it asked for, so a path-based key is in the prose too.
+
+    Redacting only the `registry` field left the same secret in `detail` and in
+    the sentence beside it. Paths go wholesale rather than by matching the
+    configured registry: that needs another query which can itself fail, and a
+    redaction that works only when a lookup succeeds fails exactly when things
+    are already going wrong. Nothing is lost -- `target` names the package and
+    `registry` names the server, both structured and both already redacted.
+    """
+    assert shared.strip_url_paths(text) == expected
+
+
 def test_credentials_are_removed_before_control_characters_are(monkeypatch):
     """Order, and it is not cosmetic.
 

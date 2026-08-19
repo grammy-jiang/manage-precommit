@@ -1065,6 +1065,41 @@ def test_a_token_in_the_registry_url_is_not_relayed(repo, keys_file, facts_path,
     assert got["registry_is_public"] is True
 
 
+def test_a_path_credential_is_gone_from_npms_own_words_too(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The same secret appears twice, and fixing the field fixed one of them.
+
+    npm quotes the URL it requested, so a registry authenticating by path puts
+    its key in front of the package name in the failure text -- which reaches
+    the agent as `detail` and as the printed sentence.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmpathdetail",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.corp.invalid/npm/sekrit/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E403\\n" >&2\n'
+        'printf "npm error 403 Forbidden - GET '
+        'https://registry.corp.invalid/npm/sekrit/@mermaid-js%%2fmermaid-cli\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert "sekrit" not in proc.stdout, "the payload still carries it"
+    assert "sekrit" not in proc.stderr, "the printed sentence still carries it"
+    got = out_json(proc)
+    assert got["cause"] == "forbidden"
+    assert "registry.corp.invalid" in got["detail"], "the server is still named"
+
+
 def test_a_token_in_the_registry_path_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
     """End to end: the payload must not carry it, and classification must not
     change because the payload stopped carrying it."""
@@ -2969,7 +3004,10 @@ def test_a_failing_ls_remote_is_reported(repo, keys_file, facts_path, tmp_path):
     g.write_text(
         "#!/bin/sh\n"
         'for a in "$@"; do\n'
-        '  if [ "$a" = "ls-remote" ]; then echo "fatal: unreachable" >&2; exit 128; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then\n'
+        '    echo "fatal: unreachable: https://github.com/pre-commit/pre-commit-hooks.git" >&2\n'
+        "    exit 128\n"
+        "  fi\n"
         "done\n"
         f'exec {REAL_GIT} "$@"\n'
     )
@@ -2981,6 +3019,11 @@ def test_a_failing_ls_remote_is_reported(repo, keys_file, facts_path, tmp_path):
     assert got["source"] == "git"
     assert got["cause"] == "git-ls-remote"
     assert "unreachable" in got["detail"], "git's own message is the whole of what is known"
+    # And the repository path survives. npm's error text has its paths stripped
+    # because a registry can hide a key in one; a git URL's path is the
+    # repository's identity, tokens go in its userinfo instead, and blanking it
+    # would leave "could not read from https://github.com/***".
+    assert "pre-commit-hooks" in got["detail"]
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 

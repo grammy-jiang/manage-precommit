@@ -63,6 +63,7 @@ from shared import (
     refuse_facts_inside_repo,
     refuse_option_like,
     safe_porcelain,
+    strip_url_paths,
     write_json_or_die,
 )
 
@@ -847,7 +848,10 @@ def npm_latest(pkg: str) -> str:
         # Bound once and used twice. npm's stderr is a registry's text, the
         # same category as git's remote-server text, and SKILL.md relays the
         # sentence as well as the field.
-        detail = bounded_err(words)
+        # Paths stripped as well as credentials: npm quotes the URL it asked
+        # for, and a registry that authenticates by path puts its key in front
+        # of the package name there. See strip_url_paths.
+        detail = bounded_err(strip_url_paths(words))
         cause = npm_cause(code)
         extra: dict[str, object] = {}
         if cause == "not-found":

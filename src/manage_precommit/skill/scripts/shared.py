@@ -445,6 +445,29 @@ def redact_registry(url: str) -> str:
     return scheme + sep + authority + tail
 
 
+def strip_url_paths(text: str) -> str:
+    """The same text with every URL cut down to the server it names.
+
+    For npm's error text specifically, not for foreign stderr in general. npm
+    quotes the URL it requested, and when the configured registry carries a
+    credential in its own path -- `https://registry.example/npm/<key>/` -- that
+    request is `<key>/<package>`, so the secret is in the prose as well as in
+    the `registry` field. Redacting only the field left the same string in
+    `detail` and in the sentence beside it.
+
+    Paths go wholesale rather than by matching the configured registry against
+    the text: knowing the registry needs another query that can itself fail, and
+    a redaction that only works when a lookup succeeds is one that fails exactly
+    when things are already going wrong. What the path carried is not lost --
+    `target` names the package and `registry` names the server, both structured
+    and both already redacted.
+
+    git keeps its paths: there the path is the repository's identity, tokens go
+    in userinfo rather than the path, and `bounded_err` alone covers that.
+    """
+    return URL_RE.sub(lambda m: redact_registry(m.group(0)), text)
+
+
 def bounded_err(text: str) -> str:
     """Foreign stderr, neutralised and capped, ready to print or store.
 
