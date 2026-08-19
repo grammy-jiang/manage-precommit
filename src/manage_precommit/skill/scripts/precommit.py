@@ -44,8 +44,11 @@ from shared import (
     PRECOMMIT_CONFIG_NAME,
     Facts,
     ManagedFile,
+    NotARegularFile,
     Recommendation,
     RecommendReport,
+    SymlinkRefused,
+    TooLarge,
     atomic_write_bytes,
     bounded_err,
     clean,
@@ -781,6 +784,17 @@ def npm_latest(pkg: str) -> str:
     try:
         with scratch as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")
+            root_args = npm_root_args(elsewhere)
+            if root_args is None:
+                pin_failed(
+                    "npm",
+                    name,
+                    "npm would not say where its global config lives, so this "
+                    "pin cannot be isolated without risking the wrong registry "
+                    "-- a `workspace=` in an .npmrc refuses every npm config "
+                    "command, which is the usual cause",
+                    "not-isolated",
+                )
             try:
                 out = subprocess.run(
                     # Every part of this is spelled out because each is otherwise
@@ -815,7 +829,7 @@ def npm_latest(pkg: str) -> str:
                         # `workspace=` selector, which a user or global .npmrc
                         # may set and this cannot rewrite. `--prefix` conflicts
                         # with nothing.
-                        *npm_root_args(elsewhere),
+                        *root_args,
                     ],
                     cwd=elsewhere,
                     env=npm_env(),
@@ -1911,7 +1925,36 @@ def npm_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k.lower() not in NPM_WORKSPACE_VARS}
 
 
-def npm_root_args(elsewhere: str, rooted: bool = True) -> list[str]:
+def inside_a_workspace(where: str) -> bool:
+    """Whether any directory above `where` declares a workspace.
+
+    Read off the filesystem rather than asked of npm, and asked at all so that
+    `--prefix` is passed only when it is needed. `--prefix` is what drags in the
+    globalconfig question, and that question cannot always be answered -- so
+    making every pin depend on it turned an unanswerable probe into a refusal
+    for machines that were never at risk.
+
+    A manifest that will not parse is not one npm would honour either, so it
+    declares nothing here. The scratch's own manifest is skipped: the seal
+    plants it, and it names no workspaces.
+    """
+    probe = os.path.dirname(os.path.realpath(where))
+    while True:
+        manifest = os.path.join(probe, "package.json")
+        if os.path.isfile(manifest):
+            try:
+                data = json.loads(read_bytes_nofollow(manifest, max_bytes=1 << 20))
+            except (OSError, ValueError, SymlinkRefused, NotARegularFile, TooLarge):
+                data = None
+            if isinstance(data, dict) and data.get("workspaces"):
+                return True
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return False
+        probe = parent
+
+
+def npm_root_args(elsewhere: str, rooted: bool = True) -> list[str] | None:
     """`--prefix`, and the global config file that `--prefix` might displace.
 
     `--prefix` is what stops a scratch inside a workspace being read as a
@@ -1927,12 +1970,26 @@ def npm_root_args(elsewhere: str, rooted: bool = True) -> list[str]:
     documentation defines it the other way, the cost is one question, and the
     failure it prevents is silently ignoring the mirror a user is required to
     go through.
+
+    None when that question cannot be answered -- a workspace selector in a
+    file refuses every `npm config` command, this one included. Then `--prefix`
+    is unsafe to pass and omitting it is unsafe too, so neither is chosen here:
+    the caller decides, and both callers refuse rather than proceed. Continuing
+    with `--prefix` and no pin is the one option that must not happen, because
+    on an npm that moves globalconfig it reads the empty scratch file and pins
+    from npmjs while the user's registry is a mirror they are required to use.
     """
-    if not rooted:
+    if not rooted or not inside_a_workspace(elsewhere):
+        # Nothing above declares a workspace, so nothing will read this scratch
+        # as a member and there is no reason to name a prefix -- which keeps the
+        # globalconfig question, and its failure mode, out of the ordinary case
+        # entirely.
         return []
-    args = ["--prefix", elsewhere]
     answered, path = npm_config("globalconfig", rooted=False)
-    if answered and path:
+    if not answered:
+        return None
+    args = ["--prefix", elsewhere]
+    if path:
         args += ["--globalconfig", path]
     return args
 
@@ -1968,6 +2025,11 @@ def npm_config(key: str, *, rooted: bool = True) -> tuple[bool, str | None]:
             # nothing rather than answering wrongly.
             if try_seal(elsewhere):
                 return False, None
+            # A probe that cannot be rooted safely answers nothing; naming a
+            # registry read from the wrong global file is the harmful outcome.
+            root_args = npm_root_args(elsewhere, rooted)
+            if root_args is None:
+                return False, None
             out = subprocess.run(
                 [
                     "npm",
@@ -1976,7 +2038,7 @@ def npm_config(key: str, *, rooted: bool = True) -> tuple[bool, str | None]:
                     refuse_option_like(key, "npm config key", die),
                     "--json",
                     "--no-color",
-                    *npm_root_args(elsewhere, rooted),
+                    *root_args,
                 ],
                 cwd=elsewhere,
                 env=npm_env(),

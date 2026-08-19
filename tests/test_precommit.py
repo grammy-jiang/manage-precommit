@@ -1202,6 +1202,111 @@ def test_an_empty_scoped_answer_means_unset_and_does_fall_back(
     assert got["registry_is_public"] is False
 
 
+def test_a_pin_refuses_when_the_global_config_cannot_be_pinned(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """Two earlier fixes meeting, and the meeting point had to be closed.
+
+    `--prefix` stops a scratch inside a workspace being read as a member, and
+    npm defines `globalconfig` as `{prefix}/etc/npmrc` -- so `--prefix` without
+    the pin can move which global file is read. A selector in a user or global
+    `.npmrc` refuses every `npm config` command, the pin's own probe included,
+    and continuing then meant `--prefix` with no pin: the empty scratch config,
+    and a version taken from npmjs while the user's registry is a mirror they
+    are required to use. A wrong pin that looks like any other.
+
+    So it refuses instead, loudly and with the usual cause named. The cost is
+    real -- that configuration cannot pin at all now -- and it is the cheaper
+    side of the trade.
+    """
+    # Inside a workspace, because that is the only place `--prefix` is passed
+    # and so the only place the globalconfig question is asked at all.
+    root = tmp_path / "wsroota"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmnoglobalconfig",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then\n'
+        '  echo "npm error code ENOWORKSPACES" >&2\n'
+        '  echo "This command does not support workspaces." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-isolated"
+    assert "workspace=" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_workspaces_key_with_no_members_is_not_a_workspace(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """`workspaces: []` declares nobody, so nothing can be read as a member.
+
+    Treating the key's presence as enough would pass `--prefix` there, and with
+    it the globalconfig question -- which is exactly the dependency that has to
+    stay out of runs that were never at risk. The stub refuses that question, so
+    this passes only if it is never asked.
+    """
+    root = tmp_path / "emptyws"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":[]}\n')
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmemptyws",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then echo "refused" >&2; exit 1; fi\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_a_probe_that_cannot_be_rooted_answers_nothing(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The same failure on the registry probe degrades rather than refuses.
+
+    A probe naming a registry read from the wrong global file is worse than a
+    probe naming none: the payload is what SKILL.md attributes blame from. The
+    pin refuses, this answers nothing, and both come from the same unanswerable
+    question.
+    """
+    # Inside a workspace, because that is the only place `--prefix` is passed
+    # and so the only place the globalconfig question is asked at all.
+    root = tmp_path / "wsrootb"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmnoglobalcfg2",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then echo "nope" >&2; exit 1; fi\n'
+        'if [ "$1" = "config" ]; then printf \'"https://npm.corp.invalid/"\\n\'; exit 0; fi\n'
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    # The pin refuses first, on the same question -- which is the point: one
+    # unanswerable probe, two callers, neither of them proceeding regardless.
+    assert proc.returncode == 6
+    assert out_json(proc)["cause"] == "not-isolated"
+
+
 def test_an_inherited_workspace_selector_is_kept_out_of_npms_environment(
     repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
 ):
