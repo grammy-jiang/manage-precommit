@@ -710,6 +710,23 @@ def test_a_non_boolean_where_pre_commit_wants_one_refuses_the_config():
         assert cfg.repos[0].hooks[0].settings["always_run"] == spelling
 
 
+def test_a_block_list_item_reads_back_whole():
+    """A block list is rendered in the flow shape for every reader, and an item
+    holding a comma -- `- "file,text,markdown"`, one (unknown) tag to
+    pre-commit -- was joined bare and read back as three. Quoted on the way in,
+    it is one on the way out, with quotes, brackets and a `#` inside kept."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+        '        types:\n          - "file,text,markdown"\n          - text\n'
+        '        stages:\n          - \'a"b\'\n          - "[c] #d"\n          - " e "\n'
+    )
+    settings = cfg.repos[0].hooks[0].settings
+    assert C.flow_items(settings["types"]) == ["file,text,markdown", "text"]
+    assert C.flow_items(settings["stages"]) == ['a"b', "[c] #d", " e "]
+    top = C.scan('default_stages:\n  - "pre-commit,manual"\nrepos: []\n')
+    assert C.flow_items(C.top_level_sequence(top, "default_stages") or "") == ["pre-commit,manual"]
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""

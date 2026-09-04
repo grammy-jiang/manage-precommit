@@ -818,9 +818,10 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
             # Ragged items are not one sequence. Refusing to guess is this
             # scanner's whole posture.
             break
-        items.append(
-            _scalar(_continuation(lines, j, _inline_value(body[2:]), indent, item=True), text=True)
+        item = _scalar(
+            _continuation(lines, j, _inline_value(body[2:]), indent, item=True), text=True
         )
+        items.append(_flow_item(item))
         j += 1
         # The item's continuation lines, already folded in above.
         while j < len(lines) and (
@@ -829,6 +830,19 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
         ):
             j += 1
     return "[" + ", ".join(items) + "]" if items else ""
+
+
+def _flow_item(value: str) -> str:
+    """`value` spelled as one item of a flow sequence, so flow_items reads it back whole.
+
+    A block item may hold what would split or open a flow one -- a comma, a
+    bracket, a brace, a quote, a `#`, white space at an end -- and joined bare,
+    `- "file,text,markdown"` came back as three tags. Quoted here with YAML's
+    own escapes, it comes back as the one it is.
+    """
+    if not value or value != value.strip(" \t") or any(ch in value for ch in ",[]{}\"'#"):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return value
 
 
 def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hook]:
