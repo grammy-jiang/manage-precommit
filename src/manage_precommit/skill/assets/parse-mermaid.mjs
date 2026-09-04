@@ -172,11 +172,14 @@ function fenceOf(text) {
   if (m === null) return null;
   const [, indent, run, info] = m;
   if (run[0] === "`" && info.includes("`")) return null;
-  const word = info.replace(/^[ \t]+|[ \t]+$/g, "").split(/[ \t]+/)[0] ?? "";
+  // The whole info string is decoded before its first word is taken, as
+  // CommonMark has it: `mermaid&#9;title=x` is `mermaid`, a tab, and a title.
+  // The backtick rule above is judged on the spelling, as the spec judges it.
+  const decoded = decodeReferences(info).replace(/^[ \t]+|[ \t]+$/g, "");
   return {
     char: run[0],
     length: run.length,
-    lang: decodeReferences(word).toLowerCase(),
+    lang: (decoded.split(/[ \t]+/)[0] ?? "").toLowerCase(),
     indent: indent.length,
   };
 }
