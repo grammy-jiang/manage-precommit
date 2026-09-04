@@ -113,15 +113,21 @@ install). Someone who wanted history scanned has to learn that before they say
 yes, not at Step 5 with the config already written.
 Anything already in `previous` is not offered again; say it is already there —
 **unless it also appears in `disabled`**. That means the entry exists but looks
-like it will not run: `stages` that exclude the commit, or a `files`/`exclude`
-that matches nothing. Say which, and say it is not the coverage it appears to
-be. **Do not offer to add a working one — this skill cannot.** The fragment
+like it will not run: `stages` that exclude the commit, a `files` that matches
+no file in the repository, an `exclude` that matches every one of them, or a
+pattern pre-commit would refuse to load. Say which, and say it is not the
+coverage it appears to be. **Do not offer to add a working one — this skill cannot.** The fragment
 declares the same hook id that is already present, so selecting it again writes
 nothing and changes nothing; the merge only ever inserts and never edits an
 existing entry's `stages`/`files`/`exclude`. The fix is a hand edit of that
 entry, the same as a `needs_manual` case. Being told "gitleaks is already
 there" about a scanner configured never to run is worse than not being told at
-all — and being told the skill will repair it is worse still.
+all — and being told the skill will repair it is worse still. One exception,
+which the tool decides for you: a switched-off `mermaid` does not stop the scan
+recommending `mermaid-parse`, because that is a different hook id and can be
+added. When it appears in `recommended`, offer it the ordinary way — as a
+working check beside the dead one, not as a repair of it — and still say the
+dead one is dead.
 Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-miss is
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.

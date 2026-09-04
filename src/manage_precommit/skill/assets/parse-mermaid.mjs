@@ -28,66 +28,151 @@ const files = process.argv.slice(2);
 if (files.length === 0) process.exit(0);
 
 // -- fences -------------------------------------------------------------------
-// CommonMark fenced code blocks, as far as a diagram needs them. A run of three
-// or more backticks or tildes opens one; only a run of the SAME character at
-// least as LONG closes it; every line between is content. That last rule is
-// what keeps a ```mermaid example inside a ````markdown block from being read
-// as a diagram. The info string's first word is the language, and a backtick
-// fence whose info string contains a backtick is not a fence at all.
+// CommonMark fenced code blocks, as far as a diagram needs them.
 //
-// Any leading whitespace is allowed on both fences, because a diagram inside a
-// list item is indented, and the opening fence's indentation is removed from
-// each content line the way CommonMark removes it.
-const FENCE = /^([ \t]*)(`{3,}|~{3,})(.*)$/;
-const CLOSING = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
+// A run of three or more backticks or tildes opens one; only a run of the SAME
+// character at least as LONG closes it; every line between is content. That
+// last rule is what keeps a ```mermaid example inside a ````markdown block from
+// being read as a diagram. The info string's first word is the language, and a
+// backtick fence whose info string contains a backtick is not a fence at all.
+//
+// Containers are followed as far as they change what a fence is:
+//
+// - Block quotes. `> ` markers are stripped before a line is read, and a fence
+//   opened inside a quote lives inside it: a line with fewer markers ends the
+//   quote, and CommonMark closes the fence with its container -- which for a
+//   diagram is a missing closing fence, reported as such.
+// - List items. A marker line sets the column its content starts at, and a
+//   line indented four or more columns past that is an indented code block, not
+//   a fence. So `    ```mermaid` at the top level is a literal example and
+//   stays text, while the same line under `1.` is the diagram it looks like. A
+//   fence may also open on the marker line itself (`- ```mermaid`). Lazy
+//   paragraph continuation is not modelled: a list is taken to end at the
+//   first non-blank line indented short of its content column.
+//
+// The opening fence's indentation -- or the marker's content column -- is
+// removed from each content line, as CommonMark removes it.
+const FENCE = /^( *)(`{3,}|~{3,})(.*)$/;
+const CLOSING = /^ {0,3}(`{3,}|~{3,}) *$/;
+const QUOTE = /^ {0,3}> ?/;
+const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])( +)(?=\S)/;
 
-function opening(line) {
-  const m = FENCE.exec(line);
+// Leading tabs count as four columns; nothing here needs real tab stops.
+function expandTabs(line) {
+  return line.replace(/^[ \t]*/, (ws) => ws.replace(/\t/g, "    "));
+}
+
+function indentOf(text) {
+  return text.length - text.trimStart().length;
+}
+
+// Up to `limit` block-quote markers taken off the front of a line (all of them
+// when `limit` is Infinity), and how many that was.
+function unquote(line, limit) {
+  let text = line;
+  let depth = 0;
+  while (depth < limit) {
+    const m = QUOTE.exec(text);
+    if (m === null) break;
+    text = text.slice(m[0].length);
+    depth++;
+  }
+  return { text, depth };
+}
+
+function fenceOf(text, column) {
+  const m = FENCE.exec(text);
   if (m === null) return null;
-  const [, indent, run, info] = m;
+  const [, , run, info] = m;
   if (run[0] === "`" && info.includes("`")) return null;
   return {
-    indent: indent.length,
     char: run[0],
     length: run.length,
     lang: (info.trim().split(/\s+/)[0] ?? "").toLowerCase(),
+    column,
   };
 }
 
-function closes(line, open) {
-  const m = CLOSING.exec(line);
+function closes(text, open) {
+  const m = CLOSING.exec(text);
   return m !== null && m[1][0] === open.char && m[1].length >= open.length;
 }
 
-function dedent(line, width) {
+function dedent(text, width) {
   let n = 0;
-  while (n < width && (line[n] === " " || line[n] === "\t")) n++;
-  return line.slice(n);
+  while (n < width && text[n] === " ") n++;
+  return text.slice(n);
 }
 
 // Every mermaid block in `text` as {line, body}: `line` is the 1-based line of
 // the opening fence, and `body` is null when that fence is never closed.
-// CommonMark closes an unclosed fence at the end of the document, which for a
-// diagram means "everything to the end of the file" -- a missing closing fence,
-// not a diagram anybody meant. Reported rather than parsed.
+// CommonMark closes an unclosed fence at the end of its container, which for a
+// diagram means "everything to the end" -- a missing closing fence, not a
+// diagram anybody meant. Reported rather than parsed.
 function mermaidBlocks(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const blocks = [];
-  let open = null;
-  lines.forEach((line, i) => {
-    if (open === null) {
-      const fence = opening(line);
-      if (fence !== null) open = { ...fence, line: i + 1, body: [] };
-      return;
+  let open = null; // the fence being read, plus its quote depth, line and body
+  let columns = []; // content columns of the list items enclosing this line
+  let quoted = 0; // the quote depth those columns were measured at
+
+  const leave = () => {
+    if (open.lang === "mermaid") {
+      blocks.push({ line: open.line, body: open.body === null ? null : open.body.join("\n") });
     }
-    if (closes(line, open)) {
-      if (open.lang === "mermaid") blocks.push({ line: open.line, body: open.body.join("\n") });
-      open = null;
-      return;
+    open = null;
+  };
+
+  lines.forEach((rawLine, i) => {
+    const raw = expandTabs(rawLine);
+    if (open !== null) {
+      const { text: inner, depth } = unquote(raw, open.depth);
+      if (depth === open.depth) {
+        const content = dedent(inner, open.column);
+        if (closes(content, open)) {
+          leave();
+        } else {
+          open.body.push(content);
+        }
+        return;
+      }
+      // Fewer markers than the fence was opened under: its block quote has
+      // ended, and the fence with it, unclosed. The line is then read afresh.
+      open.body = null;
+      leave();
     }
-    if (open.lang === "mermaid") open.body.push(dedent(line, open.indent));
+
+    const { text: unquoted, depth } = unquote(raw, Infinity);
+    if (depth !== quoted) {
+      columns = [];
+      quoted = depth;
+    }
+    if (unquoted.trim() === "") return; // blank lines leave lists as they are
+
+    const indent = indentOf(unquoted);
+    while (columns.length > 0 && indent < columns[columns.length - 1]) columns.pop();
+    const relative = indent - (columns.length > 0 ? columns[columns.length - 1] : 0);
+    if (relative >= 4) return; // an indented code block, whatever it contains
+
+    let candidate = unquoted;
+    let column = indent;
+    const marker = MARKER.exec(unquoted);
+    if (marker !== null) {
+      // Five or more spaces after a marker are content, not part of it.
+      const gap = marker[3].length >= 5 ? 1 : marker[3].length;
+      column = indent + marker[2].length + gap;
+      columns.push(column);
+      candidate = unquoted.slice(column);
+      if (indentOf(candidate) >= 4) return; // indented code on the marker line
+    }
+    const fence = fenceOf(candidate, column);
+    if (fence !== null) open = { ...fence, depth, line: i + 1, body: [] };
   });
-  if (open !== null && open.lang === "mermaid") blocks.push({ line: open.line, body: null });
+
+  if (open !== null) {
+    open.body = null;
+    leave();
+  }
   return blocks;
 }
 

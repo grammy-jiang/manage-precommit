@@ -372,3 +372,93 @@ def test_missing_dependencies_are_an_environment_error_not_a_diagram_error(tmp_p
     assert "could not load mermaid and linkedom" in proc.stderr
     assert "additional_dependencies" in proc.stderr
     assert "never parsed" in proc.stderr
+
+
+# -- containers: block quotes, list items, indented code -------------------------
+
+
+def test_a_top_level_indented_code_block_is_text_not_a_fence(docs, env):
+    """Four spaces of indentation make an indented code block, and a literal
+    ```mermaid example inside one is prose about diagrams, not a diagram.
+    Left to a whitespace-tolerant match it was parsed -- and an incomplete
+    example failed every commit."""
+    (docs / "doc.md").write_text(
+        "Write it like this:\n\n    ```mermaid\n    flowchart TD\n      BAD\n    ```\n\nand so on.\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert not env.loaded()
+
+
+def test_indentation_is_relative_to_the_enclosing_list_item(docs, env):
+    """The same four spaces under a `- ` item are two past its content column,
+    which is a fence; six are four past it, which is indented code."""
+    (docs / "doc.md").write_text(
+        "- one\n  - two\n\n    ```mermaid\n    flowchart LR\n      X --> Y\n    ```\n\n"
+        "- three\n\n      ```mermaid\n      BAD\n      ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart LR\n  X --> Y"]
+
+
+def test_a_list_ends_at_a_line_indented_short_of_its_content(docs, env):
+    """After the list, four spaces are indented code again."""
+    (docs / "doc.md").write_text(
+        "1. step\n\n   ```mermaid\n   flowchart TD\n     A --> B\n   ```\n\n"
+        "Back at the top level:\n\n    ```mermaid\n    BAD\n    ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_fence_may_open_on_the_list_marker_line(docs, env):
+    (docs / "doc.md").write_text(
+        "- ```mermaid\n  flowchart TD\n    A --> B\n  ```\n"
+        '10) ```mermaid\n    pie\n      "a": 1\n    ```\n'
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B", 'pie\n  "a": 1']
+
+
+def test_a_diagram_inside_a_block_quote_is_read_without_its_markers(docs, env):
+    """GitHub's alert syntax is a block quote, and a diagram inside a note is
+    an ordinary thing to write. The `> ` comes off every line, the fence closes
+    inside the quote, and a broken one is reported like any other."""
+    (docs / "doc.md").write_text(
+        "> [!NOTE]\n> ```mermaid\n> flowchart TD\n>   A --> B\n> ```\n\n"
+        "> > ```mermaid\n> > flowchart TD\n> >   BAD\n> > ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert env.parsed() == ["flowchart TD\n  A --> B", "flowchart TD\n  BAD"]
+    assert "✖ doc.md:7" in proc.stderr
+
+
+def test_a_block_quote_that_ends_before_the_closing_fence_leaves_it_unclosed(docs, env):
+    """CommonMark closes the fence with its container. For a diagram that is a
+    missing closing fence, and the prose after the quote is not diagram text."""
+    (docs / "doc.md").write_text("> ```mermaid\n> flowchart TD\n>   A --> B\n\nordinary prose\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert "✖ doc.md:1" in proc.stderr
+    assert "never closed" in proc.stderr
+    assert not env.loaded()
+
+
+def test_a_fence_inside_a_quoted_list_item(docs, env):
+    (docs / "doc.md").write_text(
+        "> - item\n>\n>   ```mermaid\n>   flowchart TD\n>     A --> B\n>   ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_leading_tabs_count_as_four_columns(docs, env):
+    (docs / "doc.md").write_text("\t```mermaid\n\tflowchart TD\n\t  A --> B\n\t```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert not env.loaded()

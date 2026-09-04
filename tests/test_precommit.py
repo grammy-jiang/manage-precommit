@@ -3110,7 +3110,44 @@ def test_always_run_overrides_a_narrow_files_filter(repo, stubs):
     assert got["disabled"] == {}, got["disabled"]
 
 
+def test_a_files_scope_is_judged_against_the_repository_not_by_its_presence(repo, stubs):
+    """A `files:` is a scope, not a switch. This one matches the README the
+    fixture repo carries, so the hook runs -- and the mere presence of the key
+    used to read as "disabled", which told every repository that selected
+    `mermaid` (whose fragment scopes to Markdown) that its check was dead."""
+    got = _disabled_for(repo, stubs, "        files: '\\.md$'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_our_own_mermaid_hook_is_not_reported_as_disabled(repo, keys_file, facts_path, stubs):
+    """The regression as users met it: select `mermaid`, run the scan again,
+    and be told the hook you just installed will not run. Its `files:` scope
+    matches the Markdown that got it recommended in the first place."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["previous"] == ["mermaid"]
+    assert got["disabled"] == {}, got["disabled"]
+    # And, being live, it keeps its alternative from being offered beside it.
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
+def test_an_exclude_that_leaves_files_through_is_not_a_switch(repo, stubs):
+    got = _disabled_for(repo, stubs, "        exclude: '^docs/'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
+    """pre-commit stops loading a config whose `files:` will not compile, so the
+    hook never runs -- the same answer, reached earlier and said plainly."""
+    got = _disabled_for(repo, stubs, "        files: '('\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "not a valid pattern" in got["disabled"]["gitleaks"][0]
+
+
 def test_a_narrow_files_filter_without_always_run_is_flagged(repo, stubs):
+    """`\\.txt$` matches nothing in a repository holding only a README, so the
+    scope lets no file through and the hook never fires here."""
     (repo / ".pre-commit-config.yaml").write_text(
         "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
         "    hooks:\n      - id: gitleaks\n        files: '\\.txt$'\n"
@@ -4146,8 +4183,8 @@ def test_the_scan_recommends_the_check_that_needs_no_browser(repo, stubs):
 def test_neither_mermaid_entry_is_offered_beside_the_other(
     repo, keys_file, facts_path, stubs, present, absent
 ):
-    """They check the same fences. Offering the second beside the first reads
-    as a gap in coverage that does not exist -- in either direction."""
+    """They check the same fences. Offering the second beside a LIVE first
+    reads as a gap in coverage that does not exist -- in either direction."""
     (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
     generate(repo, keys_file, facts_path, stubs, present)
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
@@ -4157,6 +4194,26 @@ def test_neither_mermaid_entry_is_offered_beside_the_other(
     assert present not in names
     # The fence itself is still reported: the scan saw it, whatever is installed.
     assert "mermaid fence (doc.md)" in got["detected"]
+
+
+def test_a_disabled_alternative_does_not_hide_the_recommendation(repo, stubs):
+    """A `mermaid` kept on `stages: [manual]` -- the ordinary way to park a
+    check whose browser is too slow for every commit -- is exactly the config
+    that wants the browser-free one. The alternative has its own hook id, so it
+    is the one repair this run can make; suppressing it would leave the user
+    with no working Mermaid check and a report saying one is present."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        stages: [manual]\n"
+    )
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["previous"]
+    assert "mermaid" in got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+    assert "mermaid-parse" in got["proposed"]
 
 
 def test_the_alternatives_point_at_each_other(stubs):

@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from typing import Any, NoReturn
 from urllib.parse import unquote, urlsplit
 
@@ -1144,14 +1145,42 @@ def parse_stages(raw: str) -> set[str]:
     return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
 
 
-def looks_disabled(hook: cfgmod.Hook) -> str | None:
+def scope_admits_nothing(pattern: str, paths: Sequence[str], *, excluding: bool) -> str | None:
+    """Why a hook-level `files:`/`exclude:` lets no file through, or None.
+
+    A scope is not a switch. Our own mermaid fragments carry
+    `files: '\\.(md|markdown)$'` and are as live as a hook gets, yet the mere
+    presence of the key used to read as "will not run" -- so every repository
+    that selected `mermaid` was told on the next scan that its check was dead.
+    What makes a scope a switch is what it does to THIS repository's files: a
+    `files:` no path matches, or an `exclude:` every path matches. pre-commit
+    applies both with `re.search` on the repo-relative path, so that is what is
+    asked, of the same bounded listing the scan walked. A pattern that will not
+    compile stops pre-commit loading the config at all, which is the same
+    answer arrived at earlier. Nothing is claimed when there are no paths to ask.
+    """
+    if not paths:
+        return None
+    try:
+        rx = re.compile(pattern)
+    except re.error as exc:
+        return f"not a valid pattern: {clean(str(exc))}"
+    hits = sum(1 for p in paths if rx.search(p))
+    if excluding and hits == len(paths):
+        return "matches every file here"
+    if not excluding and hits == 0:
+        return "matches no file here"
+    return None
+
+
+def looks_disabled(hook: cfgmod.Hook, paths: Sequence[str]) -> str | None:
     """What would stop this hook running, or None.
 
     "Already present" was decided on the hook id alone, so an entry could carry
     the right id and never fire: `stages: [manual]` keeps it off the commit
-    path, and a hook-level `files:`/`exclude:` can match nothing. The tool then
-    counted the catalog entry as covered, stopped offering it, and the user was
-    told a secret scan was in force that was not.
+    path, and a hook-level `files:`/`exclude:` can let nothing through. The tool
+    then counted the catalog entry as covered, stopped offering it, and the user
+    was told a secret scan was in force that was not.
     """
     settings = hook.settings
     stages = settings.get("stages", "")
@@ -1163,14 +1192,16 @@ def looks_disabled(hook: cfgmod.Hook) -> str | None:
     # excluded from.
     if settings.get("always_run", "").lower() in ("true", "yes", "on"):
         return None
-    if settings.get("exclude"):
-        return f"exclude: {settings['exclude']}"
-    if settings.get("files"):
-        return f"files: {settings['files']}"
+    exclude = settings.get("exclude", "")
+    if exclude and (why := scope_admits_nothing(exclude, paths, excluding=True)):
+        return f"exclude: {exclude} ({why})"
+    files = settings.get("files", "")
+    if files and (why := scope_admits_nothing(files, paths, excluding=False)):
+        return f"files: {files} ({why})"
     return None
 
 
-def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
+def disabled_hooks(cfg: cfgmod.Config, key: str, paths: Sequence[str]) -> list[str]:
     """Present hooks for `key` carrying something that stops them running.
 
     For a catalog entry identified by hook id rather than repo URL -- the
@@ -1190,7 +1221,7 @@ def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
         for hook in entry.hooks:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
-            why = looks_disabled(hook)
+            why = looks_disabled(hook, paths)
             if why:
                 out.append(f"{clean(hook.id)} ({clean(why)})")
     return out
@@ -1342,13 +1373,15 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
 
 
 def plan(
-    cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool
+    cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool, paths: Sequence[str]
 ) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict[str, str], dict[str, set[str]]]:
     """Work out every insertion, without touching the file.
 
     `pre_existing` says whether the config came from the user or from our own
     skeleton, which is the difference between "you already had an `exclude`, so
     .gitignore is not covered" and a note about a line we just wrote ourselves.
+    `paths` is the repository's file listing, for judging whether a present
+    entry's `files:`/`exclude:` scope lets anything through.
     """
     insertions: list[cfgmod.Insertion] = []
     # Per key, the hook ids this run intends to put in the file. verify_written
@@ -1424,7 +1457,7 @@ def plan(
         have_ids = cfg.hook_ids(entry.url)
         missing = [h.id for h in entry.hooks if h.id not in have_ids]
         if not missing:
-            disabled = disabled_hooks(cfg, key)
+            disabled = disabled_hooks(cfg, key, paths)
             note = (
                 f" -- but {', '.join(disabled)}: present, and looks like it will NOT run on commit"
                 if disabled
@@ -1664,7 +1697,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
-    planned, report, versions, intended = plan(cfg, keys, pre_existing=existing is not None)
+    planned, report, versions, intended = plan(
+        cfg, keys, pre_existing=existing is not None, paths=walk_repo(directory)
+    )
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)
     try:
@@ -1877,14 +1912,18 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     # An entry that is present but switched off is not coverage. Reported
     # separately so the agent can say so rather than the user being told a
     # catalog entry is already handled.
-    disabled = {k: disabled_hooks(cfg, k) for k in previous if cfg} if cfg else {}
+    paths = walk_repo(directory)
+    disabled = {k: disabled_hooks(cfg, k, paths) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths = detect_markers(directory)
     recs = [r for r in recs if r["name"] not in previous]
-    # Nor an entry whose alternative is already there: the two mermaid entries
-    # check the same fences, and offering the second beside the first reads as
-    # a gap in coverage that does not exist.
-    recs = [r for r in recs if not set(CATALOG[r["name"]].get("alternatives", ())) & set(previous)]
+    # Nor an entry whose alternative is already there AND live: the two mermaid
+    # entries check the same fences, and offering the second beside a working
+    # first reads as a gap in coverage that does not exist. Beside a disabled
+    # one it IS the gap -- the alternative has its own hook id, so adding it is
+    # the one repair this run can make where re-selecting the dead entry cannot.
+    covering = set(previous) - set(disabled)
+    recs = [r for r in recs if not set(CATALOG[r["name"]].get("alternatives", ())) & covering]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
         r["name"] for r in recs if r["name"] not in ALWAYS_ON
     ]
