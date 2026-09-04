@@ -445,12 +445,14 @@ def _scalar(raw: str, *, text: bool = False, tags: tuple[str, ...] = ("!str",)) 
     # indicator mean what they mean and are read by their own rules.
     if _CANNOT_START_PLAIN.match(raw):
         raise ConfigRefused(f"`{raw}` cannot start a plain value in YAML; quote it")
-    if text and raw[:1] in ("[", "{"):
+    if raw[:1] in ("[", "{") and (text or tagged):
         # A plain scalar cannot start with either, so this is a flow
-        # collection -- or `[.]md$`, which YAML does not parse at all. A tag
-        # does not change that: `!!str [README]` is a string tag on a sequence
-        # node, which the loader rejects.
-        raise ConfigRefused(f"`{raw}` is a collection to YAML, where pre-commit wants text")
+        # collection -- or `[.]md$`, which YAML does not parse at all -- and no
+        # use where text is wanted. A tag makes it no use anywhere: `!!str
+        # [pre-commit]` is a string tag on a sequence node, which the loader
+        # rejects, for `stages:` as much as for `files:`.
+        what = "where pre-commit wants text" if text else f"and `!{tag}` is no tag for one"
+        raise ConfigRefused(f"`{raw}` is a collection to YAML, {what}")
     if text and not tagged:
         if re.search(r":[ \t]|:$", raw):
             # `: ` inside a plain scalar is a mapping to YAML -- `[markdown,

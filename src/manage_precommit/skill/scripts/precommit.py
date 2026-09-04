@@ -115,7 +115,10 @@ CATALOG: dict[str, dict[str, Any]] = {
         "file_scoped": True,
         # identify's tags every file this entry is for carries -- a `.md` is
         # `file`, `text` and `markdown` -- so a type filter no such file can
-        # pass is judged. See types_shut_out.
+        # pass is judged. See types_admit. `text` comes from identify's
+        # extension table, not from the bytes: a file whose extension names its
+        # encoding is not sniffed (`md` is not in EXTENSIONS_NEED_BINARY_CHECK),
+        # so a NUL byte in README.md leaves it `text`.
         "target_tags": ("file", "text", "markdown"),
         "desc": "Markdown linter (config: .markdownlint.yaml)",
     },
