@@ -117,7 +117,7 @@ jobs:
 
   hooks:
     # Every hook in .pre-commit-config.yaml -- gitleaks, yamllint,
-    # markdownlint-cli2, the local mermaid linter, and the base hygiene set --
+    # markdownlint-cli2, the two local mermaid checks, and the base hygiene set --
     # is configured nowhere else. Without this job they run only on a machine
     # where somebody had run `pre-commit install`, so a change made through the
     # GitHub web editor would never meet any of them. This repository ships a
@@ -134,8 +134,8 @@ jobs:
           cache: pip
 
       # The hooks build their own environments -- Go for gitleaks, Node for
-      # markdownlint and mermaid -- which is most of the runtime. Keyed on the
-      # config, so a rev bump rebuilds and nothing else does.
+      # markdownlint and both mermaid checks -- which is most of the runtime.
+      # Keyed on the config, so a rev bump rebuilds and nothing else does.
       #
       # BOTH paths, because they are two halves of one environment: the node env
       # holds mermaid-cli, and the browser it drives is downloaded by npm's
@@ -161,10 +161,11 @@ jobs:
       # the actionable part. Without it a failure says only that something
       # changed.
       - name: Run every hook
-        # The mermaid hook renders each diagram with headless Chromium, whose
-        # sandbox cannot start on a runner with unprivileged user namespaces
-        # restricted. Without this the hook fails on a valid diagram. It is
-        # opt-in precisely so it stays a deliberate choice per environment.
+        # The mermaid-lint hook renders each diagram with headless Chromium,
+        # whose sandbox cannot start on a runner with unprivileged user
+        # namespaces restricted. Without this the hook fails on a valid
+        # diagram. It is opt-in precisely so it stays a deliberate choice per
+        # environment. mermaid-parse needs none of this: no browser.
         env:
           MERMAID_LINT_NO_SANDBOX: "1"
         run: pre-commit run --all-files --show-diff-on-failure

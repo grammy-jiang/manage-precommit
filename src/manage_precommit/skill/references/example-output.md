@@ -16,7 +16,7 @@ SCAN
   detected     markdown (README.md), mermaid fence (docs/arch.md)
 
 HOOKS
-  added        https://github.com/gitleaks/gitleaks: added (rev v8.30.1), local: added (mermaid-lint)
+  added        https://github.com/gitleaks/gitleaks: added (rev v8.30.1), local: added (mermaid-parse)
   left as-is   exclude: left as-is (pattern: ^vendor/) -- .gitignore is NOT excluded
                unless you add it yourself, and anything this pattern matches is
                skipped by EVERY hook, including the ones just added,
@@ -24,10 +24,10 @@ HOOKS
                https://github.com/adrienverge/yamllint: already present (rev v1.38.0)
   recommended  markdownlint  <- README.md  (declined)
                gitleaks  <- any repo -- secret scan
-  versions     hygiene=v6.0.0, yamllint=v1.38.0, gitleaks=v8.30.1, mermaid=11.16.0
+  versions     hygiene=v6.0.0, yamllint=v1.38.0, gitleaks=v8.30.1, mermaid-parse=mermaid@11.17.2 linkedom@0.18.13
 
 FILES
-  written  .pre-commit-config.yaml, scripts/lint-mermaid.mjs
+  written  .pre-commit-config.yaml, scripts/parse-mermaid.mjs
   kept     .yamllint.yaml
 
 VERIFY
@@ -43,7 +43,7 @@ COMMIT
   push    abc1234 -> origin/main
 
 NET
-  repos  2 -> 4  +gitleaks +mermaid
+  repos  2 -> 4  +gitleaks +mermaid-parse
   diff   2 files changed, 39 insertions(+)
 ```
 
@@ -55,7 +55,7 @@ NET
 | `SCAN detected` | `precommit.py --recommend`, from markers it actually saw |
 | `HOOKS added` / `left as-is` | the merge report: one line per **catalog** entry, plus `minimum_pre_commit_version` and `exclude` |
 | `HOOKS recommended` | `--recommend`; the `<-` names the file that triggered it |
-| `HOOKS versions` | fetched live at merge time (`git ls-remote`, `npm view`) for **every selected key**, including ones that turn out to be already present |
+| `HOOKS versions` | fetched live at merge time (`git ls-remote`, `npm view`) for **every selected key**, including ones that turn out to be already present; an entry that pins several npm packages lists them as `name@version` |
 | `FILES` | what the write step created versus what it found already there |
 | `VERIFY` | `precommit.py --verify` — `run_ok`, `vacuous` and `autofixed` are its verdict |
 | `COMMIT choice` | derived by `gitwork.py facts` from the recorded hash and push |
@@ -67,7 +67,7 @@ Nothing in that table is assembled by the agent. If a number is wrong, the fix
 is in the script that computed it, not in the wording here.
 
 **`HOOKS` reports on the catalog, plus two top-matter keys.** The rows iterate
-the five catalog entries, so a hook the user already had that this skill does
+the six catalog entries, so a hook the user already had that this skill does
 not manage never appears in either. That is not an omission -- it is preserved
 untouched, and saying nothing about it is the honest report. The place to see it
 is the diff in Step 5.

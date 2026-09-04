@@ -19,13 +19,19 @@ Two invariants:
 | `hygiene` | [pre-commit-hooks](https://github.com/pre-commit/pre-commit-hooks): trailing whitespace, end-of-file, check-yaml, check-json, large files, merge conflicts, mixed line endings | — |
 | `yamllint` | [yamllint](https://github.com/adrienverge/yamllint) | `.yamllint.yaml` |
 | `markdownlint` | [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2) | `.markdownlint.yaml` |
-| `mermaid` | local hook validating fenced `mermaid` blocks | `scripts/lint-mermaid.mjs` |
+| `mermaid-parse` | local hook parsing fenced `mermaid` blocks with Mermaid's own parser — no browser | `scripts/parse-mermaid.mjs` |
+| `mermaid` | local hook rendering fenced `mermaid` blocks with mermaid-cli in a headless Chromium | `scripts/lint-mermaid.mjs` |
 | `gitleaks` | [gitleaks](https://github.com/gitleaks/gitleaks) secret scan | — |
 
-Mermaid ships no offline linter — its real parser only runs in a browser — so
-the bundled hook renders each diagram with
-[mermaid-cli](https://github.com/mermaid-js/mermaid-cli) and fails the commit on
-a parse error.
+Mermaid ships no linter, so both mermaid entries are bundled hooks, and they
+check the same fences — pick one. `mermaid-parse` runs Mermaid's own
+[`mermaid.parse()`](https://mermaid.js.org/config/usage#syntax-validation-without-rendering)
+under [LinkeDOM](https://github.com/WebReflection/linkedom), which stands in
+for the DOM it needs, so no browser is involved; it is what the scan
+recommends. It catches syntax errors and only those: a diagram that fails only
+when it is rendered gets through. `mermaid` renders each diagram with
+[mermaid-cli](https://github.com/mermaid-js/mermaid-cli) in a headless
+Chromium, and catches those too.
 
 ## Platforms
 
@@ -43,6 +49,7 @@ is not the half that matters, so the package does not claim the platform.
 - Python 3.10+ and `git`. **No third-party Python packages** — the skill is
   installed by symlink and its scripts run under your system `python3`, so
   anything it needed would have to be installed by hand on every machine.
+- For the `mermaid-parse` hook: Node.js and npm, nothing else.
 - For the `mermaid` hook only: Node.js, plus a Chromium/Chrome the hook's
   `mermaid-cli` can drive (it downloads one on first use if none is reusable).
   In CI, a container, or on a distro that restricts unprivileged user
@@ -175,9 +182,10 @@ A refusal is an exit code; a guess would be a wrong answer that looks right.
 
 ## Dogfooding
 
-This repo uses its own hooks. `scripts/lint-mermaid.mjs` is a symlink to
-`src/manage_precommit/skill/assets/lint-mermaid.mjs`, so the copy this repo runs
-and the payload it ships to other repos cannot drift apart.
+This repo uses its own hooks. `scripts/lint-mermaid.mjs` and
+`scripts/parse-mermaid.mjs` are symlinks into
+`src/manage_precommit/skill/assets/`, so the copies this repo runs and the
+payloads it ships to other repos cannot drift apart.
 
 ## Development
 

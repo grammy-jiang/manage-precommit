@@ -1,8 +1,8 @@
 ---
 name: manage-precommit
-description: Set up or update a repository's pre-commit hooks from a curated catalog (base hygiene, yamllint, markdownlint, a bundled mermaid-diagram validator, gitleaks), pinning the latest versions and merging into any existing .pre-commit-config.yaml without clobbering the user's own hooks, revs, or comments. Then install, test, review the diff, and — with confirmation — commit and push only the pre-commit files. Use when the user asks to add, set up, configure, refresh, or update pre-commit hooks / a .pre-commit-config.yaml, add a linter/formatter/secret-scan/markdown/mermaid/yaml check, or "set up pre-commit".
+description: Set up or update a repository's pre-commit hooks from a curated catalog (base hygiene, yamllint, markdownlint, two bundled mermaid-diagram checks — one parses without a browser, one renders — gitleaks), pinning the latest versions and merging into any existing .pre-commit-config.yaml without clobbering the user's own hooks, revs, or comments. Then install, test, review the diff, and — with confirmation — commit and push only the pre-commit files. Use when the user asks to add, set up, configure, refresh, or update pre-commit hooks / a .pre-commit-config.yaml, add a linter/formatter/secret-scan/markdown/mermaid/yaml check, or "set up pre-commit".
 license: MIT
-compatibility: Linux and macOS; not Windows, which lacks the POSIX shell this procedure needs. Requires python3 3.10+, git and pre-commit on PATH; the mermaid entry also needs node and npm. Writes only the pre-commit setup files of the repository it is pointed at, plus temporary files outside it. Runs under Claude Code, Codex and GitHub Copilot CLI, though its questions need a host that can reach a user.
+compatibility: Linux and macOS; not Windows, which lacks the POSIX shell this procedure needs. Requires python3 3.10+, git and pre-commit on PATH; the mermaid entries also need node and npm. Writes only the pre-commit setup files of the repository it is pointed at, plus temporary files outside it. Runs under Claude Code, Codex and GitHub Copilot CLI, though its questions need a host that can reach a user.
 allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Read Write
 metadata:
   homepage: https://github.com/grammy-jiang/manage-precommit
@@ -37,7 +37,7 @@ the repository being worked on. Substitute both; never run a command with the
 angle brackets still in it.
 
 The scripts need Python 3.10+ and `git`; `pre-commit` itself from Step 4
-onward; and `npm` for the `mermaid` entry.
+onward; and `npm` for the `mermaid-parse` and `mermaid` entries.
 They import each other from their own directory, so they run from wherever the
 skill is installed, with nothing to install first. If one is missing, say so and
 stop; do not fall back to hand-written git or a hand-written config.
@@ -126,21 +126,29 @@ Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-mis
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.
 
-Before offering `mermaid`, relay `prerequisites.mermaid` from Step 1 — the scan
-already looked. `binaries present` means `node` and `npm` are on PATH and
-nothing beyond that: the version pin is attempted in Step 3 and can still fail
-there. If it is anything else, say so in the question — **and say that picking it anyway
-aborts the whole write, not just that entry**: the version pin happens before
-anything is written, so a missing `npm` means none of the other selected hooks
-get written either. Also say the hook downloads a headless Chromium the first
-time it runs (large, one-off) unless one is already reusable.
+Before offering `mermaid-parse`, relay `prerequisites.mermaid-parse` from Step 1
+— the scan already looked. `binaries present` means `node` and `npm` are on
+PATH and nothing beyond that: the version pins are attempted in Step 3 and can
+still fail there. If it is anything else, say so in the question — **and say
+that picking it anyway aborts the whole write, not just that entry**: the
+version pin happens before anything is written, so a missing `npm` means none
+of the other selected hooks get written either.
 
-**This applies whenever `mermaid` ends up in the final selection**, including
-when the user types it into "Other" after seeing `--catalog`. The catalog line
-says only "needs node + a browser"; it carries no live check and no warning
-that a missing `npm` voids every other hook they chose. Run the check and say
-all of it before accepting the selection, not only when you were the one
-offering it.
+**Say what `mermaid-parse` checks, as part of the offer.** It parses each fenced
+diagram with Mermaid's own parser and no browser, so it catches syntax errors
+and only those: a diagram that fails only when it is *rendered* gets through.
+Name `mermaid` as the alternative — the same fences, rendered with mermaid-cli,
+which catches those too, at the cost of a headless Chromium the hook downloads
+the first time it runs (large, one-off) unless one is already reusable. They
+check the same thing, so offer **one or the other, not both**; the scan never
+recommends `mermaid`, and a user who wants it asks for it by name. Whichever is
+chosen, `prerequisites.<that key>` is the value to relay for it.
+
+**This applies whenever either entry ends up in the final selection**,
+including when the user types one into "Other" after seeing `--catalog`. The
+catalog line carries no live check and no warning that a missing `npm` voids
+every other hook they chose. Run the check and say all of it before accepting
+the selection, not only when you were the one offering it.
 
 The final list is `always_on` plus whatever the user selected. **Write it to a
 file with the Write tool**, **one name per line**, at a `mktemp` path outside
@@ -239,10 +247,11 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
     host, and sending someone to check the wrong service is worse than saying
     nothing. Otherwise the same advice as `network`.
   - `npm-missing` / `unrunnable` — the tool named by `source` is absent, or is
-    there and would not start. For `npm` that is only `mermaid`'s problem: every
-    other selection succeeds without it. For `git` it stops the whole run, and
-    "would not start" means something on their PATH is broken rather than
-    missing — quote the message, which names it.
+    there and would not start. For `npm` that is only the mermaid entries'
+    problem (`mermaid-parse`, `mermaid`): every other selection succeeds
+    without it. For `git` it stops the whole run, and "would not start" means
+    something on their PATH is broken rather than missing — quote the message,
+    which names it.
   - `invalid-version` — the registry answered with something that is not a
     version, and it was refused rather than written into their config.
   - `git-ls-remote` — the hook repository's lookup failed, and that is *all*

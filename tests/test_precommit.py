@@ -36,14 +36,15 @@ def test_recommend_names_the_file_that_triggered_each_entry(repo, stubs):
     assert got["always_on"] == ["hygiene", "yamllint"]
     by_name = {r["name"]: r["reason"] for r in got["recommended"]}
     assert by_name["markdownlint"].endswith(".md")
-    assert by_name["mermaid"] == "docs/arch.md"
+    assert by_name["mermaid-parse"] == "docs/arch.md"
+    assert "mermaid" not in by_name, "the renderer is asked for by name, never recommended"
     assert "gitleaks" in by_name
     assert got["config"] == "none"
 
 
 def test_recommend_skips_mermaid_without_a_fence(repo, stubs):
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
-    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+    assert not {"mermaid", "mermaid-parse"} & {r["name"] for r in got["recommended"]}
 
 
 def test_recommend_does_not_re_offer_what_the_config_already_has(
@@ -266,7 +267,7 @@ def test_detect_reports_what_was_written(repo, keys_file, facts_path, stubs):
 def test_catalog_lists_every_key(stubs):
     proc = run("precommit.py", "--catalog", stubs=stubs)
     keys = {line.split("\t")[0] for line in proc.stdout.splitlines() if line.strip()}
-    assert keys == {"hygiene", "yamllint", "markdownlint", "mermaid", "gitleaks"}
+    assert keys == {"hygiene", "yamllint", "markdownlint", "mermaid-parse", "mermaid", "gitleaks"}
 
 
 # -- verify ------------------------------------------------------------------
@@ -468,7 +469,7 @@ def test_a_symlinked_markdown_file_is_never_read(repo, stubs, tmp_path):
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     # The fence exists only inside the symlink's target, so recommending
     # mermaid would prove the target had been read.
-    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+    assert not {"mermaid", "mermaid-parse"} & {r["name"] for r in got["recommended"]}
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
@@ -2829,7 +2830,7 @@ def test_vendored_content_does_not_drive_the_recommendation(repo, stubs):
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     names = {r["name"] for r in got["recommended"]}
     assert "markdownlint" not in names
-    assert "mermaid" not in names
+    assert not {"mermaid", "mermaid-parse"} & set(names)
     assert got["detected"] == []
 
 
@@ -2838,7 +2839,7 @@ def test_a_top_level_markdown_file_still_drives_it(repo, stubs):
     (repo / "doc.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     names = {r["name"] for r in got["recommended"]}
-    assert {"markdownlint", "mermaid"} <= names
+    assert {"markdownlint", "mermaid-parse"} <= names
 
 
 def test_recommend_reports_bare_paths_alongside_the_prose(repo, stubs, facts_path):
@@ -4075,3 +4076,160 @@ def test_the_rerun_list_is_worked_out_for_the_agent(repo, keys_file, facts_path,
     assert set(facts["files"]["written"]) <= set(got["rerun_files"])
     assert set(facts["scan"]["detected_paths"]) <= set(got["rerun_files"])
     assert facts["scan"]["detected_paths"], "no trigger detected; the test proves half of itself"
+
+
+# -- mermaid-parse: the browser-free sibling -----------------------------------
+
+
+def test_generate_pins_every_package_mermaid_parse_needs(repo, keys_file, facts_path, stubs):
+    """Two npm pins for one entry, each asked for by name, both recorded.
+
+    A bare version cannot say which of two packages it belongs to, so an entry
+    that pins several records `name@version` pairs; an entry that pins one keeps
+    the bare version the summary has always shown.
+    """
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    assert proc.returncode == 0, proc.stderr
+    text = (repo / ".pre-commit-config.yaml").read_text()
+    assert f'"mermaid@{NPM_VERSION}"' in text
+    assert f'"linkedom@{NPM_VERSION}"' in text
+    assert "__NPM" not in text
+    calls = stub_calls(stubs)
+    assert "npm view mermaid@latest" in calls
+    assert "npm view linkedom@latest" in calls
+    assert out_json(proc)["versions"]["mermaid-parse"] == (
+        f"mermaid@{NPM_VERSION} linkedom@{NPM_VERSION}"
+    )
+    assert json.loads(facts_path.read_text())["hooks"]["versions"]["mermaid-parse"] == (
+        f"mermaid@{NPM_VERSION} linkedom@{NPM_VERSION}"
+    )
+
+
+def test_mermaid_parse_writes_its_own_asset_and_only_that(repo, keys_file, facts_path, stubs):
+    generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    shipped = (SKILL / "assets" / "parse-mermaid.mjs").read_bytes()
+    assert (repo / "scripts" / "parse-mermaid.mjs").read_bytes() == shipped
+    assert not (repo / "scripts" / "lint-mermaid.mjs").exists()
+    facts = json.loads(facts_path.read_text())
+    assert set(facts["files"]["written"]) == {
+        ".pre-commit-config.yaml",
+        "scripts/parse-mermaid.mjs",
+    }
+
+
+def test_a_foreign_parse_mermaid_script_stops_the_write(repo, keys_file, facts_path, stubs):
+    """The same guard lint-mermaid.mjs has: the config would EXECUTE this file."""
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "parse-mermaid.mjs").write_text("// not ours\n")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    assert proc.returncode != 0
+    assert "NOT the file this skill ships" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+    assert (repo / "scripts" / "parse-mermaid.mjs").read_text() == "// not ours\n"
+
+
+def test_the_scan_recommends_the_check_that_needs_no_browser(repo, stubs):
+    """A pre-commit hook is a syntax check first. The renderer stays in the
+    catalog for whoever wants it, asked for by name."""
+    (repo / "doc.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    names = [r["name"] for r in got["recommended"]]
+    assert "mermaid-parse" in names
+    assert "mermaid" not in names
+    assert "mermaid-parse" in got["proposed"]
+    assert "mermaid fence (doc.md)" in got["detected"]
+
+
+@pytest.mark.parametrize(
+    "present,absent", [("mermaid", "mermaid-parse"), ("mermaid-parse", "mermaid")]
+)
+def test_neither_mermaid_entry_is_offered_beside_the_other(
+    repo, keys_file, facts_path, stubs, present, absent
+):
+    """They check the same fences. Offering the second beside the first reads
+    as a gap in coverage that does not exist -- in either direction."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, present)
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert present in got["previous"]
+    names = {r["name"] for r in got["recommended"]}
+    assert absent not in names
+    assert present not in names
+    # The fence itself is still reported: the scan saw it, whatever is installed.
+    assert "mermaid fence (doc.md)" in got["detected"]
+
+
+def test_the_alternatives_point_at_each_other(stubs):
+    import precommit as P
+
+    for key, meta in P.CATALOG.items():
+        for other in meta.get("alternatives", ()):
+            assert key in P.CATALOG[other].get("alternatives", ()), (
+                f"{key} names {other} as an alternative, and {other} does not name it back"
+            )
+    assert P.CATALOG["mermaid-parse"]["alternatives"] == ("mermaid",)
+
+
+def test_both_mermaid_entries_can_share_one_config(repo, keys_file, facts_path, stubs):
+    """Alternatives, not exclusives: asked for by name, the second is inserted
+    as its own local block, and both are then present and both assets are on
+    disk."""
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid-parse", force=True)
+    assert proc.returncode == 0, proc.stderr
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert {"mermaid", "mermaid-parse"} <= set(got["present"])
+    local_ids = {h for r in got["repos"] if r["repo"] == "local" for h in r["hooks"]}
+    assert {"mermaid-lint", "mermaid-parse"} <= local_ids
+    assert (repo / "scripts" / "lint-mermaid.mjs").exists()
+    assert (repo / "scripts" / "parse-mermaid.mjs").exists()
+
+
+def test_prerequisites_are_reported_per_npm_backed_entry(repo, stubs):
+    """SKILL.md reads `prerequisites.<key>` for whichever entry is offered, so
+    every entry that pins an npm package has a row -- and they share one answer,
+    because they share the two binaries."""
+    import precommit as P
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    npm_backed = {k for k, m in P.CATALOG.items() if m.get("npm")}
+    assert set(got["prerequisites"]) == npm_backed == {"mermaid", "mermaid-parse"}
+    assert len(set(got["prerequisites"].values())) == 1
+
+
+def test_an_unfilled_placeholder_in_any_spelling_stops_the_run(
+    repo, keys_file, facts_path, stubs, skill_copy
+):
+    """`__NPM__` was the only npm spelling the old check knew, and a fragment
+    pinning two packages carries two others. A token the catalog does not name
+    has to be caught by shape, before anything is written."""
+    fragment = skill_copy / "templates" / "mermaid-parse.yaml"
+    fragment.write_text(fragment.read_text().replace("__NPM_LINKEDOM__", "__NPM_LINKEDOM_2__"))
+    proc = generate(
+        repo, keys_file, facts_path, stubs, "mermaid-parse", scripts=skill_copy / "scripts"
+    )
+    assert proc.returncode != 0
+    assert "unfilled placeholder" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_this_repository_runs_every_local_hook_it_ships(stubs):
+    """The config in this checkout is managed by this tool, and CI runs it.
+
+    Every local hook the catalog can write is in it, wired to a symlink into
+    the very asset it ships -- so the copy that runs here and the payload that
+    goes into other repositories cannot drift apart. A hook that is only ever
+    run in other people's repositories is one nobody here would see break.
+    """
+    import precommit as P
+
+    root = SKILL.parents[2]
+    config = (root / ".pre-commit-config.yaml").read_text()
+    for key, meta in P.CATALOG.items():
+        if not meta.get("local_hook_id"):
+            continue
+        assert f"- id: {meta['local_hook_id']}" in config, f"{key} is not dogfooded"
+        for src, rel in meta["assets"]:
+            link = root / rel
+            assert link.is_symlink(), f"{rel} is not a symlink"
+            assert link.resolve() == (SKILL / "assets" / src).resolve(), rel

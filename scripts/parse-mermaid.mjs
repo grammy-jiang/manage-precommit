@@ -1,0 +1,1 @@
+../src/manage_precommit/skill/assets/parse-mermaid.mjs

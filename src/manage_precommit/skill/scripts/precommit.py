@@ -114,22 +114,43 @@ CATALOG: dict[str, dict[str, Any]] = {
         "file_scoped": True,
         "desc": "Markdown linter (config: .markdownlint.yaml)",
     },
+    "mermaid-parse": {
+        "fragment": "mermaid-parse.yaml",
+        "rev_repo": None,
+        # Placeholder -> npm package, one live lookup each. Two pins for one
+        # entry: Mermaid's own parser is the check, and LinkeDOM is the DOM it
+        # needs to run outside a browser. The placeholders are distinct so a
+        # shared token can never fill a fragment with the wrong package's
+        # version.
+        "npm": {"__NPM_MERMAID__": "mermaid", "__NPM_LINKEDOM__": "linkedom"},
+        # No rev_repo, so presence is decided by hook id -- see `mermaid`.
+        "local_hook_id": "mermaid-parse",
+        "assets": [("parse-mermaid.mjs", "scripts/parse-mermaid.mjs")],
+        "executes_assets": True,
+        "file_scoped": True,
+        # The two mermaid entries check the same fences. The scan recommends
+        # this one, because it needs no browser; `mermaid` renders and catches
+        # what parsing alone cannot. A config carrying either is not offered
+        # the other (see cmd_recommend).
+        "alternatives": ("mermaid",),
+        "desc": "Mermaid syntax check with mermaid.parse(), no browser (local hook; needs node)",
+    },
     "mermaid": {
         "fragment": "mermaid.yaml",
         "rev_repo": None,
-        "npm": "@mermaid-js/mermaid-cli",
-        # The one catalog entry with no rev_repo, so presence is decided by hook
-        # id. Named here rather than spelled out at each use: three separate
-        # literals meant renaming it in the template would leave present_keys
-        # re-offering mermaid forever and verify_written failing every
-        # successful write.
+        "npm": {"__NPM__": "@mermaid-js/mermaid-cli"},
+        # No rev_repo, so presence is decided by hook id. Named here rather than
+        # spelled out at each use: three separate literals meant renaming it in
+        # the template would leave present_keys re-offering mermaid forever and
+        # verify_written failing every successful write.
         "local_hook_id": "mermaid-lint",
         "assets": [("lint-mermaid.mjs", "scripts/lint-mermaid.mjs")],
         # The fragment hardcodes `entry: node scripts/lint-mermaid.mjs`, so this
         # asset is not data the hook reads -- it is the program the hook runs.
         "executes_assets": True,
         "file_scoped": True,
-        "desc": "Mermaid diagram validator (local hook; needs node + a browser)",
+        "alternatives": ("mermaid-parse",),
+        "desc": "Mermaid diagram validator, rendered (local hook; needs node + a browser)",
     },
     "gitleaks": {
         "fragment": "gitleaks.yaml",
@@ -166,6 +187,11 @@ git = make_git(die)
 
 # -- versions ----------------------------------------------------------------
 VER_RE = re.compile(r"^v?\d+(?:\.\d+)*$")
+# Any `__NAME__` token a fragment may still carry after substitution. Checked by
+# shape rather than by listing `__REV__` and `__NPM__`: the mermaid-parse
+# fragment pins two packages under two names, and a literal check for the two
+# spellings it knew would have let a third through unfilled.
+PLACEHOLDER_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
 
 
 def version_key(tag: str) -> list[int]:
@@ -1001,9 +1027,14 @@ def prerequisites() -> dict[str, str]:
     two executables are on PATH. Whether the version pin can reach the registry
     is settled in Step 3 and nowhere else. SKILL.md branches on this string
     literally, so it is pinned by a test rather than by intent.
+
+    One row per entry that pins an npm package, keyed the way SKILL.md reads it
+    -- `prerequisites.<key>` for whichever entry is being offered -- rather than
+    one row named after the tool the entries share.
     """
     missing = sorted(tool for tool in ("npm", "node") if shutil.which(tool) is None)
-    return {"mermaid": "missing: " + ", ".join(missing) if missing else "binaries present"}
+    status = "missing: " + ", ".join(missing) if missing else "binaries present"
+    return {key: status for key, meta in CATALOG.items() if meta.get("npm")}
 
 
 def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], list[str]]:
@@ -1045,7 +1076,11 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
                 continue
             text = raw.decode("utf-8", "replace")
             if MERMAID_FENCE.search(text):
-                recs.append({"name": "mermaid", "reason": clean(rel)})
+                # The syntax check, not the renderer: a pre-commit hook is a
+                # syntax check first, and this one needs no browser. `mermaid`
+                # stays in the catalog for render-level coverage, asked for by
+                # name; cmd_recommend offers neither while the other is present.
+                recs.append({"name": "mermaid-parse", "reason": clean(rel)})
                 markers.append(f"mermaid fence ({clean(rel)})")
                 trigger_paths.append(rel)
                 break
@@ -1138,8 +1173,8 @@ def looks_disabled(hook: cfgmod.Hook) -> str | None:
 def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
     """Present hooks for `key` carrying something that stops them running.
 
-    For a catalog entry identified by hook id rather than repo URL -- mermaid is
-    the only one -- the id must be matched too. `repo: local` is a bucket
+    For a catalog entry identified by hook id rather than repo URL -- the
+    mermaid entries -- the id must be matched too. `repo: local` is a bucket
     anybody's hooks can sit in, so matching the URL alone attributed every
     disabled local hook in the file to mermaid. That is the mirror image of the
     false-coverage bug this function exists to catch: instead of calling a dead
@@ -1187,7 +1222,7 @@ def present_keys(cfg: cfgmod.Config | None) -> list[str]:
 
 
 def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
-    """The catalog fragment's text, its parsed entry, and the version pinned.
+    """The catalog fragment's text, its parsed entry, and the version(s) pinned.
 
     The fragment is *text*, and stays text all the way into the file: the
     placeholders are substituted and the block is inserted verbatim, so the
@@ -1198,14 +1233,21 @@ def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
     meta = CATALOG[key]
     path = os.path.join(TEMPLATES, meta["fragment"])
     text = read_bytes_or_die(path, die).decode("utf-8")
-    version: str | None = None
+    pinned: list[str] = []
     if meta.get("rev_repo"):
         version = latest_tag(meta["rev_repo"])
         text = text.replace("__REV__", version)
-    if meta.get("npm"):
-        version = npm_latest(meta["npm"])
-        text = text.replace("__NPM__", version)
-    if "__REV__" in text or "__NPM__" in text:
+        pinned.append(version)
+    # Placeholder -> package, one live lookup each. An entry that pins several
+    # packages records them as `name@version` pairs, since a bare version would
+    # not say which package it belongs to; an entry that pins one keeps the bare
+    # version the summary has always shown.
+    npm: dict[str, str] = meta.get("npm", {})
+    for placeholder, package in npm.items():
+        version = npm_latest(package)
+        text = text.replace(placeholder, version)
+        pinned.append(version if len(npm) == 1 else f"{package}@{version}")
+    if PLACEHOLDER_RE.search(text):
         die(f"catalog fragment {meta['fragment']} still has an unfilled placeholder")
     try:
         parsed = cfgmod.scan("repos:\n" + text)
@@ -1213,7 +1255,7 @@ def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
         die(f"catalog fragment {meta['fragment']} is malformed: {exc}")
     if len(parsed.repos) != 1:
         die(f"catalog fragment {meta['fragment']} must declare exactly one repo entry")
-    return text, parsed.repos[0], version
+    return text, parsed.repos[0], " ".join(pinned) or None
 
 
 def fragment_hook_blocks(text: str, entry: cfgmod.RepoEntry, wanted: set[str]) -> list[list[str]]:
@@ -1447,7 +1489,7 @@ def refuse_path_escaping_repo(directory: str, rel: str) -> str:
     """Resolve an asset destination, refusing anything that leaves the repo.
 
     This is the one write that does not go to a fixed filename in the repo root:
-    the mermaid asset lands at ``scripts/lint-mermaid.mjs``. `os.makedirs` and
+    the mermaid assets land under ``scripts/``. `os.makedirs` and
     `shutil.copyfile` both FOLLOW a symlink -- at the final component and at
     every intermediate one -- so a repo that ships a ``scripts`` symlink
     pointing anywhere writable turns this into an arbitrary file write.
@@ -1568,8 +1610,8 @@ def verify_written(
     for key in keys:
         meta = CATALOG[key]
         url = meta.get("rev_repo")
-        # mermaid is the one entry with no rev_repo: it lives under `repo:
-        # local`, so its ids come from the local bucket rather than a URL.
+        # The mermaid entries have no rev_repo: they live under `repo: local`,
+        # so their ids come from the local bucket rather than a URL.
         present = (after.hook_ids(url) if url in urls else set()) if url else after.local_hook_ids()
         missing = sorted(expected_ids.get(key, set()) - present)
         if missing:
@@ -1839,6 +1881,10 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths = detect_markers(directory)
     recs = [r for r in recs if r["name"] not in previous]
+    # Nor an entry whose alternative is already there: the two mermaid entries
+    # check the same fences, and offering the second beside the first reads as
+    # a gap in coverage that does not exist.
+    recs = [r for r in recs if not set(CATALOG[r["name"]].get("alternatives", ())) & set(previous)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
         r["name"] for r in recs if r["name"] not in ALWAYS_ON
     ]
@@ -2097,8 +2143,8 @@ def npm_cache_dir() -> str | None:
 def npm_cache_env(cfg: cfgmod.Config | None, scratch: str) -> dict[str, str] | None:
     """An environment giving `pre-commit` a usable npm cache, or None to inherit.
 
-    The mermaid entry is a `language: node` hook with `additional_dependencies`,
-    so `pre-commit` builds its environment by running `npm install` -- and
+    The mermaid entries are `language: node` hooks with `additional_dependencies`,
+    so `pre-commit` builds their environments by running `npm install` -- and
     pre-commit sets `npm_config_prefix` and unsets `npm_config_userconfig`, but
     never touches the cache. An unwritable cache path (`/root/.npm` in a sandbox
     with no writable HOME) therefore kills the hook install exactly the way it
