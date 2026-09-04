@@ -4677,6 +4677,32 @@ def test_a_capped_fence_probe_lets_no_alternative_stand_in(repo, stubs):
     assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
 
 
+def test_a_present_entry_that_never_reaches_the_fence_file_is_reported(repo, stubs):
+    """`mermaid-parse` scoped to `^docs/` runs on `docs/a.md` and never sees
+    the `README.md` the fence is in. It is live, so it was "already there" and
+    nothing more; now it is reported beside the dead entries, and the live
+    alternative is offered in its place. Widened to every Markdown file, it is
+    simply present."""
+    (repo / "docs").mkdir()
+    (repo / "docs" / "a.md").write_text("# a\n")
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^docs/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    assert "does not reach README.md" in got["disabled"]["mermaid-parse"][0]
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert offered.get("mermaid") == "README.md"
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

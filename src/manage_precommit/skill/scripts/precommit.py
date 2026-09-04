@@ -2183,6 +2183,24 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     disabled = {k: disabled_hooks(cfg, k, listing) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths, raw_paths = detect_markers(directory)
+    # A present entry the scan named, live, and yet not reaching the file it
+    # was named for: a `mermaid-parse` scoped to `^docs/` runs on `docs/a.md`
+    # and never sees the `README.md` whose fence the probe found. Selecting it
+    # again writes nothing -- same hook id -- so this is reported beside the
+    # dead entries, where SKILL.md already tells the agent to say the coverage
+    # is not what it appears to be, and where the live alternative is offered
+    # in its place. Only from a complete look: a capped probe proves nothing.
+    if cfg:
+        for key, seen in raw_paths.items():
+            if key not in previous or key in disabled or not seen.complete:
+                continue
+            unreached = [p for p in seen.paths if not reaches(cfg, key, p, listing)]
+            if unreached:
+                hook_id = CATALOG[key].get("local_hook_id", key)
+                disabled[key] = [
+                    f"{clean(hook_id)} (scope does not reach {clean(unreached[0])}, "
+                    "where the scan found what this entry checks)"
+                ]
     # An entry the scan named that is present but switched off cannot be
     # repaired by selecting it again -- same hook id, nothing written -- and
     # the fence that got it named is still there. Its live alternative is
