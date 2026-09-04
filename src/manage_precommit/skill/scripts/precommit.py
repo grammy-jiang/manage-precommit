@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from typing import Any, NamedTuple, NoReturn
 from urllib.parse import unquote, urlsplit
 
@@ -1162,52 +1163,74 @@ def parse_stages(raw: str) -> set[str]:
     return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
 
 
-def scope_admits_nothing(files: str, exclude: str, listing: Listing) -> str | None:
-    """Why a hook's `files:`/`exclude:` scope lets no file through, or None.
+# One `files:`/`exclude:` filter a hook sits behind: where it is declared, the
+# pattern, and whether matching it drops a path rather than admits it.
+Filter = tuple[str, str, bool]
+
+
+def top_filters(cfg: cfgmod.Config) -> list[Filter]:
+    """The config-wide `files:` and `exclude:`, which every hook is behind.
+
+    Named for what they are, so a verdict can say "the config's exclude" rather
+    than leave the reader looking for a key the hook does not carry.
+    """
+    out: list[Filter] = []
+    for key, excluding in (("files", False), ("exclude", True)):
+        value = cfgmod.top_level_scalar(cfg, key)
+        if value:
+            out.append((f"the config's {key}", value, excluding))
+    return out
+
+
+def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | None:
+    """Why a hook's scope lets no file through, or None when it lets some.
 
     A scope is not a switch. Our own mermaid fragments carry
     `files: '\\.(md|markdown)$'` and are as live as a hook gets, yet the mere
     presence of the key used to read as "will not run" -- so every repository
     that selected `mermaid` was told on the next scan that its check was dead.
     What makes a scope a switch is what it does to THIS repository's files, and
-    the two keys are one scope: pre-commit runs a hook on a path that matches
-    `files:` AND does not match `exclude:`, both by `re.search` on the
-    repo-relative path. Judged apart, `files: '\\.md$'` beside
-    `exclude: '\\.md$'` read as live -- each half let something through, and
-    together they let nothing. So the question is asked of the same bounded
-    listing the scan walked, both halves at once, and the answer names the half
-    that did it when one half alone did. A pattern that will not compile stops
-    pre-commit loading the config at all, which is the same answer arrived at
-    earlier. Nothing is claimed when there are no paths to ask -- nor when the
-    walk was cut short by its own bounds, because "nothing in the sample passes"
-    is not "nothing passes", and a hook scoped below MAX_SCAN_DEPTH in a
-    monorepo would otherwise be called dead by the one scan that cannot see it.
+    every filter a hook sits behind is one scope: pre-commit runs a hook on a
+    path that matches the config's `files:` and the hook's, and matches neither
+    `exclude:`, all by `re.search` on the repo-relative path. Judged apart,
+    `files: '\\.md$'` beside `exclude: '\\.md$'` read as live -- each half let
+    something through, and together they let nothing -- and a config-wide
+    `files: '\\.py$'` kept every Markdown hook dead while each looked live on
+    its own line. So the question is asked of the same bounded listing the scan
+    walked, all filters at once, and the answer names the one that did it when
+    one alone did. A pattern that will not compile stops pre-commit loading the
+    config at all, which is the same answer arrived at earlier. Nothing is
+    claimed when there are no paths to ask -- nor when the walk was cut short by
+    its own bounds, because "nothing in the sample passes" is not "nothing
+    passes", and a hook scoped below MAX_SCAN_DEPTH in a monorepo would
+    otherwise be called dead by the one scan that cannot see it.
     """
-    compiled: dict[str, re.Pattern[str]] = {}
-    for key, pattern in (("files", files), ("exclude", exclude)):
-        if not pattern:
-            continue
+    compiled: list[tuple[str, str, bool, re.Pattern[str]]] = []
+    for label, pattern, excluding in filters:
         try:
-            compiled[key] = re.compile(pattern)
+            compiled.append((label, pattern, excluding, re.compile(pattern)))
         except re.error as exc:
-            return f"{key}: {pattern} (not a valid pattern: {clean(str(exc))})"
+            return f"{label}: {pattern} (not a valid pattern: {clean(str(exc))})"
     if not compiled or not listing.complete or not listing.paths:
         return None
     paths = listing.paths
-    wanted = compiled.get("files")
-    dropped = compiled.get("exclude")
-    if any(
-        (wanted is None or wanted.search(p)) and not (dropped and dropped.search(p)) for p in paths
-    ):
+
+    def admitted(path: str) -> bool:
+        return all(bool(rx.search(path)) != excluding for _, _, excluding, rx in compiled)
+
+    if any(admitted(p) for p in paths):
         return None
-    if wanted is not None and not any(wanted.search(p) for p in paths):
-        return f"files: {files} (matches no file here)"
-    if dropped is not None and all(dropped.search(p) for p in paths):
-        return f"exclude: {exclude} (matches every file here)"
-    return f"files: {files} with exclude: {exclude} (together they leave no file here)"
+    for label, pattern, excluding, rx in compiled:
+        hits = sum(1 for p in paths if rx.search(p))
+        if not excluding and hits == 0:
+            return f"{label}: {pattern} (matches no file here)"
+        if excluding and hits == len(paths):
+            return f"{label}: {pattern} (matches every file here)"
+    named = " with ".join(f"{label}: {pattern}" for label, pattern, _, _ in compiled)
+    return f"{named} (together they leave no file here)"
 
 
-def looks_disabled(hook: cfgmod.Hook, listing: Listing) -> str | None:
+def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: Sequence[Filter]) -> str | None:
     """What would stop this hook running, or None.
 
     "Already present" was decided on the hook id alone, so an entry could carry
@@ -1226,7 +1249,12 @@ def looks_disabled(hook: cfgmod.Hook, listing: Listing) -> str | None:
     # excluded from.
     if settings.get("always_run", "").lower() in ("true", "yes", "on"):
         return None
-    return scope_admits_nothing(settings.get("files", ""), settings.get("exclude", ""), listing)
+    own: list[Filter] = [
+        (key, settings[key], excluding)
+        for key, excluding in (("files", False), ("exclude", True))
+        if settings.get(key)
+    ]
+    return scope_admits_nothing([*top, *own], listing)
 
 
 def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
@@ -1242,6 +1270,7 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     meta = CATALOG[key]
     url = meta.get("rev_repo") or "local"
     wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
+    top = top_filters(cfg)
     out = []
     for entry in cfg.repos:
         if entry.url != url:
@@ -1249,7 +1278,7 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
         for hook in entry.hooks:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
-            why = looks_disabled(hook, listing)
+            why = looks_disabled(hook, listing, top)
             if why:
                 out.append(f"{clean(hook.id)} ({clean(why)})")
     return out

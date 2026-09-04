@@ -696,3 +696,38 @@ def test_a_thematic_break_ends_a_paragraph_and_is_not_a_list(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 6: containers in either order, and real tab stops ---------------
+
+
+def test_a_block_quote_inside_a_list_item_is_a_container_too(docs, env):
+    """`- > ```mermaid` nests a quote inside an item; `> - ```mermaid` the other
+    way round. Containers are a stack, so both orders read the same way and a
+    broken diagram in either is found."""
+    (docs / "doc.md").write_text(
+        "- > ```mermaid\n  > flowchart TD\n  >   A --> B\n  > ```\n\n"
+        "> - ```mermaid\n>   flowchart TD\n>     BAD\n>   ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert env.parsed() == ["flowchart TD\n  A --> B", "flowchart TD\n  BAD"]
+    assert "✖ doc.md:6" in proc.stderr
+
+
+def test_a_quote_inside_an_item_ends_with_the_item(docs, env):
+    (docs / "doc.md").write_text("- > ```mermaid\n  > flowchart TD\n```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert "never closed" in proc.stderr
+    assert not env.loaded()
+
+
+def test_leading_tabs_expand_to_tab_stops_not_to_four_spaces_each(docs, env):
+    """Two spaces and a tab reach column four, not six -- so under a bare `-`
+    item (content column two) that line is a fence two columns in, not
+    indented code four columns in."""
+    (docs / "doc.md").write_text("-\n  \t```mermaid\n  \tflowchart TD\n  \t  A --> B\n  \t```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]

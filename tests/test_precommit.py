@@ -3184,6 +3184,31 @@ def test_walk_repo_says_when_it_was_cut_short(repo, monkeypatch):
     assert P.walk_repo(str(repo)).complete is False
 
 
+def test_the_configs_own_files_filter_is_part_of_every_hooks_scope(repo, stubs):
+    """A config-wide `files: '\\.py$'` keeps every Markdown hook dead while each
+    looks live on its own line. The verdict names the filter that did it, by
+    where it lives."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "files: '\\.py$'\nrepos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "the config's files: \\.py$ (matches no file here)" in got["disabled"]["gitleaks"][0]
+
+
+def test_a_config_wide_filter_that_kills_mermaid_frees_its_alternative(
+    repo, keys_file, facts_path, stubs
+):
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    config = repo / ".pre-commit-config.yaml"
+    config.write_text("files: '\\.py$'\n" + config.read_text())
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["disabled"], got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
 def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
     """pre-commit stops loading a config whose `files:` will not compile, so the
     hook never runs -- the same answer, reached earlier and said plainly."""
