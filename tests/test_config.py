@@ -713,9 +713,15 @@ def test_a_non_boolean_where_pre_commit_wants_one_refuses_the_config():
         cfg = C.scan(head + f"        always_run: {spelling}\n        pass_filenames: {spelling}\n")
         assert cfg.repos[0].hooks[0].settings["always_run"] == spelling.removeprefix("!!bool ")
     # `!!bool` is the one tag a boolean may carry, and it does not make a word
-    # a boolean; a text key does not take it.
-    with pytest.raises(C.ConfigRefused, match=r"wants a boolean.*line 5"):
-        C.scan(head + "        always_run: !!bool maybe\n")
+    # a boolean; a text key does not take it. Under the tag the spelling may be
+    # quoted: the tag overrides the quotes' type, and `!!bool "true"` is True.
+    for line in ("always_run: !!bool maybe", 'always_run: !!bool "maybe"'):
+        with pytest.raises(C.ConfigRefused, match=r"wants a boolean.*line 5"):
+            C.scan(head + f"        {line}\n")
+    cfg = C.scan(
+        head + "        always_run: !!bool \"true\"\n        pass_filenames: !!bool 'No'\n"
+    )
+    assert cfg.repos[0].hooks[0].settings == {"always_run": "true", "pass_filenames": "No"}
     with pytest.raises(C.ConfigRefused, match=r"tag `!!bool`.*line 5"):
         C.scan(head + "        files: !!bool true\n")
 

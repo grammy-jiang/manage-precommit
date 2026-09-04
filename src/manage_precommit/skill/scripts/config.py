@@ -964,17 +964,20 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
 def _boolean(key: str, raw: str, value: str) -> str:
     """`value`, once it is the boolean a BOOL_GATING_KEYS key has to hold.
 
-    `raw` is the value as written and `value` the scalar read from it. Only a
-    plain YAML boolean spelling is one, with or without a `!!bool` tag: quoted,
-    `"true"` is a string, `!!str true` the same, `maybe` a word, and nothing at
-    all is null -- pre-commit's schema rejects each, and the file does not
-    load. Read as its spelling, the value was then compared as though it were
-    the boolean it is not.
+    `raw` is the value as written and `value` the scalar read from it. Untagged,
+    only a plain YAML boolean spelling is one: quoted, `"true"` is a string,
+    `!!str true` the same, `maybe` a word, and nothing at all is null --
+    pre-commit's schema rejects each, and the file does not load. Read as its
+    spelling, the value was then compared as though it were the boolean it is
+    not. Under a `!!bool` tag the spelling may be quoted -- the tag overrides
+    the quotes' type, and `!!bool "true"` is True to YAML -- so the scalar as
+    read is what has to spell a boolean.
     """
     if key not in BOOL_GATING_KEYS:
         return value
     tag, bare = _split_tag(_code_only(raw).strip(" \t"))
-    if (tag not in (None, "!bool")) or not _YAML_BOOL.fullmatch(bare.strip(" \t")):
+    spelled = value if tag == "!bool" else bare.strip(" \t")
+    if tag not in (None, "!bool") or not _YAML_BOOL.fullmatch(spelled):
         what = "nothing" if not value else f"`{value}`"
         raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a boolean")
     return value
