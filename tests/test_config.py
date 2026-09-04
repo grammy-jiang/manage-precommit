@@ -644,6 +644,23 @@ def test_a_plain_value_yaml_would_not_read_as_text_refuses_the_config():
         C.scan("repos:\n  - repo: local\n    hooks:\n      - id: 123\n")
 
 
+def test_a_scalar_where_pre_commit_wants_a_list_refuses_the_config():
+    """`stages: pre-commit` and `types: text` are scalars where pre-commit's
+    schema wants an array, and `stages:` with nothing after it is null; the
+    file does not load. Read as one-item lists they judged a hook in a config
+    that runs none. The flow and block forms are the lists they are."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    for line in ("stages: pre-commit", "types: text", "exclude_types: markdown", "stages:"):
+        with pytest.raises(C.ConfigRefused, match=r"wants a list.*line 5"):
+            C.scan(head + f"        {line}\n")
+    with pytest.raises(C.ConfigRefused, match=r"wants a list.*line 1"):
+        C.scan("default_stages: manual\nrepos: []\n")
+    with pytest.raises(C.ConfigRefused, match=r"holds nothing.*line 1"):
+        C.scan("default_stages:\nrepos: []\n")
+    cfg = C.scan(head + "        stages: [manual]\n        types:\n          - text\n")
+    assert cfg.repos[0].hooks[0].settings == {"stages": "[manual]", "types": "[text]"}
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""

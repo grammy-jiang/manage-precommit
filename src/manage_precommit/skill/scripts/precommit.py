@@ -1383,45 +1383,63 @@ def scope_admits_nothing(
     return f"{named} (together they leave no{'' if intended is None else 'ne'} {what})"
 
 
-# identify's two executability tags: every regular file carries exactly one,
-# and which one is not known from its name.
-EXECUTABILITY = frozenset({"executable", "non-executable"})
+def _impossible_tags(certain: frozenset[str]) -> frozenset[str]:
+    """identify's tags no regular file carrying `certain` can carry as well.
 
-
-def types_shut_out(settings: dict[str, str], certain: frozenset[str]) -> str | None:
-    """A type filter no file this entry is for can pass, or None.
-
-    pre-commit applies `types`, `types_or` and `exclude_types` on top of the
-    regex filters, by identify's tags. `certain` is what every file the entry
-    is for carries -- `file`, `text` and `markdown` for a Markdown file -- and
-    with the executability pair it is everything such a file CAN carry. So
-    `types` (every listed tag required) naming one outside that set admits no
-    such file; `types_or` (any listed tag) naming none inside it admits none;
-    `exclude_types` (any listed tag drops the file) naming a certain one drops
-    them all. Anything else -- `types: [text]`, `exclude_types: [executable]`
-    -- may or may not admit a given file and is not judged: identify's full tag
-    database is not something this tool can carry (no third-party runtime
-    dependency), and a guess would be a confident wrong verdict either way.
+    A regular file is never a directory, a symlink or a socket, and a text file
+    is never `binary`. Everything else -- `executable`, `plain-text` (which
+    identify gives a README by its name), `python` -- may or may not be there,
+    and is not this tool's to say.
     """
-    possible = certain | EXECUTABILITY
+    out = {"directory", "symlink", "socket"}
+    if "text" in certain:
+        out.add("binary")
+    return frozenset(out)
+
+
+def types_admit(settings: dict[str, str], certain: frozenset[str]) -> tuple[bool | None, str]:
+    """Whether the hook's type filters let a file carrying `certain` through.
+
+    (True, "") when they must, (False, why) when they cannot, (None, "") when
+    identify would have to be asked. pre-commit applies `types` (every listed
+    tag required), `types_or` (any) and `exclude_types` (any drops the file) on
+    top of the regex filters, by identify's tags -- and identify tags a file by
+    its extension, by well-known names (`README.md` is `plain-text` as well as
+    `markdown`), by its mode and by its contents: a database this tool does not
+    carry (no third-party runtime dependency). So a verdict rests only on tags
+    every such file certainly carries -- `file`, and for a Markdown file `text`
+    and `markdown` -- or on tags none can. `types: [python]` is neither:
+    nothing here says a file named `SConstruct.md` is not `python` too, so it
+    is not judged, and the caller says so rather than guessing.
+    """
+    impossible = _impossible_tags(certain)
+    verdict: bool | None = True
     if "types" in settings:
-        foreign = sorted(set(cfgmod.flow_items(settings["types"])) - possible)
-        if foreign:
-            return f"types: {settings['types']} (no file this entry is for carries `{foreign[0]}`)"
+        listed = set(cfgmod.flow_items(settings["types"]))
+        clash = sorted(listed & impossible)
+        if clash:
+            return (
+                False,
+                f"types: {settings['types']} (no file this entry is for can be `{clash[0]}`)",
+            )
+        if not listed <= certain:
+            verdict = None
     if "types_or" in settings:
         listed = set(cfgmod.flow_items(settings["types_or"]))
-        if listed and not listed & possible:
-            return (
-                f"types_or: {settings['types_or']} (no file this entry is for carries any of these)"
-            )
+        if listed and not listed & certain:
+            if listed <= impossible:
+                shown = settings["types_or"]
+                return False, f"types_or: {shown} (no file this entry is for can be any of these)"
+            verdict = None
     if "exclude_types" in settings:
-        hit = sorted(set(cfgmod.flow_items(settings["exclude_types"])) & certain)
+        listed = set(cfgmod.flow_items(settings["exclude_types"]))
+        hit = sorted(listed & certain)
         if hit:
-            return (
-                f"exclude_types: {settings['exclude_types']} "
-                f"(every file this entry is for carries `{hit[0]}`)"
-            )
-    return None
+            shown = settings["exclude_types"]
+            return False, f"exclude_types: {shown} (every file this entry is for is `{hit[0]}`)"
+        if listed - impossible:
+            verdict = None
+    return verdict, ""
 
 
 def looks_disabled(
@@ -1463,12 +1481,11 @@ def looks_disabled(
         return None
     # A type filter is applied on top of the regexes; one no file this entry is
     # for can pass switches the hook off for every such file, whatever `files:`
-    # admits. Judged only where identify's answer is certain (see
-    # types_shut_out); an entry that is for every file has no such certainty.
-    if tags:
-        typed_out = types_shut_out(settings, frozenset(tags))
-        if typed_out:
-            return typed_out
+    # admits. Only a certain verdict is a verdict (see types_admit); `file` is
+    # what every regular file carries, and all an entry for every file has.
+    admitted, why = types_admit(settings, frozenset(tags or ("file",)))
+    if admitted is False:
+        return why
     own: list[Filter] = [
         (key, settings[key], excluding)
         for key, excluding in (("files", False), ("exclude", True))
@@ -1477,19 +1494,21 @@ def looks_disabled(
     return scope_admits_nothing([*top.filters, *own], listing, intended)
 
 
-def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
-    """Whether some live declaration of catalog entry `key` would run on `path`.
+def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool | None:
+    """Whether some live declaration of catalog entry `key` runs on `path`.
 
-    "Present and live" is not "checks the file the scan found": a mermaid hook
-    scoped to `^docs/` is live for `docs/a.md` and never sees the `README.md`
-    whose fence got the alternative recommended. So before a live alternative
-    is allowed to stand in for a recommendation, it has to admit the very file
-    the recommendation names. A filter that could not be read -- a block-scalar
-    indicator, or a pattern that will not compile -- is no evidence of
-    coverage: `looks_disabled` claims nothing against such a hook, and this
-    claims nothing for it, so the recommendation stands. Being told the check
-    is already there, by a hook whose scope nobody read, is the false-coverage
-    report this whole feature exists to prevent.
+    True when one certainly does, False when none can, None when that cannot
+    be told: a filter the scanner did not read (a block-scalar indicator, a
+    pattern that will not compile), or a type filter only identify could judge
+    (see types_admit). "Present and live" is not "checks the file the scan
+    found": a mermaid hook scoped to `^docs/` is live for `docs/a.md` and never
+    sees the `README.md` whose fence got the alternative recommended. So before
+    a live alternative is allowed to stand in for a recommendation it has to
+    admit that very file for certain, and before a present entry is reported
+    as never reaching it, that has to be certain too. Being told the check is
+    already there, by a hook whose scope nobody read, is the false-coverage
+    report this whole feature exists to prevent; being told the scope shuts a
+    file out, by a pattern nobody read, would be its mirror.
     """
     meta = CATALOG[key]
     url = meta.get("rev_repo") or "local"
@@ -1497,6 +1516,7 @@ def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
     top = top_level(cfg)
     intended = intended_targets(key)
     consumes_files = bool(meta.get("pass_filenames", True))
+    unknown = False
     for entry in cfg.repos:
         if entry.url != url:
             continue
@@ -1520,18 +1540,31 @@ def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
                     if k in hook.settings
                 ),
             ]
-            if all(_admits(pattern, excluding, path) for _, pattern, excluding in filters):
+            verdicts = [_admits(pattern, excluding, path) for _, pattern, excluding in filters]
+            if any(v is False for v in verdicts):
+                continue  # shut out by a pattern that was read
+            typed, _ = types_admit(hook.settings, frozenset(meta.get("target_tags", ("file",))))
+            if typed is False:
+                continue
+            if typed is True and all(v is True for v in verdicts):
                 return True
-    return False
+            unknown = True
+    return None if unknown else False
 
 
-def _admits(pattern: str, excluding: bool, path: str) -> bool:
+def _admits(pattern: str, excluding: bool, path: str) -> bool | None:
+    """Whether `pattern` lets `path` through; None when that cannot be read.
+
+    A block-scalar indicator was never read, and a pattern that will not
+    compile (which looks_disabled reports on its own) decides nothing here:
+    neither is evidence that the file gets through, nor that it does not.
+    """
     if BLOCK_SCALAR_RE.fullmatch(pattern):
-        return False  # not read: no evidence the file gets through
+        return None
     try:
         hit = bool(re.search(pattern, path))
     except re.error:
-        return False  # pre-commit refuses the config, so nothing gets through
+        return None
     return hit != excluding
 
 
@@ -2283,12 +2316,23 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         for key, seen in raw_paths.items():
             if key not in previous or key in disabled:
                 continue
-            unreached = [p for p in seen.paths if not reaches(cfg, key, p, listing)]
+            verdicts = {p: reaches(cfg, key, p, listing) for p in seen.paths}
+            unreached = [p for p, v in verdicts.items() if v is False]
+            unshown = [p for p, v in verdicts.items() if v is None]
+            hook_id = CATALOG[key].get("local_hook_id", key)
             if unreached:
-                hook_id = CATALOG[key].get("local_hook_id", key)
                 disabled[key] = [
                     f"{clean(hook_id)} (scope does not reach {clean(unreached[0])}, "
                     "where the scan found what this entry checks)"
+                ]
+            elif unshown:
+                # Not a verdict either way: a filter this tool did not read -- a
+                # block-scalar pattern, a type filter only identify could judge
+                # -- stands between the hook and the file. The coverage is not
+                # shown rather than absent, and SKILL.md words it that way.
+                disabled[key] = [
+                    f"{clean(hook_id)} (scope carries a filter this tool does not read; "
+                    f"whether it reaches {clean(unshown[0])} is not shown)"
                 ]
     # An entry the scan named that is present but switched off cannot be
     # repaired by selecting it again -- same hook id, nothing written -- and
@@ -2321,7 +2365,9 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         seen = raw_paths.get(rec["name"], Seen([rec["reason"]], True))
         if not cfg or not seen.complete:
             return False  # a capped look is a sample, and a sample stands in for nothing
-        return any(all(reaches(cfg, alt, p, listing) for p in seen.paths) for alt in alternatives)
+        return any(
+            all(reaches(cfg, alt, p, listing) is True for p in seen.paths) for alt in alternatives
+        )
 
     recs = [r for r in recs if not stood_in_for(r)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [

@@ -82,6 +82,10 @@ HOOK_GATING_KEYS = (
 # scalar YAML would read as anything else (`files: null`, `files: 123`) is
 # refused for these, since the file would not load; see _scalar.
 TEXT_GATING_KEYS = ("files", "exclude")
+# ... and the ones it wants as a list. `stages: pre-commit` or `types: text` is
+# a scalar where pre-commit's schema wants an array, and the file would not
+# load; read as a one-item list it judged a hook in a config that runs none.
+LIST_GATING_KEYS = ("stages", "types", "types_or", "exclude_types", "default_stages")
 # The top-level keys that gate every hook the same way, and whose values the
 # scan reads once so a refusal lands at scan time with its line.
 TOP_LEVEL_GATING_KEYS = ("files", "exclude", "default_stages")
@@ -850,7 +854,7 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
     if inline:
         # The key's own value, folded with any lines that continue it; an
         # indicator such as `|-` comes back untouched.
-        return _scalar(_continuation(lines, key_line, inline, key_indent), text=text)
+        return _listed(key, _scalar(_continuation(lines, key_line, inline, key_indent), text=text))
     # `stages:` followed by a block sequence -- indented, or at the key's own
     # column -- is the everyday way to write this, and reading only the inline
     # scalar left it as "", which every caller treats as "not set": a hook
@@ -863,7 +867,21 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
         if text:
             raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
         return block
-    return _scalar(_continuation(lines, key_line, "", key_indent), text=text)
+    return _listed(key, _scalar(_continuation(lines, key_line, "", key_indent), text=text))
+
+
+def _listed(key: str, value: str) -> str:
+    """`value`, once it is the list a LIST_GATING_KEYS key has to hold.
+
+    A block sequence never comes through here (it is already a list); this is
+    the inline or continued form, which is a list only as `[...]`. Anything
+    else -- `stages: pre-commit`, `types: text`, or nothing at all -- is a
+    shape pre-commit's schema rejects, and the file does not load.
+    """
+    if key in LIST_GATING_KEYS and not (value.startswith("[") and value.endswith("]")):
+        what = "nothing" if not value else "a scalar"
+        raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a list")
+    return value
 
 
 def _located(exc: ConfigRefused, line_no: int) -> ConfigRefused:
@@ -1087,7 +1105,7 @@ def _top_value(lines: list[str], key_line: int, inline: str, key: str) -> tuple[
         if text:
             raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
         return True, _block_sequence(lines, key_line, 0)
-    return False, _scalar(continued, text=text)
+    return False, _listed(key, _scalar(continued, text=text))
 
 
 def top_level_sequence(cfg: Config, key: str) -> str | None:

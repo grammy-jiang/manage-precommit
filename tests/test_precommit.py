@@ -3169,17 +3169,18 @@ def test_a_non_string_tag_on_a_filter_refuses_the_config(repo, stubs):
     assert got["line"] == 8
 
 
-def test_a_type_filter_no_markdown_file_can_pass_is_a_switch(repo, stubs):
+def test_a_type_filter_is_judged_only_where_identify_would_agree(repo, stubs):
     """pre-commit applies `types`, `types_or` and `exclude_types` on top of the
-    regex filters, by identify's tags. A Markdown file is `file`, `text` and
-    `markdown`, plus one of `executable`/`non-executable`; so `types: [python]`
-    admits no Markdown file, `types_or: [python, yaml]` neither, and
-    `exclude_types: [text]` drops every one -- a mermaid hook so typed never
-    runs on the fence the scan found, and read as covering it. A filter a
-    Markdown file MAY pass -- `types: [text]`, `exclude_types: [executable]` --
-    is not judged: identify's tag database is not something this tool carries,
-    and a guess would be wrong in either direction. gitleaks is for every file,
-    so its type filter is a scope, not a switch."""
+    regex filters, by identify's tags -- which come from the extension, from
+    well-known names (a `README.md` is `plain-text` too), from the mode and
+    from the contents, a database this tool does not carry. So only a certain
+    verdict is given. Every Markdown file is `file`, `text` and `markdown`, and
+    never `binary`: `exclude_types: [text]` drops them all and `types:
+    [binary]` admits none -- dead. `types: [markdown]` admits them all -- live,
+    nothing to say. `types: [python]` or `exclude_types: [executable]` may or
+    may not admit a given file: not dead, and not shown to reach the fence
+    either, which is what the report says. gitleaks is for every file, so only
+    `file` is certain for it."""
     (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
     hook = (
         "repos:\n  - repo: local\n    hooks:\n"
@@ -3192,15 +3193,41 @@ def test_a_type_filter_no_markdown_file_can_pass_is_a_switch(repo, stubs):
         got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
         return got["disabled"].get("mermaid-parse", [""])[0]
 
-    assert "no file this entry is for carries `python`" in verdict("        types: [python]\n")
-    assert "types_or: [python, yaml]" in verdict("        types_or: [python, yaml]\n")
-    assert "every file this entry is for carries `text`" in verdict(
+    assert "every file this entry is for is `text`" in verdict(
         "        exclude_types:\n          - text\n"
     )
-    assert verdict("        types: [text]\n") == ""
-    assert verdict("        exclude_types: [executable]\n") == ""
+    assert "no file this entry is for can be `binary`" in verdict("        types: [binary]\n")
+    assert "types_or: [directory, socket]" in verdict("        types_or: [directory, socket]\n")
+    assert verdict("        types: [markdown]\n") == ""
+    assert verdict("        types_or: [text, python]\n") == ""
+    assert "whether it reaches doc.md is not shown" in verdict("        types: [python]\n")
+    assert "is not shown" in verdict("        exclude_types: [executable]\n")
     got = _disabled_for(repo, stubs, "        types: [python]\n")
     assert "gitleaks" not in got["disabled"], got["disabled"]
+    got = _disabled_for(repo, stubs, "        exclude_types: [file]\n")
+    assert "every file this entry is for is `file`" in got["disabled"]["gitleaks"][0]
+
+
+def test_a_typed_alternative_stands_in_only_where_identify_would_agree(
+    repo, keys_file, facts_path, stubs
+):
+    """A live `mermaid` with `types: [executable]` may or may not run on the
+    README the fence is in -- that is identify's call, on the file's mode -- so
+    it does not stand in, and `mermaid-parse` stays recommended. Typed
+    `[markdown]`, it certainly does, and stands in."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        types: [executable]\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        types: [markdown]\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
 def test_an_implicitly_typed_filter_refuses_the_config(repo, stubs):

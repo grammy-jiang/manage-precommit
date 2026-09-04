@@ -116,9 +116,12 @@ Anything already in `previous` is not offered again; say it is already there —
 like it will not run: `stages` that exclude the commit, a `files`/`exclude`
 scope that lets no file in the repository through, a pattern pre-commit would
 refuse to load, a `types`/`types_or`/`exclude_types` filter no file the entry is
-for can pass (a Markdown check typed `python`), `pass_filenames: false` on a hook
-whose program reads its file list, or a scope that never reaches the file the
-scan found the fence in. Say
+for can pass (`exclude_types: [markdown]` on a Markdown check), `pass_filenames:
+false` on a hook whose program reads its file list, or a scope that never
+reaches the file the scan found the fence in. One reason is worded **not
+shown**: a filter this tool could not read stands between the hook and that
+file — a block-scalar pattern, or a type filter only `identify` could judge —
+and then say the coverage is not shown, not that it is absent. Say
 which, and say it is not the coverage it appears to be. **Do not offer to add a working one — this skill cannot.** The fragment
 declares the same hook id that is already present, so selecting it again writes
 nothing and changes nothing; the merge only ever inserts and never edits an
