@@ -773,6 +773,26 @@ def test_a_mapping_where_pre_commit_wants_text_refuses_the_config():
     assert C.flow_items(cfg.repos[0].hooks[0].settings["types_or"]) == ["markdown", "file: text"]
 
 
+def test_flow_items_are_trimmed_of_line_breaks_and_refuse_a_bracket_inside_a_plain_item():
+    """A blank line between flow items -- `[manual,` over a blank line over
+    `pre-commit]` -- folds to a newline inside the value, and the item came
+    back as `\\npre-commit`, a stage no hook runs on. Between items a break is
+    white space. And `[markdown, foo[bar]` holds a flow indicator inside a
+    plain item, which YAML rejects; split on commas alone it read as two tags,
+    one of them valid."""
+    cfg = C.scan("default_stages: [manual,\n\n  pre-commit]\nrepos: []\n")
+    assert C.flow_items(C.top_level_sequence(cfg, "default_stages") or "") == [
+        "manual",
+        "pre-commit",
+    ]
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    for value in ("[markdown, foo[bar]", "[a, b]c]", "[a, {b}]"):
+        with pytest.raises(C.ConfigRefused, match="line 5"):
+            C.scan(head + f"        types_or: {value}\n")
+    cfg = C.scan(head + "        types_or: [markdown, 'foo[bar']\n")
+    assert C.flow_items(cfg.repos[0].hooks[0].settings["types_or"]) == ["markdown", "foo[bar"]
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""

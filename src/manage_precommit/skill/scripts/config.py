@@ -366,10 +366,25 @@ def flow_items(raw: str, *, text: bool = False) -> list[str]:
     items.append(body[start:])
     # An empty entry is legal only where a trailing comma leaves one -- `[a, ]`
     # -- and `[]` is the empty sequence. `[a,,b]` and `[, a]` stop YAML's
-    # loader, and dropped here they read as the shorter, valid list.
-    if any(not item.strip(" \t") for item in items[:-1]):
+    # loader, and dropped here they read as the shorter, valid list. Between
+    # items a line break -- even a blank line, which _continuation folds to a
+    # newline inside a scalar -- is white space, so it is trimmed with the rest.
+    if any(not item.strip(" \t\n") for item in items[:-1]):
         raise ConfigRefused("an empty entry inside a flow sequence, which YAML does not allow")
-    return [_scalar(item, text=text) for item in items if item.strip(" \t")]
+    out: list[str] = []
+    for item in items:
+        bare = item.strip(" \t\n")
+        if not bare:
+            continue
+        if bare[0] not in "\"'" and any(ch in bare for ch in "[]{}"):
+            # A flow indicator inside a plain flow item -- `[markdown, foo[bar]`
+            # -- stops YAML's loader; split on commas alone it read as the
+            # tags `markdown` and `foo[bar`.
+            raise ConfigRefused(
+                f"`{bare}` holds a flow indicator inside a plain item, which YAML does not allow"
+            )
+        out.append(_scalar(bare, text=text))
+    return out
 
 
 def _scalar(raw: str, *, text: bool = False) -> str:
