@@ -35,6 +35,9 @@ if (files.length === 0) process.exit(0);
 // last rule is what keeps a ```mermaid example inside a ````markdown block from
 // being read as a diagram. The info string's first word is the language, and a
 // backtick fence whose info string contains a backtick is not a fence at all.
+// A closing fence may be indented up to three columns past the enclosing
+// container -- past the container, not past the opening fence -- and followed
+// only by spaces or tabs.
 //
 // Containers are followed as far as they change what a fence is:
 //
@@ -49,13 +52,43 @@ if (files.length === 0) process.exit(0);
 //   fence may also open on the marker line itself (`- ```mermaid`). Lazy
 //   paragraph continuation is not modelled: a list is taken to end at the
 //   first non-blank line indented short of its content column.
+// - Raw HTML blocks. Markdown is suspended inside one, so a ```mermaid there is
+//   text -- most often a diagram commented out with `<!-- -->`, which is
+//   exactly the one that is broken. See HTML_BLOCKS.
 //
 // The opening fence's indentation -- or the marker's content column -- is
 // removed from each content line, as CommonMark removes it.
 const FENCE = /^( *)(`{3,}|~{3,})(.*)$/;
-const CLOSING = /^ {0,3}(`{3,}|~{3,}) *$/;
+const CLOSING = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const QUOTE = /^ {0,3}> ?/;
 const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])( +)(?=\S)/;
+
+// CommonMark's seven kinds of HTML block, by what ends them: the first five end
+// at a marker, which may sit on the opening line; the last two end at a blank
+// line. Kind 7 -- any other complete tag alone on its line -- cannot interrupt
+// a paragraph, and paragraphs are not tracked here, so it is honoured only
+// where no paragraph can be in progress: after a blank line, or at the start
+// of the document or container.
+const HTML_BLOCKS = [
+  [/^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+  [/^ {0,3}<!--/, /-->/],
+  [/^ {0,3}<\?/, /\?>/],
+  [/^ {0,3}<![A-Za-z]/, />/],
+  [/^ {0,3}<!\[CDATA\[/, /\]\]>/],
+  [
+    /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>]|$)/i,
+    null,
+  ],
+];
+const HTML_TAG_LINE =
+  /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
+
+function htmlBlockStart(text, afterBlank) {
+  for (const [opens, end] of HTML_BLOCKS) {
+    if (opens.test(text)) return { end };
+  }
+  return afterBlank && HTML_TAG_LINE.test(text) ? { end: null } : null;
+}
 
 // Leading tabs count as four columns; nothing here needs real tab stops.
 function expandTabs(line) {
@@ -80,7 +113,7 @@ function unquote(line, limit) {
   return { text, depth };
 }
 
-function fenceOf(text, column) {
+function fenceOf(text) {
   const m = FENCE.exec(text);
   if (m === null) return null;
   const [, , run, info] = m;
@@ -89,7 +122,6 @@ function fenceOf(text, column) {
     char: run[0],
     length: run.length,
     lang: (info.trim().split(/\s+/)[0] ?? "").toLowerCase(),
-    column,
   };
 }
 
@@ -112,9 +144,11 @@ function dedent(text, width) {
 function mermaidBlocks(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const blocks = [];
-  let open = null; // the fence being read, plus its quote depth, line and body
+  let open = null; // the fence being read: char, length, lang, depth, container, column, line, body
+  let html = null; // the raw HTML block being skipped, and what ends it
   let columns = []; // content columns of the list items enclosing this line
   let quoted = 0; // the quote depth those columns were measured at
+  let afterBlank = true; // whether a paragraph could be in progress
 
   const leave = () => {
     if (open.lang === "mermaid") {
@@ -128,11 +162,13 @@ function mermaidBlocks(text) {
     if (open !== null) {
       const { text: inner, depth } = unquote(raw, open.depth);
       if (depth === open.depth) {
-        const content = dedent(inner, open.column);
-        if (closes(content, open)) {
+        // The closing fence is judged against the container, the content
+        // against the opening fence: an opener indented two columns permits a
+        // closer at three, not at five.
+        if (closes(dedent(inner, open.container), open)) {
           leave();
         } else {
-          open.body.push(content);
+          open.body.push(dedent(inner, open.column));
         }
         return;
       }
@@ -145,28 +181,50 @@ function mermaidBlocks(text) {
     const { text: unquoted, depth } = unquote(raw, Infinity);
     if (depth !== quoted) {
       columns = [];
+      html = null;
       quoted = depth;
+      afterBlank = true;
     }
-    if (unquoted.trim() === "") return; // blank lines leave lists as they are
+    const blank = unquoted.trim() === "";
+    if (html !== null) {
+      if (html.end === null ? blank : html.end.test(unquoted)) html = null;
+      afterBlank = blank;
+      return;
+    }
+    if (blank) {
+      afterBlank = true; // blank lines leave lists as they are
+      return;
+    }
 
     const indent = indentOf(unquoted);
     while (columns.length > 0 && indent < columns[columns.length - 1]) columns.pop();
-    const relative = indent - (columns.length > 0 ? columns[columns.length - 1] : 0);
-    if (relative >= 4) return; // an indented code block, whatever it contains
+    const container = columns.length > 0 ? columns[columns.length - 1] : 0;
+    const wasAfterBlank = afterBlank;
+    afterBlank = false;
+    if (indent - container >= 4) return; // an indented code block, whatever it contains
 
-    let candidate = unquoted;
+    // The line relative to its container: its own indentation (at most three
+    // columns) and the text, with any list marker it opens taken off first.
     let column = indent;
+    let relative = dedent(unquoted, container);
     const marker = MARKER.exec(unquoted);
     if (marker !== null) {
       // Five or more spaces after a marker are content, not part of it.
       const gap = marker[3].length >= 5 ? 1 : marker[3].length;
       column = indent + marker[2].length + gap;
       columns.push(column);
-      candidate = unquoted.slice(column);
-      if (indentOf(candidate) >= 4) return; // indented code on the marker line
+      relative = unquoted.slice(column);
+      if (indentOf(relative) >= 4) return; // indented code on the marker line
     }
-    const fence = fenceOf(candidate, column);
-    if (fence !== null) open = { ...fence, depth, line: i + 1, body: [] };
+    const block = htmlBlockStart(relative, wasAfterBlank);
+    if (block !== null) {
+      html = block.end !== null && block.end.test(relative) ? null : block;
+      return;
+    }
+    const fence = fenceOf(relative);
+    if (fence !== null) {
+      open = { ...fence, depth, container: marker !== null ? column : container, column, line: i + 1, body: [] };
+    }
   });
 
   if (open !== null) {

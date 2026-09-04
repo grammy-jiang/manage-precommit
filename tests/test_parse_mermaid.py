@@ -462,3 +462,100 @@ def test_leading_tabs_count_as_four_columns(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert not env.loaded()
+
+
+# -- review round 2: closing fences and raw HTML -------------------------------
+
+
+def test_a_closing_fence_may_be_followed_by_tabs(docs, env):
+    (docs / "doc.md").write_text("```mermaid\nflowchart TD\n  A --> B\n```\t\t\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_the_closing_fence_is_judged_against_the_container_not_the_opener(docs, env):
+    """An opener indented two columns permits a closer at three, not at five:
+    CommonMark allows three past the enclosing block. Dedenting by the opener's
+    column first let a deeper fence-looking content line end the block early,
+    and the remaining -- possibly broken -- content was never parsed."""
+    (docs / "doc.md").write_text(
+        "  ```mermaid\n  flowchart TD\n     ```\n    A --> B\n   ```\n\nprose\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n   ```\n  A --> B"]
+
+
+def test_a_diagram_commented_out_with_html_is_not_checked(docs, env):
+    """The ordinary way to park a broken diagram is an HTML comment, and the
+    one inside it is the one that does not parse. Markdown is suspended inside
+    an HTML block, so it is text."""
+    (docs / "doc.md").write_text(
+        "<!--\n```mermaid\nflowchart TD\n  BAD\n```\n-->\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_one_line_html_block_ends_on_its_own_line(docs, env):
+    (docs / "doc.md").write_text(
+        "<!-- diagram below -->\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_pre_and_script_blocks_end_at_their_closing_tag_not_at_a_blank_line(docs, env):
+    (docs / "doc.md").write_text(
+        "<pre>\n\n```mermaid\nBAD\n```\n\n</pre>\n\n<script>\n```mermaid\nBAD\n```\n</script>\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert not env.loaded()
+
+
+def test_a_block_tag_ends_at_a_blank_line_so_a_details_diagram_is_checked(docs, env):
+    """`<details>` around a diagram is common README practice; the blank line
+    after `<summary>` ends the HTML block and the fence that follows is a
+    fence. Without the blank line the fence is raw HTML, which is what GitHub
+    renders too -- text, not a diagram."""
+    (docs / "doc.md").write_text(
+        "<details>\n<summary>Flow</summary>\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\n</details>\n\n"
+        "<div>\n```mermaid\nBAD\n```\n</div>\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_lone_tag_after_a_blank_line_opens_an_html_block(docs, env):
+    """CommonMark's seventh kind: any complete tag alone on its line, where no
+    paragraph is in progress. The fence right under an `<img>` is raw HTML
+    until the blank line; the one after it is a diagram."""
+    (docs / "doc.md").write_text(
+        'Intro.\n\n<img src="x.png" alt="x">\n```mermaid\nBAD\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n'
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_lone_tag_inside_a_paragraph_does_not_open_an_html_block(docs, env):
+    """The same tag directly under a line of prose cannot interrupt the
+    paragraph, so the fence after it is a fence."""
+    (docs / "doc.md").write_text("Some prose\n<b>\n```mermaid\nflowchart TD\n  A --> B\n```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_an_html_block_inside_a_quote_ends_with_the_quote(docs, env):
+    (docs / "doc.md").write_text(
+        "> <!--\n> ```mermaid\n> BAD\n> ```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]

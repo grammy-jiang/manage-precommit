@@ -1145,32 +1145,47 @@ def parse_stages(raw: str) -> set[str]:
     return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
 
 
-def scope_admits_nothing(pattern: str, paths: Sequence[str], *, excluding: bool) -> str | None:
-    """Why a hook-level `files:`/`exclude:` lets no file through, or None.
+def scope_admits_nothing(files: str, exclude: str, paths: Sequence[str]) -> str | None:
+    """Why a hook's `files:`/`exclude:` scope lets no file through, or None.
 
     A scope is not a switch. Our own mermaid fragments carry
     `files: '\\.(md|markdown)$'` and are as live as a hook gets, yet the mere
     presence of the key used to read as "will not run" -- so every repository
     that selected `mermaid` was told on the next scan that its check was dead.
-    What makes a scope a switch is what it does to THIS repository's files: a
-    `files:` no path matches, or an `exclude:` every path matches. pre-commit
-    applies both with `re.search` on the repo-relative path, so that is what is
-    asked, of the same bounded listing the scan walked. A pattern that will not
-    compile stops pre-commit loading the config at all, which is the same
-    answer arrived at earlier. Nothing is claimed when there are no paths to ask.
+    What makes a scope a switch is what it does to THIS repository's files, and
+    the two keys are one scope: pre-commit runs a hook on a path that matches
+    `files:` AND does not match `exclude:`, both by `re.search` on the
+    repo-relative path. Judged apart, `files: '\\.md$'` beside
+    `exclude: '\\.md$'` read as live -- each half let something through, and
+    together they let nothing. So the question is asked of the same bounded
+    listing the scan walked, both halves at once, and the answer names the half
+    that did it when one half alone did. A pattern that will not compile stops
+    pre-commit loading the config at all, which is the same answer arrived at
+    earlier. Nothing is claimed when there are no paths to ask.
     """
     if not paths:
         return None
-    try:
-        rx = re.compile(pattern)
-    except re.error as exc:
-        return f"not a valid pattern: {clean(str(exc))}"
-    hits = sum(1 for p in paths if rx.search(p))
-    if excluding and hits == len(paths):
-        return "matches every file here"
-    if not excluding and hits == 0:
-        return "matches no file here"
-    return None
+    compiled: dict[str, re.Pattern[str]] = {}
+    for key, pattern in (("files", files), ("exclude", exclude)):
+        if not pattern:
+            continue
+        try:
+            compiled[key] = re.compile(pattern)
+        except re.error as exc:
+            return f"{key}: {pattern} (not a valid pattern: {clean(str(exc))})"
+    if not compiled:
+        return None
+    wanted = compiled.get("files")
+    dropped = compiled.get("exclude")
+    if any(
+        (wanted is None or wanted.search(p)) and not (dropped and dropped.search(p)) for p in paths
+    ):
+        return None
+    if wanted is not None and not any(wanted.search(p) for p in paths):
+        return f"files: {files} (matches no file here)"
+    if dropped is not None and all(dropped.search(p) for p in paths):
+        return f"exclude: {exclude} (matches every file here)"
+    return f"files: {files} with exclude: {exclude} (together they leave no file here)"
 
 
 def looks_disabled(hook: cfgmod.Hook, paths: Sequence[str]) -> str | None:
@@ -1192,13 +1207,7 @@ def looks_disabled(hook: cfgmod.Hook, paths: Sequence[str]) -> str | None:
     # excluded from.
     if settings.get("always_run", "").lower() in ("true", "yes", "on"):
         return None
-    exclude = settings.get("exclude", "")
-    if exclude and (why := scope_admits_nothing(exclude, paths, excluding=True)):
-        return f"exclude: {exclude} ({why})"
-    files = settings.get("files", "")
-    if files and (why := scope_admits_nothing(files, paths, excluding=False)):
-        return f"files: {files} ({why})"
-    return None
+    return scope_admits_nothing(settings.get("files", ""), settings.get("exclude", ""), paths)
 
 
 def disabled_hooks(cfg: cfgmod.Config, key: str, paths: Sequence[str]) -> list[str]:

@@ -3137,6 +3137,16 @@ def test_an_exclude_that_leaves_files_through_is_not_a_switch(repo, stubs):
     assert got["disabled"] == {}, got["disabled"]
 
 
+def test_files_and_exclude_are_one_scope(repo, stubs):
+    """pre-commit runs a hook on a path that matches `files:` and does not
+    match `exclude:`. Judged apart, each half here lets something through and
+    the hook reads as live; together they let nothing through, and a Mermaid
+    hook in that state would have counted as covering its alternative."""
+    got = _disabled_for(repo, stubs, "        files: '\\.md$'\n        exclude: '\\.md$'\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "together they leave no file here" in got["disabled"]["gitleaks"][0]
+
+
 def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
     """pre-commit stops loading a config whose `files:` will not compile, so the
     hook never runs -- the same answer, reached earlier and said plainly."""
