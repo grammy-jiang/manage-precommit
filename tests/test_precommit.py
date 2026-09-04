@@ -3142,20 +3142,83 @@ def test_files_and_exclude_are_one_scope(repo, stubs):
     match `exclude:`. Judged apart, each half here lets something through and
     the hook reads as live; together they let nothing through, and a Mermaid
     hook in that state would have counted as covering its alternative."""
+    # A second tracked file, so that neither half alone is the culprit: `files`
+    # matches the README, `exclude` spares the notes, and only the pair leaves
+    # nothing.
+    (repo / "notes.txt").write_text("x\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "notes.txt"], check=True)
     got = _disabled_for(repo, stubs, "        files: '\\.md$'\n        exclude: '\\.md$'\n")
     assert "gitleaks" in got["disabled"], got["disabled"]
     assert "together they leave no file here" in got["disabled"]["gitleaks"][0]
 
 
 def test_a_scope_beyond_the_scans_reach_is_not_called_dead(repo, stubs):
-    """walk_repo stops below MAX_SCAN_DEPTH and after MAX_SCAN_FILES. A hook
-    scoped to `packages/app/src/generated/` in a monorepo matches nothing the
-    walk saw and everything it did not -- so a bounded listing claims nothing,
-    and only a complete one may call a scope dead."""
+    """walk_repo stops below MAX_SCAN_DEPTH and after MAX_SCAN_FILES, but the
+    scope verdict rests on the tracked files, which is what pre-commit itself
+    iterates and which has no depth: a hook scoped to `packages/app/src/generated/`
+    in a monorepo is judged against the files that are really there."""
     deep = repo / "a" / "b" / "c" / "d"
     deep.mkdir(parents=True)
     (deep / "deep.txt").write_text("x\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "a"], check=True)
     got = _disabled_for(repo, stubs, "        files: '^a/b/c/d/'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_the_scope_is_judged_on_tracked_files_as_pre_commit_runs_them(repo, stubs):
+    """`pre-commit run --all-files` iterates `git ls-files`. A tracked
+    `vendor/` reaches a hook scoped to it, however walk_repo prunes that tree
+    for the recommendation scan; an untracked file reaches nothing."""
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "lib.js").write_text("x\n")
+    (repo / "notes.txt").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '^vendor/'\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]  # untracked: not a target yet
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "vendor"], check=True)
+    got = _disabled_for(repo, stubs, "        files: '^vendor/'\n")
+    assert got["disabled"] == {}, got["disabled"]
+    got = _disabled_for(repo, stubs, "        files: '\\.txt$'\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+def test_outside_a_work_tree_the_bounded_walk_stands_in(tmp_path, stubs):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "README.md").write_text("# hi\n")
+    (plain / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.md$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(plain), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    (plain / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.txt$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(plain), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+@pytest.mark.parametrize(
+    "form", ["default_stages: [manual]\n", "default_stages:\n  - manual\n"], ids=["flow", "block"]
+)
+def test_default_stages_park_every_hook_that_sets_none_of_its_own(repo, stubs, form):
+    """pre-commit applies `default_stages` to a hook that omits `stages:`, so
+    `default_stages: [manual]` keeps an otherwise ordinary hook off the commit
+    path exactly as `stages: [manual]` on the hook would -- and the verdict
+    names the key that did it. A hook with its own `stages:` is unaffected."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        form + "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "default_stages: [manual]" in got["disabled"]["gitleaks"][0]
+    (repo / ".pre-commit-config.yaml").write_text(
+        form + "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        stages: [pre-commit]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     assert got["disabled"] == {}, got["disabled"]
 
 

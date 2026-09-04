@@ -1002,18 +1002,44 @@ MERMAID_FENCE = re.compile(r"^\s*(?:```+|~~~+)\s*mermaid\b", re.MULTILINE)
 
 
 class Listing(NamedTuple):
-    """What walk_repo saw, and whether it saw everything.
+    """Paths a scope is judged against, and whether they are all of them.
 
-    `complete` is False when the depth or the count bound cut the walk short.
     A recommendation input can be a sample; a verdict that a hook's scope admits
-    no file cannot, since a hook scoped to a directory deeper than the walk
-    reaches would read as dead in exactly the monorepo the bounds exist for.
-    SKIP_DIRS are not truncation: those trees are left out on purpose, and they
-    are the ones pre-commit's own tracked-file listing would mostly not carry.
+    no file cannot. `hook_targets` therefore prefers the tracked files, which is
+    what `pre-commit run --all-files` iterates, and falls back to `walk_repo`
+    outside a work tree -- whose `complete` is False when its depth or count
+    bound cut the walk short, so that a hook scoped below the walk's reach is
+    not called dead by the one scan that cannot see it.
     """
 
     paths: list[str]
     complete: bool
+
+
+# One regex search per path per filter is the cost of a scope verdict, and a
+# monorepo's tracked-file listing is the one input that could turn it into a
+# wait. Past this, nothing is claimed.
+MAX_SCOPE_PATHS = 20000
+
+
+def hook_targets(directory: str) -> Listing:
+    """The files pre-commit would run hooks over, and whether that is all of them.
+
+    `git ls-files`, because that is exactly what `pre-commit run --all-files`
+    iterates: it carries no depth bound, so a hook scoped to a directory four
+    levels down is judged against the files that are really there, and it
+    includes a tracked `vendor/` that walk_repo skips on purpose while leaving
+    out the untracked `node_modules/` that walk_repo skips for the same reason.
+    Outside a work tree the bounded walk stands in, with its own account of
+    completeness. Symlinks and submodule entries ride along; pre-commit lists
+    them too.
+    """
+    if is_work_tree(git, directory):
+        rc, out, _ = git(directory, "ls-files", "-z", strip=False)
+        if rc == 0:
+            paths = [p for p in out.split("\0") if p]
+            return Listing(paths[:MAX_SCOPE_PATHS], len(paths) <= MAX_SCOPE_PATHS)
+    return walk_repo(directory)
 
 
 def walk_repo(directory: str) -> Listing:
@@ -1168,18 +1194,28 @@ def parse_stages(raw: str) -> set[str]:
 Filter = tuple[str, str, bool]
 
 
-def top_filters(cfg: cfgmod.Config) -> list[Filter]:
-    """The config-wide `files:` and `exclude:`, which every hook is behind.
+class TopLevel(NamedTuple):
+    """The config-wide settings every hook sits behind."""
 
-    Named for what they are, so a verdict can say "the config's exclude" rather
-    than leave the reader looking for a key the hook does not carry.
+    filters: list[Filter]  # the config's own `files:` and `exclude:`
+    default_stages: str  # `default_stages:` in the flow shape, or "" when unset
+
+
+def top_level(cfg: cfgmod.Config) -> TopLevel:
+    """What the config applies to every hook that does not say otherwise.
+
+    The filters are named for where they live, so a verdict can say "the
+    config's exclude" rather than leave the reader looking for a key the hook
+    does not carry. `default_stages` is what pre-commit applies to a hook that
+    omits its own `stages:` -- a `default_stages: [manual]` parks every such
+    hook off the commit path exactly as `stages: [manual]` on each would.
     """
-    out: list[Filter] = []
+    filters: list[Filter] = []
     for key, excluding in (("files", False), ("exclude", True)):
         value = cfgmod.top_level_scalar(cfg, key)
         if value:
-            out.append((f"the config's {key}", value, excluding))
-    return out
+            filters.append((f"the config's {key}", value, excluding))
+    return TopLevel(filters, cfgmod.top_level_sequence(cfg, "default_stages") or "")
 
 
 def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | None:
@@ -1200,10 +1236,9 @@ def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | N
     walked, all filters at once, and the answer names the one that did it when
     one alone did. A pattern that will not compile stops pre-commit loading the
     config at all, which is the same answer arrived at earlier. Nothing is
-    claimed when there are no paths to ask -- nor when the walk was cut short by
-    its own bounds, because "nothing in the sample passes" is not "nothing
-    passes", and a hook scoped below MAX_SCAN_DEPTH in a monorepo would
-    otherwise be called dead by the one scan that cannot see it.
+    claimed when there are no paths to ask -- nor from a listing that is not
+    all of them, because "nothing in the sample passes" is not "nothing
+    passes"; see `hook_targets` for where the listing comes from.
     """
     compiled: list[tuple[str, str, bool, re.Pattern[str]]] = []
     for label, pattern, excluding in filters:
@@ -1230,7 +1265,7 @@ def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | N
     return f"{named} (together they leave no file here)"
 
 
-def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: Sequence[Filter]) -> str | None:
+def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: TopLevel) -> str | None:
     """What would stop this hook running, or None.
 
     "Already present" was decided on the hook id alone, so an entry could carry
@@ -1240,9 +1275,11 @@ def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: Sequence[Filter]) -
     was told a secret scan was in force that was not.
     """
     settings = hook.settings
-    stages = settings.get("stages", "")
+    stages, origin = settings.get("stages", ""), "stages"
+    if not stages and top.default_stages:
+        stages, origin = top.default_stages, "default_stages"
     if stages and not (parse_stages(stages) & RUNS_ON_COMMIT):
-        return f"stages: {stages}"
+        return f"{origin}: {stages}"
     # always_run: true makes the hook fire whatever files: and exclude: say,
     # which is exactly why config.py captures it. Reading stages first is
     # deliberate -- always_run does not put a hook back on a stage it was
@@ -1254,7 +1291,7 @@ def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: Sequence[Filter]) -
         for key, excluding in (("files", False), ("exclude", True))
         if settings.get(key)
     ]
-    return scope_admits_nothing([*top, *own], listing)
+    return scope_admits_nothing([*top.filters, *own], listing)
 
 
 def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
@@ -1270,7 +1307,7 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     meta = CATALOG[key]
     url = meta.get("rev_repo") or "local"
     wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
-    top = top_filters(cfg)
+    top = top_level(cfg)
     out = []
     for entry in cfg.repos:
         if entry.url != url:
@@ -1755,7 +1792,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
     planned, report, versions, intended = plan(
-        cfg, keys, pre_existing=existing is not None, listing=walk_repo(directory)
+        cfg, keys, pre_existing=existing is not None, listing=hook_targets(directory)
     )
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)
@@ -1969,7 +2006,7 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     # An entry that is present but switched off is not coverage. Reported
     # separately so the agent can say so rather than the user being told a
     # catalog entry is already handled.
-    listing = walk_repo(directory)
+    listing = hook_targets(directory)
     disabled = {k: disabled_hooks(cfg, k, listing) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths = detect_markers(directory)

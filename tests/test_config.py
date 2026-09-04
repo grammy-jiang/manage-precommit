@@ -545,6 +545,19 @@ def test_ragged_sequence_items_are_not_read_as_one_sequence():
     assert _hook_settings(text)["stages"] == "[manual]"
 
 
+def test_top_level_sequence_reads_flow_and_block_forms_alike():
+    """`default_stages:` decides whether a hook without its own `stages:` runs
+    on commit, and the block form is the everyday way to write it."""
+    flow = C.scan("default_stages: [manual, pre-push]\nrepos: []\n")
+    assert C.top_level_sequence(flow, "default_stages") == "[manual, pre-push]"
+    block = C.scan("default_stages:\n  - manual\n  - pre-push\nrepos: []\n")
+    assert C.top_level_sequence(block, "default_stages") == "[manual, pre-push]"
+    assert C.top_level_sequence(flow, "fail_fast") is None
+    # A same-column block sequence at the top level is refused by scan() itself
+    # ("top-level line is not a `key: value` mapping entry"), so there is no
+    # config in which this reader would meet one.
+
+
 def test_top_level_scalar_is_public():
     """precommit.py was reaching through _split_key + _scalar, twice."""
     cfg = C.scan("exclude: '^vendor/'\nrepos:\n  - repo: https://x/y\n    hooks:\n      - id: a\n")

@@ -64,7 +64,7 @@ if (files.length === 0) process.exit(0);
 // content column), link reference definitions, and tab stops inside content.
 const FENCE = /^( *)(`{3,}|~{3,})(.*)$/;
 const CLOSING = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-const QUOTE = /^ {0,3}> ?/;
+const QUOTE = /^ {0,3}>/;
 // A list marker with content after it, or a bare one ending the line: an empty
 // item is an item too, and the indented fence under it is inside it.
 const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(?=\S)|[ \t]*$)/;
@@ -114,6 +114,26 @@ function widthOf(ws, col) {
 
 function indentOf(text) {
   return text.length - text.trimStart().length;
+}
+
+// A block-quote marker taken off the front of `text`, which starts at column
+// `col`: the `>` and then its optional space. Whitespace after the marker is
+// expanded at the column it really sits at, and the first column of a tab is
+// the optional space while the rest of it stays as indentation -- so
+// `>\t```mermaid` is a fence two columns into the quote, as the spec has it.
+// Null when the text does not start with a marker.
+function unquote(text, col) {
+  const m = QUOTE.exec(text);
+  if (m === null) return null;
+  let rest = text.slice(m[0].length);
+  let consumed = m[0].length;
+  const ws = /^[ \t]*/.exec(rest)[0];
+  rest = " ".repeat(widthOf(ws, col + consumed)) + rest.slice(ws.length);
+  if (rest.startsWith(" ")) {
+    rest = rest.slice(1);
+    consumed += 1;
+  }
+  return { rest, consumed };
 }
 
 function fenceOf(text) {
@@ -182,10 +202,10 @@ function mermaidBlocks(text) {
     let kept = 0;
     for (const container of containers) {
       if (container.kind === "quote") {
-        const m = QUOTE.exec(text);
-        if (m === null) break;
-        text = text.slice(m[0].length);
-        offset += m[0].length;
+        const q = unquote(text, offset);
+        if (q === null) break;
+        text = q.rest;
+        offset += q.consumed;
       } else if (text.trim() !== "") {
         // Lazy continuation does not reach into a code block, and is not
         // modelled elsewhere either: short of the content column, the item ends.
@@ -222,11 +242,11 @@ function mermaidBlocks(text) {
       // Indented code if no paragraph is open, a lazy continuation line if one
       // is: neither opens anything, and neither changes which of the two it was.
       if (indentOf(text) >= 4) return;
-      const quote = QUOTE.exec(text);
+      const quote = unquote(text, offset);
       if (quote !== null) {
         containers.push({ kind: "quote" });
-        text = text.slice(quote[0].length);
-        offset += quote[0].length;
+        text = quote.rest;
+        offset += quote.consumed;
         interrupting = false;
         continue;
       }

@@ -691,6 +691,24 @@ def reindent(block: str, spaces: int) -> str:
     return "\n".join(out)
 
 
+def top_level_sequence(cfg: Config, key: str) -> str | None:
+    """A top-level `<key>:` sequence as "[a, b]", whichever form the file used.
+
+    None when the key is absent. `default_stages:` is the one that matters:
+    written as a block sequence, `top_level_scalar` read it as "" and every
+    caller treats "" as unset -- the same blindness `_block_sequence` exists to
+    cure for a hook's own `stages:`, one level up.
+    """
+    if key not in cfg.top_keys:
+        return None
+    line = cfg.top_keys[key]
+    parsed = _split_key(cfg.lines[line])
+    value = _scalar(parsed[1]) if parsed else ""
+    if not value:
+        value = _block_sequence(cfg.lines, line, 0)
+    return value or None
+
+
 def top_level_scalar(cfg: Config, key: str) -> str | None:
     """The value of a top-level `<key>:` scalar, or None when the file has none.
 

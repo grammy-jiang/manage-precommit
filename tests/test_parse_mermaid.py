@@ -731,3 +731,19 @@ def test_leading_tabs_expand_to_tab_stops_not_to_four_spaces_each(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 7: tabs after a quote marker -------------------------------------
+
+
+def test_a_tab_after_a_quote_marker_is_expanded_at_its_column(docs, env):
+    """`>` then a tab: the tab reaches column four, its first column is the
+    marker's optional space, and the rest is two columns of indentation -- a
+    fence, as the spec has it. Two tabs put the content six columns in, which
+    is indented code inside the quote."""
+    (docs / "doc.md").write_text(
+        ">\t```mermaid\n>\tflowchart TD\n>\t  A --> B\n>\t```\n\n>\t\t```mermaid\n>\t\tBAD\n>\t\t```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
