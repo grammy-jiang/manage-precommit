@@ -679,12 +679,17 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
     whole feature exists to prevent, reintroduced by the indentation style.
     A sibling key at the same column still ends the sequence: it fails the
     `- ` test below.
+
+    An item may continue onto lines indented past its dash -- `- "pre-\\`
+    over `commit"` -- and is folded with them the way any value is.
     """
     items = []
     seq_indent: int | None = None
-    for j in range(key_line + 1, len(lines)):
+    j = key_line + 1
+    while j < len(lines):
         line = lines[j]
         if _is_blank_or_comment(line):
+            j += 1
             continue
         indent = _indent_of(line)
         if indent < key_indent:
@@ -698,7 +703,14 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
             # Ragged items are not one sequence. Refusing to guess is this
             # scanner's whole posture.
             break
-        items.append(_scalar(body[2:]))
+        items.append(_scalar(_continuation(lines, j, body[2:].strip(" \t"), indent, item=True)))
+        j += 1
+        # The item's continuation lines, already folded in above.
+        while j < len(lines) and (
+            not lines[j].strip(" \t")
+            or (_indent_of(lines[j]) > indent and not lines[j].strip().startswith("- "))
+        ):
+            j += 1
     return "[" + ", ".join(items) + "]" if items else ""
 
 
@@ -784,7 +796,29 @@ def reindent(block: str, spaces: int) -> str:
 _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
 
 
-def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent: int = 0) -> str:
+def _open_quote(text: str) -> str | None:
+    """The quote character a scalar in `text` has opened and not closed, or None.
+
+    Only a quote that starts a scalar counts -- at the front of the value, or
+    after a `[` or `,` inside a flow sequence -- so the apostrophe in a plain
+    `don't` opens nothing.
+    """
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'" and (i == 0 or text[:i].rstrip(" \t")[-1:] in ("[", ",")):
+            end = _quote_end(text, i)
+            if end == -1:
+                return ch
+            i = end
+            continue
+        i += 1
+    return None
+
+
+def _continuation(
+    lines: list[str], key_line: int, inline: str = "", key_indent: int = 0, *, item: bool = False
+) -> str:
     """The value of a key, folded with the lines that continue it.
 
     `inline` is what the key's own line carries; the continued lines -- those
@@ -796,64 +830,70 @@ def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent:
     YAML lets a value start on the next line -- `files:\n  ^src/`, or
     `default_stages:\n  [manual]` -- and this reader follows YAML's basic rules
     for the continued lines of a plain or flow scalar: they fold with single
-    spaces, a blank line between them folds to a newline, a comment ends at its
-    own line (` #` or a tab before `#`), and a value that opens with a quote is
-    taken whole, since a `#` inside it is text. A line at column zero is the
-    next key and ends it. A block-scalar indicator standing alone on the first
-    continued line -- `files:\n  |\n    ^docs/` -- is returned as the indicator,
-    so the caller sees the same "pattern not read" it sees for `files: |`
-    rather than a folded string that happens to compile.
+    spaces, a blank line between them folds to a newline, and outside a quoted
+    scalar a comment ends at its own line (` #`, or a tab before `#`). Inside a
+    double-quoted scalar -- the whole value, or one item of a flow sequence --
+    trailing white space folds away unless escaped, and a backslash ending a
+    line escapes the break, so that line and the next join with nothing
+    between. In single quotes a backslash is a character like any other. A
+    block-scalar indicator standing alone on the first continued line --
+    `files:\n  |\n    ^docs/` -- is returned as the indicator, the same
+    "pattern not read" as `files: |`. A line at or short of `key_indent` is the
+    next key and ends the value.
 
-    A backslash ending a line inside a double-quoted value escapes the break,
-    so that line and the next join with nothing between. Not modelled, and
-    accepted: explicit indentation indicators, anchors and aliases. The scope
-    verdict is the only consumer, and it claims nothing it cannot read.
+    `item` is set for a block-sequence item, whose value ends at a deeper `- `
+    line as well: that is another item, ragged or nested, not more of this one.
+
+    Not modelled, and accepted: explicit indentation indicators, anchors and
+    aliases. The scope verdict is the only consumer, and it claims nothing it
+    cannot read.
     """
     if inline and _BLOCK_INDICATOR.fullmatch(inline):
         return inline
-    parts: list[str] = [inline] if inline else []
-    quoted = bool(inline) and inline[0] in "\"'"
-    double_quoted = bool(inline) and inline[0] == '"'
+    value = inline
     pending_break = False  # a blank line since the last part: folds to a newline
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
         # Blank and comment lines by YAML's own white space -- space and tab --
         # so a line holding only a U+00A0 is the content it is.
         if not line.strip(" \t"):
-            pending_break = bool(parts)
+            pending_break = bool(value)
             continue
-        if line.strip(" \t").startswith("#"):
+        quote = _open_quote(value)
+        if quote is None and line.strip(" \t").startswith("#"):
             continue
         if _indent_of(line) <= key_indent:
             break
-        text = line.strip(" \t")
-        if double_quoted or (not parts and line.strip(" \t")[0] == '"'):
-            # Inside double quotes, white space at the end of a line folds away
-            # unless it is escaped: `\ ` is a literal space and stays.
-            kept = line.rstrip(" \t")
-            if _ends_with_escape(kept) and len(kept) < len(line.rstrip("\n")):
-                kept = kept + line.rstrip("\n")[len(kept)]
-            text = kept.lstrip(" \t")
-        if not parts and text[0] in "\"'":
-            quoted = True
-            double_quoted = text[0] == '"'
-        if not parts and _BLOCK_INDICATOR.fullmatch(text):
-            return text
-        if not quoted:
-            cut = re.search(r"[ \t]#", text)
-            if cut:
-                text = text[: cut.start()].rstrip(" \t")
-        if text:
-            if parts and double_quoted and _ends_with_escape(parts[-1]):
-                # A trailing backslash in a double-quoted scalar escapes the
-                # line break: no fold at all, and the backslash goes. In single
-                # quotes a backslash is a character like any other.
-                parts[-1] = parts[-1][:-1]
-                parts.append(text)
-            else:
-                parts.append(("\n" if pending_break else " ") + text if parts else text)
-            pending_break = False
-    return "".join(parts)
+        text = line.lstrip(" \t")  # trailing white space is decided below
+        if item and text.startswith("- "):
+            break
+        if not value and _BLOCK_INDICATOR.fullmatch(text.rstrip(" \t")):
+            return text.rstrip(" \t")
+        if quote is None:
+            # Outside a quoted scalar a comment ends at this line; _code_only
+            # leaves a `#` inside quotes alone.
+            text = _code_only(text)
+            if not text.strip(" \t"):
+                continue
+        # Inside double quotes -- open before this line, or opened on it and
+        # still open at its end -- trailing white space folds away unless it is
+        # escaped: `\ ` is a literal space and stays.
+        joined = (value + " " if value else "") + text
+        if quote == '"' or _open_quote(joined) == '"':
+            kept = text.rstrip(" \t")
+            if _ends_with_escape(kept) and len(kept) < len(text):
+                kept += text[len(kept)]
+            text = kept
+        else:
+            text = text.rstrip(" \t")
+        if not value:
+            value = text
+        elif quote == '"' and _ends_with_escape(value):
+            value = value[:-1] + text  # an escaped break: no fold, and the backslash goes
+        else:
+            value += ("\n" if pending_break else " ") + text
+        pending_break = False
+    return value
 
 
 def _ends_with_escape(text: str) -> bool:
@@ -876,10 +916,15 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
     inline = parsed[1].strip(" \t") if parsed else ""
-    continued = _continuation(cfg.lines, line, inline)
-    if not inline and continued.startswith("- "):
-        return _block_sequence(cfg.lines, line, 0) or None
-    return _scalar(continued) or None
+    try:
+        continued = _continuation(cfg.lines, line, inline)
+        if not inline and continued.startswith("- "):
+            return _block_sequence(cfg.lines, line, 0) or None
+        return _scalar(continued) or None
+    except ConfigRefused:
+        # A quote this reader cannot see closed. pre-commit's own loader would
+        # refuse the file; here it is a value not read, and nothing is claimed.
+        return None
 
 
 def top_level_scalar(cfg: Config, key: str) -> str | None:
@@ -901,10 +946,13 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
     inline = parsed[1].strip(" \t") if parsed else ""
-    continued = _continuation(cfg.lines, line, inline)
-    if not inline and continued.startswith("- "):
-        return ""  # a sequence where a scalar was asked for: nothing to read
-    return _scalar(continued)
+    try:
+        continued = _continuation(cfg.lines, line, inline)
+        if not inline and continued.startswith("- "):
+            return ""  # a sequence where a scalar was asked for: nothing to read
+        return _scalar(continued)
+    except ConfigRefused:
+        return None  # see top_level_sequence
 
 
 def hook_delta(entry: RepoEntry) -> int | None:

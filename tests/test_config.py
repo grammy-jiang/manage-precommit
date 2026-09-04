@@ -651,6 +651,19 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # A tab before `#` opens a comment in a block item too.
     tab_item = C.scan("default_stages:\n  - pre-commit\t# ordinary\nrepos: []\n")
     assert C.top_level_sequence(tab_item, "default_stages") == "[pre-commit]"
+    # An escaped break inside a quoted ITEM -- of a flow sequence, or of a
+    # block sequence -- joins the same way, and an apostrophe in a plain word
+    # opens no quote.
+    flow_break = C.scan('default_stages: ["pre-\\\n  commit"]\nrepos: []\n')
+    assert C.top_level_sequence(flow_break, "default_stages") == '["pre-commit"]'
+    assert C.flow_items(C.top_level_sequence(flow_break, "default_stages") or "") == ["pre-commit"]
+    block_break = C.scan('default_stages:\n  - "pre-\\\n    commit"\n  - manual\nrepos: []\n')
+    assert C.top_level_sequence(block_break, "default_stages") == "[pre-commit, manual]"
+    plain = C.scan("files: don't\n  care\nrepos: []\n")
+    assert C.top_level_scalar(plain, "files") == "don't care"
+    # A quote this reader cannot see closed is a value not read, not a crash.
+    unclosed = C.scan('default_stages:\n  - "pre-\nrepos: []\n')
+    assert C.top_level_sequence(unclosed, "default_stages") is None
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"
