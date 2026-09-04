@@ -964,10 +964,12 @@ def _open_quote(text: str) -> str | None:
     after a `[` or `,` inside a flow sequence -- so the apostrophe in a plain
     `don't` opens nothing.
     """
-    i = 0
+    # A tag in front -- `!!str "x` -- is not part of the scalar it decorates.
+    tag = _TAG_RE.match(text)
+    start = i = tag.end() if tag else 0
     while i < len(text):
         ch = text[i]
-        if ch in "\"'" and (i == 0 or text[:i].rstrip(" \t")[-1:] in ("[", ",")):
+        if ch in "\"'" and (i == start or text[start:i].rstrip(" \t")[-1:] in ("[", ",")):
             end = _quote_end(text, i)
             if end == -1:
                 return ch
@@ -1010,10 +1012,11 @@ def _continuation(
     cannot read.
     """
     # A tag in front of the value -- `!!str |-` -- decorates it without changing
-    # it, and comes off before the indicator is looked for; _scalar takes it
-    # off a plain value the same way.
-    inline = _untag(inline)
-    if inline and _BLOCK_INDICATOR.fullmatch(inline):
+    # it: the indicator is looked for behind it, and the tag stays on what is
+    # returned, because _scalar has to see it. `!!str null` is the text `null`,
+    # and `!!str` with nothing after it the empty string; untagged, both would
+    # be refused there as the null they are to YAML without the tag.
+    if _untag(inline) and _BLOCK_INDICATOR.fullmatch(_untag(inline)):
         return inline
     value = inline
     pending_break = False  # a blank line since the last part: folds to a newline
@@ -1032,10 +1035,8 @@ def _continuation(
         text = line.lstrip(" \t")  # trailing white space is decided below
         if item and text.startswith("- "):
             break
-        if not value:
-            text = _untag(text)
-            if _BLOCK_INDICATOR.fullmatch(text.rstrip(" \t")):
-                return text.rstrip(" \t")
+        if not value and _BLOCK_INDICATOR.fullmatch(_untag(text).rstrip(" \t")):
+            return text.rstrip(" \t")
         if quote is None:
             # Outside a quoted scalar a comment ends at this line; _code_only
             # leaves a `#` inside quotes alone.
