@@ -774,3 +774,25 @@ def test_a_short_hyphen_underline_is_a_setext_heading_too(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD", "pie"]
+
+
+# -- review round 10: bare carriage returns, and hgroup ----------------------------
+
+
+def test_bare_carriage_returns_are_line_endings_too(docs, env):
+    (docs / "doc.md").write_bytes(b"# old mac\r\r```mermaid\rflowchart TD\r  A --> B\r```\r")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_hgroup_is_a_block_level_tag_that_may_interrupt_a_paragraph(docs, env):
+    """A kind-6 tag interrupts a paragraph where a kind-7 one cannot, so the
+    fence right under `<hgroup>` beneath prose is raw HTML until the blank
+    line."""
+    (docs / "doc.md").write_text(
+        "Prose\n<hgroup>\n```mermaid\nBAD\n```\n</hgroup>\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
