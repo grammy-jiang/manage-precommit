@@ -995,6 +995,9 @@ SKIP_DIRS = frozenset(
     }
 )
 MAX_SCAN_DEPTH = 3
+# Version-control metadata: never a hook's target, so pruning it says nothing
+# about completeness. Every other SKIP_DIRS entry may hold tracked files.
+VCS_DIRS = frozenset({".git", ".hg", ".svn"})
 MAX_SCAN_FILES = 4000
 MAX_MERMAID_PROBES = 200
 MAX_PROBE_BYTES = 200_000  # a probe is a look for one fence, not a file read
@@ -1008,8 +1011,9 @@ class Listing(NamedTuple):
     no file cannot. `hook_targets` therefore prefers the tracked files, which is
     what `pre-commit run --all-files` iterates, and falls back to `walk_repo`
     outside a work tree -- whose `complete` is False when its depth or count
-    bound cut the walk short, so that a hook scoped below the walk's reach is
-    not called dead by the one scan that cannot see it.
+    bound cut the walk short, or when it pruned a directory that is not version
+    control metadata: a plain directory holding `vendor/a.md` beside a hook
+    scoped to `^vendor/` is not one where that hook is dead.
     """
 
     paths: list[str]
@@ -1048,6 +1052,8 @@ def walk_repo(directory: str) -> Listing:
     complete = True
     root_depth = directory.rstrip(os.sep).count(os.sep)
     for base, dirs, files in os.walk(directory):
+        if any(d in SKIP_DIRS and d not in VCS_DIRS for d in dirs):
+            complete = False  # left out on purpose, and may still hold hook targets
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         if base.count(os.sep) - root_depth >= MAX_SCAN_DEPTH:
             if dirs:

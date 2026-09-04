@@ -3182,6 +3182,31 @@ def test_the_scope_is_judged_on_tracked_files_as_pre_commit_runs_them(repo, stub
     assert "gitleaks" in got["disabled"], got["disabled"]
 
 
+def test_outside_a_work_tree_a_pruned_directory_makes_the_walk_incomplete(tmp_path, stubs):
+    """walk_repo leaves `vendor/` out on purpose for the recommendation scan,
+    and a plain directory has no tracked-file listing to fall back on -- so a
+    hook scoped to `^vendor/` there is judged from a listing that cannot see
+    its files. An incomplete listing claims nothing."""
+    plain = tmp_path / "plain"
+    (plain / "vendor").mkdir(parents=True)
+    (plain / "vendor" / "a.md").write_text("# a\n")
+    (plain / "README.md").write_text("# hi\n")
+    (plain / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '^vendor/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(plain), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_double_quoted_filter_is_read_as_yaml_reads_it(repo, stubs):
+    """`files: "\\\\.md$"` is `\\.md$` to YAML and to pre-commit; read as two
+    backslashes it was a regex for a literal backslash, matching nothing, and
+    a live hook was called dead."""
+    got = _disabled_for(repo, stubs, '        files: "\\\\.md$"\n')
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_outside_a_work_tree_the_bounded_walk_stands_in(tmp_path, stubs):
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -3246,6 +3271,10 @@ def test_walk_repo_says_when_it_was_cut_short(repo, monkeypatch):
     assert P.walk_repo(str(repo)).complete is True
     monkeypatch.setattr(P, "MAX_SCAN_FILES", 1)
     assert P.walk_repo(str(repo)).complete is False
+    monkeypatch.undo()
+    assert P.walk_repo(str(repo)).complete is True  # .git is pruned, and is not a target
+    (repo / "node_modules").mkdir()
+    assert P.walk_repo(str(repo)).complete is False  # this one may hold tracked files
 
 
 def test_the_configs_own_files_filter_is_part_of_every_hooks_scope(repo, stubs):

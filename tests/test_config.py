@@ -545,6 +545,23 @@ def test_ragged_sequence_items_are_not_read_as_one_sequence():
     assert _hook_settings(text)["stages"] == "[manual]"
 
 
+def test_double_quoted_scalars_resolve_their_escapes_and_single_quoted_do_not():
+    """`files: "\\\\.md$"` is the regex `\\.md$` to YAML and to pre-commit.
+    Reading the two backslashes as written compiled a regex for a literal
+    backslash and called a live hook dead. Single quotes have no escapes, so
+    `'\\\\.md$'` really is two backslashes -- to YAML, to pre-commit, and here."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n"
+        '      - id: a\n        entry: x\n        language: system\n        files: "\\\\.md$"\n'
+        "      - id: b\n        entry: x\n        language: system\n        files: '\\\\.md$'\n"
+        '      - id: c\n        entry: x\n        language: system\n        files: "a\\tb\\u00e9\\"q\\""\n'
+    )
+    a, b, c = cfg.repos[0].hooks
+    assert a.settings["files"] == "\\.md$"
+    assert b.settings["files"] == "\\\\.md$"
+    assert c.settings["files"] == 'a\tb\u00e9"q"'
+
+
 def test_top_level_sequence_reads_flow_and_block_forms_alike():
     """`default_stages:` decides whether a hook without its own `stages:` runs
     on commit, and the block form is the everyday way to write it."""

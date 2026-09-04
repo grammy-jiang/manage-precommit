@@ -252,8 +252,48 @@ def _split_key(text: str) -> tuple[str, str] | None:
     return None
 
 
+# The escapes YAML resolves inside a double-quoted scalar. `\\` is the one
+# that matters here: `files: "\\.md$"` is the regex `\.md$` to YAML and to
+# pre-commit, and reading the two backslashes as written compiled a regex for
+# a literal backslash instead -- calling a live hook dead. Single quotes have
+# no escapes at all, so they are left exactly as written.
+_DQ_ESCAPES = {
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "\t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+_DQ_ESCAPE_RE = re.compile(r"\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)")
+
+
+def _unescape_double_quoted(inner: str) -> str:
+    def one(match: re.Match[str]) -> str:
+        code = match.group(1)
+        if code[0] in "xuU" and len(code) > 1:
+            return chr(int(code[1:], 16))
+        # An escape YAML does not define is left as written rather than
+        # guessed at; YAML itself would refuse the document.
+        return _DQ_ESCAPES.get(code, match.group(0))
+
+    return _DQ_ESCAPE_RE.sub(one, inner)
+
+
 def _scalar(raw: str) -> str:
-    """The value of a scalar: quotes removed, trailing comment dropped."""
+    """The value of a scalar: quotes removed, escapes resolved, comment dropped."""
     raw = raw.strip()
     if not raw:
         return ""
@@ -264,7 +304,7 @@ def _scalar(raw: str) -> str:
             # module's rule is that a refusal beats a wrong answer.
             raise ConfigRefused("a quoted value on this line is never closed")
         inner = raw[1 : end - 1]
-        return inner.replace("''", "'") if raw[0] == "'" else inner
+        return inner.replace("''", "'") if raw[0] == "'" else _unescape_double_quoted(inner)
     # Unquoted: a " #" starts a comment, a bare "#" inside a word does not.
     cut = raw.find(" #")
     if cut != -1:
