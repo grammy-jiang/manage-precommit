@@ -121,6 +121,13 @@ function indentOf(text) {
   return text.length - text.trimStart().length;
 }
 
+// A blank line holds only spaces and tabs. `trim()` would also take a line of
+// U+00A0 -- pasted from rendered prose -- for blank, and end a raw HTML block
+// or continue a list item where CommonMark does neither.
+function isBlank(text) {
+  return /^[ \t]*$/.test(text);
+}
+
 // A block-quote marker taken off the front of `text`, which starts at column
 // `col`: the `>` and then its optional space. Whitespace after the marker is
 // expanded at the column it really sits at, and the first column of a tab is
@@ -212,7 +219,7 @@ function mermaidBlocks(text) {
         if (q === null) break;
         text = q.rest;
         offset += q.consumed;
-      } else if (text.trim() !== "") {
+      } else if (!isBlank(text)) {
         // Lazy continuation does not reach into a code block, and is not
         // modelled elsewhere either: short of the content column, the item ends.
         if (indentOf(text) < container.column) break;
@@ -231,7 +238,7 @@ function mermaidBlocks(text) {
       else open.body.push(dedent(text, open.indent));
       return;
     }
-    const blank = text.trim() === "";
+    const blank = isBlank(text);
     if (html !== null) {
       if (html.end === null ? blank : html.end.test(text)) html = null;
       paragraph = false;
@@ -279,7 +286,7 @@ function mermaidBlocks(text) {
 
     // 3. The leaf. A line that was only container markers -- a lone `>` --
     // has none, and leaves no paragraph open inside the container it opened.
-    if (text.trim() === "") {
+    if (isBlank(text)) {
       paragraph = false;
       return;
     }

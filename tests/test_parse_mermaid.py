@@ -817,3 +817,18 @@ def test_a_lowercase_declaration_is_text_not_an_html_block(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 14: what a blank line is ------------------------------------------
+
+
+def test_a_line_of_non_breaking_spaces_is_not_blank(docs, env):
+    """CommonMark's blank line holds only spaces and tabs. A line of U+00A0
+    pasted from rendered prose does not end a `<div>` block, so the fence under
+    it is still raw HTML; the real blank line after `</div>` ends it."""
+    (docs / "doc.md").write_text(
+        "<div>\n\u00a0\u00a0\n```mermaid\nBAD\n```\n</div>\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
