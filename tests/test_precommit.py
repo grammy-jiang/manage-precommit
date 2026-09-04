@@ -4756,6 +4756,29 @@ def test_a_walk_cut_short_by_its_bounds_taints_the_fence_probe(repo, stubs):
     assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
+def test_an_observed_gap_is_reported_even_when_the_probe_was_capped(repo, stubs):
+    """A fence in `README.md` that a present `mermaid-parse` scoped to `^docs/`
+    never reaches is a gap the probe saw. More Markdown behind the cap does not
+    unsee it: completeness decides whether coverage may be CLAIMED, not whether
+    an observed gap is reported."""
+    import precommit as P
+
+    (repo / "docs").mkdir()
+    for n in range(P.MAX_MERMAID_PROBES):
+        (repo / "docs" / f"d{n:03d}.md").write_text("# d\n")
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: '^docs/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    assert "does not reach README.md" in got["disabled"]["mermaid-parse"][0]
+    assert "mermaid" in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

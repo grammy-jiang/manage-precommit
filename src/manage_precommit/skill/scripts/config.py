@@ -336,7 +336,7 @@ def _scalar(raw: str) -> str:
     # A tag -- `!!str`, or a local `!name` -- says what the value is, not what
     # it says; a plain scalar cannot start with `!`, so a leading one is
     # always a tag, and it comes off before the value is read.
-    raw = re.sub(r"^![^ \t]*[ \t]+", "", raw)
+    raw = _TAG_RE.sub("", raw)
     if raw[0] in "\"'":
         end = _quote_end(raw, 0)
         if end == -1:
@@ -798,6 +798,10 @@ def reindent(block: str, spaces: int) -> str:
 # A YAML block-scalar indicator: `|`, `>`, with optional chomping and
 # indentation indicators in either order.
 _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
+# A YAML tag in front of a value -- `!!str`, or a local `!name` -- and the white
+# space after it. A plain scalar cannot start with `!`, so a leading one is
+# always a tag.
+_TAG_RE = re.compile(r"^![^ \t]*[ \t]+")
 
 
 def _open_quote(text: str) -> str | None:
@@ -852,6 +856,10 @@ def _continuation(
     aliases. The scope verdict is the only consumer, and it claims nothing it
     cannot read.
     """
+    # A tag in front of the value -- `!!str |-` -- decorates it without changing
+    # it, and comes off before the indicator is looked for; _scalar takes it
+    # off a plain value the same way.
+    inline = _TAG_RE.sub("", inline)
     if inline and _BLOCK_INDICATOR.fullmatch(inline):
         return inline
     value = inline
@@ -871,8 +879,10 @@ def _continuation(
         text = line.lstrip(" \t")  # trailing white space is decided below
         if item and text.startswith("- "):
             break
-        if not value and _BLOCK_INDICATOR.fullmatch(text.rstrip(" \t")):
-            return text.rstrip(" \t")
+        if not value:
+            text = _TAG_RE.sub("", text)
+            if _BLOCK_INDICATOR.fullmatch(text.rstrip(" \t")):
+                return text.rstrip(" \t")
         if quote is None:
             # Outside a quoted scalar a comment ends at this line; _code_only
             # leaves a `#` inside quotes alone.

@@ -668,6 +668,11 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     tagged = C.scan("files: !!str '^README[.]md$'\nexclude: !!str ^vendor/\nrepos: []\n")
     assert C.top_level_scalar(tagged, "files") == "^README[.]md$"
     assert C.top_level_scalar(tagged, "exclude") == "^vendor/"
+    # A tag in front of a block-scalar indicator leaves it the indicator.
+    tagged_block = C.scan("files: !!str |-\n  ^docs/\nrepos: []\n")
+    assert C.top_level_scalar(tagged_block, "files") == "|-"
+    tagged_below = C.scan("files:\n  !!str |\n    ^docs/\nrepos: []\n")
+    assert C.top_level_scalar(tagged_below, "files") == "|"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"

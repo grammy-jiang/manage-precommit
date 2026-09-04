@@ -2207,10 +2207,13 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     # again writes nothing -- same hook id -- so this is reported beside the
     # dead entries, where SKILL.md already tells the agent to say the coverage
     # is not what it appears to be, and where the live alternative is offered
-    # in its place. Only from a complete look: a capped probe proves nothing.
+    # in its place. A capped probe still counts here: what it did see, it saw,
+    # and a fence the entry does not reach is a gap whether or not there are
+    # more files behind the cap. Completeness matters for CLAIMING coverage
+    # (see stood_in_for), not for reporting a gap already observed.
     if cfg:
         for key, seen in raw_paths.items():
-            if key not in previous or key in disabled or not seen.complete:
+            if key not in previous or key in disabled:
                 continue
             unreached = [p for p in seen.paths if not reaches(cfg, key, p, listing)]
             if unreached:
