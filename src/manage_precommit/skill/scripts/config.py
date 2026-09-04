@@ -249,7 +249,9 @@ def _split_key(text: str) -> tuple[str, str] | None:
             # The trailing comment is not part of the value. Without this,
             # `repos: # note` yields "# note" rather than "", and the
             # block-sequence check below refuses a perfectly ordinary file.
-            return text[:i].strip(), _code_only(rest).strip()
+            # The value keeps a U+00A0 at its ends: YAML's white space is space
+            # and tab, and anything else there is content.
+            return text[:i].strip(), _code_only(rest).strip(" \t")
         i += 1
     return None
 
@@ -295,8 +297,13 @@ def _unescape_double_quoted(inner: str) -> str:
 
 
 def _scalar(raw: str) -> str:
-    """The value of a scalar: quotes removed, escapes resolved, comment dropped."""
-    raw = raw.strip()
+    """The value of a scalar: quotes removed, escapes resolved, comment dropped.
+
+    Only spaces and tabs are trimmed: YAML's white space is those two, and a
+    U+00A0 at either end of a plain scalar is content -- a regex ending in one
+    is the regex pre-commit compiles, matching nothing a keyboard produces.
+    """
+    raw = raw.strip(" \t")
     if not raw:
         return ""
     if raw[0] in "\"'":
@@ -311,7 +318,7 @@ def _scalar(raw: str) -> str:
     cut = raw.find(" #")
     if cut != -1:
         raw = raw[:cut]
-    return raw.strip()
+    return raw.strip(" \t")
 
 
 def _code_only(line: str) -> str:
@@ -688,7 +695,7 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
         if _indent_of(line) == key_indent:
             entry = _split_key(line.strip())
             if entry and entry[0] in HOOK_GATING_KEYS:
-                inline = entry[1].strip()
+                inline = entry[1].strip(" \t")
                 if inline:
                     # The key's own value, folded with any lines that continue
                     # it; an indicator such as `|-` comes back untouched.
@@ -788,7 +795,7 @@ def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent:
             continue
         if _indent_of(line) <= key_indent:
             break
-        text = line.strip()
+        text = line.strip(" \t")  # YAML's white space; a U+00A0 at an end is content
         if not parts and text[0] in "\"'":
             quoted = True
             double_quoted = text[0] == '"'
@@ -797,7 +804,7 @@ def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent:
         if not quoted:
             cut = re.search(r"[ \t]#", text)
             if cut:
-                text = text[: cut.start()].rstrip()
+                text = text[: cut.start()].rstrip(" \t")
         if text:
             if parts and double_quoted and _ends_with_escape(parts[-1]):
                 # A trailing backslash in a double-quoted scalar escapes the
@@ -830,7 +837,7 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    inline = parsed[1].strip() if parsed else ""
+    inline = parsed[1].strip(" \t") if parsed else ""
     continued = _continuation(cfg.lines, line, inline)
     if not inline and continued.startswith("- "):
         return _block_sequence(cfg.lines, line, 0) or None
@@ -855,7 +862,7 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    inline = parsed[1].strip() if parsed else ""
+    inline = parsed[1].strip(" \t") if parsed else ""
     continued = _continuation(cfg.lines, line, inline)
     if not inline and continued.startswith("- "):
         return ""  # a sequence where a scalar was asked for: nothing to read

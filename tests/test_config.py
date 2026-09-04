@@ -632,6 +632,11 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # An indicator on the key's line stays the indicator, whatever follows it.
     on_key = C.scan("files: |-\n  ^docs/\nrepos: []\n")
     assert C.top_level_scalar(on_key, "files") == "|-"
+    # YAML's white space is space and tab; a U+00A0 at the end of a plain
+    # scalar is content, inline or continued, and stays in the pattern.
+    nbsp = C.scan("files: ^a\u00a0\nexclude:\n  ^b\u00a0\nrepos: []\n")
+    assert C.top_level_scalar(nbsp, "files") == "^a\u00a0"
+    assert C.top_level_scalar(nbsp, "exclude") == "^b\u00a0"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"
