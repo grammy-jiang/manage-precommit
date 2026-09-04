@@ -68,10 +68,14 @@ const QUOTE = /^ {0,3}>/;
 // A list marker with content after it, or a bare one ending the line: an empty
 // item is an item too, and the indented fence under it is inside it.
 const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(?=\S)|[ \t]*$)/;
-// The two leaf blocks that end a paragraph without opening one. A thematic
-// break is tried before a list marker, since `* * *` would read as either.
+// The leaf blocks that end a paragraph without opening one. A thematic break
+// is tried before a list marker, since `* * *` would read as either. A setext
+// underline of `=` closes the paragraph above it into a heading (one of `-`
+// is a thematic break here already, and closes it the same way); with no
+// paragraph open, a line of `=` is text.
 const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const THEMATIC = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+const SETEXT = /^ {0,3}=+[ \t]*$/;
 
 // CommonMark's seven kinds of HTML block, by what ends them: the first five end
 // at a marker, which may sit on the opening line; the last two end at a blank
@@ -273,7 +277,7 @@ function mermaidBlocks(text) {
 
     // 3. The leaf.
     paragraph = true; // an ordinary line of text, unless something below says otherwise
-    if (HEADING.test(text) || THEMATIC.test(text)) {
+    if (HEADING.test(text) || THEMATIC.test(text) || (interrupting && SETEXT.test(text))) {
       paragraph = false;
       return;
     }

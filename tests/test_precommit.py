@@ -3272,6 +3272,18 @@ def test_a_config_wide_filter_that_kills_mermaid_frees_its_alternative(
     assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
 
 
+@pytest.mark.parametrize("key", ["files", "exclude"])
+def test_a_block_scalar_pattern_is_a_verdict_not_made(repo, stubs, key):
+    """`files: |` with the regex on the lines below is the usual way to write a
+    long `(?x)` pattern. The scanner reads the inline value only, so the filter
+    arrives as `|` -- which compiles to an alternation of two empty patterns
+    and matches everything. Judged, that called a `files: |` hook live whatever
+    it said and an `exclude: |` hook dead whatever it said; a pattern not read
+    is a pattern not judged."""
+    got = _disabled_for(repo, stubs, f"        {key}: |\n          ^never/\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
     """pre-commit stops loading a config whose `files:` will not compile, so the
     hook never runs -- the same answer, reached earlier and said plainly."""

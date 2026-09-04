@@ -1193,6 +1193,13 @@ def parse_stages(raw: str) -> set[str]:
 # pattern, and whether matching it drops a path rather than admits it.
 Filter = tuple[str, str, bool]
 
+# A YAML block-scalar indicator -- `|`, `>-`, `|+2` -- standing where a pattern
+# should be. The scanner reads a key's inline value only, so a filter written as
+# a block scalar (the usual way to write a long `(?x)` regex) arrives here as its
+# indicator alone, and `|` compiles to an alternation of two empty patterns that
+# matches everything.
+BLOCK_SCALAR_RE = re.compile(r"[|>][0-9+-]*")
+
 
 class TopLevel(NamedTuple):
     """The config-wide settings every hook sits behind."""
@@ -1242,6 +1249,12 @@ def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | N
     """
     compiled: list[tuple[str, str, bool, re.Pattern[str]]] = []
     for label, pattern, excluding in filters:
+        if BLOCK_SCALAR_RE.fullmatch(pattern):
+            # The pattern is on the lines below the key, which the scanner does
+            # not read. Judging the indicator instead would call a `files: |`
+            # hook live whatever its pattern says and an `exclude: |` hook dead
+            # whatever its pattern says; a pattern not read is a verdict not made.
+            return None
         try:
             compiled.append((label, pattern, excluding, re.compile(pattern)))
         except re.error as exc:

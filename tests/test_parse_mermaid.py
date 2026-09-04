@@ -747,3 +747,18 @@ def test_a_tab_after_a_quote_marker_is_expanded_at_its_column(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 8: setext headings ---------------------------------------------
+
+
+def test_a_setext_underline_closes_the_paragraph_above_it(docs, env):
+    """`Title` over `=====` is a heading, so the `2. ` right under it is not
+    interrupting anything and opens an item. A line of `=` with no paragraph
+    above it is text, and the `2. ` under that one is prose."""
+    (docs / "doc.md").write_text(
+        "Title\n=====\n2. ```mermaid\n   flowchart TD\n   ```\n\n=====\n2. ```mermaid\nBAD\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD"]
