@@ -664,6 +664,10 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # A quote this reader cannot see closed is a value not read, not a crash.
     unclosed = C.scan('default_stages:\n  - "pre-\nrepos: []\n')
     assert C.top_level_sequence(unclosed, "default_stages") is None
+    # A tag says what the value is, not what it says, and comes off first.
+    tagged = C.scan("files: !!str '^README[.]md$'\nexclude: !!str ^vendor/\nrepos: []\n")
+    assert C.top_level_scalar(tagged, "files") == "^README[.]md$"
+    assert C.top_level_scalar(tagged, "exclude") == "^vendor/"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"

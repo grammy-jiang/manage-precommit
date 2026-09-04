@@ -4703,6 +4703,25 @@ def test_a_present_entry_that_never_reaches_the_fence_file_is_reported(repo, stu
     assert "mermaid" not in {r["name"] for r in got["recommended"]}
 
 
+def test_a_markdown_file_the_probe_could_not_read_makes_its_look_incomplete(repo, stubs):
+    """A fence under `a/` was seen; a Markdown file too large for the probe was
+    not, and may hold the fence a renderer scoped to `^a/` does not reach. An
+    incomplete look lets no alternative stand in."""
+    import precommit as P
+
+    (repo / "a").mkdir()
+    (repo / "a" / "covered.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z-large.md").write_text("x" * (P.MAX_PROBE_BYTES + 1) + "\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^a/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

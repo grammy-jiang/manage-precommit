@@ -1142,6 +1142,10 @@ def detect_markers(
         markers.append(f"markdown ({clean(safe_markdown[0])})")
         trigger_paths.append(safe_markdown[0])
     if markdown:
+        fenced: list[str] = []
+        # Complete only if every Markdown file was looked at: not cut short by
+        # the probe's cap, and none skipped for being too large or unreadable.
+        complete = len(markdown) <= MAX_MERMAID_PROBES
         for rel in markdown[:MAX_MERMAID_PROBES]:
             # Through the same guarded reader as everything else. walk_repo
             # lists symlinks (git tracks them as ordinary blobs), so a tracked
@@ -1149,10 +1153,13 @@ def detect_markers(
             # during --recommend -- the first, unconfirmed step -- and a named
             # pipe at a .md path would block forever. SymlinkRefused,
             # NotARegularFile and TooLarge all subclass OSError, so an
-            # unreadable candidate is skipped exactly as before.
+            # unreadable candidate is skipped exactly as before -- and counted:
+            # a file this probe could not read may hold the fence a scoped
+            # hook does not reach, so the look is not complete.
             try:
                 raw = read_bytes_nofollow(os.path.join(directory, rel), MAX_PROBE_BYTES)
             except OSError:
+                complete = False
                 continue
             text = raw.decode("utf-8", "replace")
             if not MERMAID_FENCE.search(text):
@@ -1160,9 +1167,6 @@ def detect_markers(
             # Every file with a fence, for the coverage judgement; the marker,
             # the trigger path and the reason name the first, as they always
             # have. The probe stays bounded by MAX_MERMAID_PROBES either way.
-            fenced = raw_paths.setdefault(
-                "mermaid-parse", Seen([], len(markdown) <= MAX_MERMAID_PROBES)
-            ).paths
             if not fenced:
                 # The syntax check, not the renderer: a pre-commit hook is a
                 # syntax check first, and this one needs no browser. `mermaid`
@@ -1172,6 +1176,8 @@ def detect_markers(
                 markers.append(f"mermaid fence ({clean(rel)})")
                 trigger_paths.append(rel)
             fenced.append(rel)
+        if fenced:
+            raw_paths["mermaid-parse"] = Seen(fenced, complete)
 
     # Offered for every repo: a secret scan is not conditional on what the tree
     # happens to contain today.

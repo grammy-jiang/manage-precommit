@@ -333,6 +333,10 @@ def _scalar(raw: str) -> str:
     raw = raw.strip(" \t")
     if not raw:
         return ""
+    # A tag -- `!!str`, or a local `!name` -- says what the value is, not what
+    # it says; a plain scalar cannot start with `!`, so a leading one is
+    # always a tag, and it comes off before the value is read.
+    raw = re.sub(r"^![^ \t]*[ \t]+", "", raw)
     if raw[0] in "\"'":
         end = _quote_end(raw, 0)
         if end == -1:
