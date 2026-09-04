@@ -425,6 +425,14 @@ def _scalar(raw: str, *, text: bool = False) -> str:
             # A plain scalar cannot start with either, so this is a flow
             # collection -- or `[.]md$`, which YAML does not parse at all.
             raise ConfigRefused(f"`{raw}` is a collection to YAML, where pre-commit wants text")
+        if re.search(r":[ \t]|:$", raw):
+            # `: ` inside a plain scalar is a mapping to YAML -- `[markdown,
+            # file: text]` holds one as its second item, and `files: a: b` is
+            # "mapping values are not allowed here" -- and a mapping where
+            # pre-commit wants text is a file that does not load.
+            raise ConfigRefused(
+                f"`{raw}` is a mapping to YAML, where pre-commit wants text; quote it"
+            )
         if _IMPLICIT_NON_STRING.fullmatch(raw):
             raise ConfigRefused(
                 "an empty value is null to YAML, and pre-commit wants text here; '' is the "

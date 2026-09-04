@@ -750,6 +750,25 @@ def test_what_yaml_rejects_around_a_quoted_value_or_inside_a_flow_list_is_refuse
     assert C.flow_items(settings["stages"]) == []
 
 
+def test_a_mapping_where_pre_commit_wants_text_refuses_the_config():
+    """`types_or: [markdown, file: text]` holds a flow mapping as its second
+    item, and `files: a: b` is a mapping value where YAML allows none; neither
+    file loads, and read as the text `file: text` the first left `markdown`
+    standing as a certain match. Quoted, `: ` is two characters like any."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    for line in (
+        "types_or: [markdown, file: text]",
+        "files: a: b",
+        "stages: [manual, x:]",
+        "files: ^(?x: a)",
+    ):
+        with pytest.raises(C.ConfigRefused, match=r"is a mapping to YAML.*line 5"):
+            C.scan(head + f"        {line}\n")
+    cfg = C.scan(head + "        files: 'a: b'\n        types_or: [markdown, \"file: text\"]\n")
+    assert cfg.repos[0].hooks[0].settings["files"] == "a: b"
+    assert C.flow_items(cfg.repos[0].hooks[0].settings["types_or"]) == ["markdown", "file: text"]
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""
