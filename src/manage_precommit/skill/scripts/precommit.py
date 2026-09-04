@@ -1014,15 +1014,23 @@ class Listing(NamedTuple):
 
     A recommendation input can be a sample; a verdict that a hook's scope admits
     no file cannot. `hook_targets` therefore prefers git's own listing -- the
-    tracked files plus the untracked ones it does not ignore -- and falls back to `walk_repo`
-    outside a work tree -- whose `complete` is False when its depth or count
-    bound cut the walk short, or when it pruned a directory that is not version
-    control metadata: a plain directory holding `vendor/a.md` beside a hook
-    scoped to `^vendor/` is not one where that hook is dead.
+    tracked files plus the untracked ones it does not ignore -- and falls back
+    to `walk_repo` outside a work tree, whose `complete` is False when its depth
+    or count bound cut the walk short, or when it pruned a directory that is
+    not version-control metadata: a plain directory holding `vendor/a.md`
+    beside a hook scoped to `^vendor/` is not one where that hook is dead.
+
+    `bounded` is the narrower fact: the walk was cut short by MAX_SCAN_DEPTH or
+    MAX_SCAN_FILES, so files that may be tracked went unseen for size alone.
+    The fence probe taints its own completeness on that only. SKIP_DIRS are the
+    scan's stated policy -- a fence in a pruned tree triggers no recommendation
+    in the first place -- while a size cap is a sample, and a sample stands in
+    for nothing.
     """
 
     paths: list[str]
     complete: bool
+    bounded: bool = False
 
 
 # One regex search per path per filter is the cost of a scope verdict, and a
@@ -1060,6 +1068,7 @@ def walk_repo(directory: str) -> Listing:
     """Repo-relative paths, depth- and count-bounded, in a stable order."""
     found: list[str] = []
     complete = True
+    bounded = False
     root_depth = directory.rstrip(os.sep).count(os.sep)
     for base, dirs, files in os.walk(directory):
         if any(d in SKIP_DIRS and d not in VCS_DIRS for d in dirs):
@@ -1068,12 +1077,13 @@ def walk_repo(directory: str) -> Listing:
         if base.count(os.sep) - root_depth >= MAX_SCAN_DEPTH:
             if dirs:
                 complete = False
+                bounded = True
             dirs[:] = []
         for name in sorted(files):
             found.append(os.path.relpath(os.path.join(base, name), directory))
             if len(found) >= MAX_SCAN_FILES:
-                return Listing(found, False)
-    return Listing(found, complete)
+                return Listing(found, False, True)
+    return Listing(found, complete, bounded)
 
 
 def prerequisites() -> dict[str, str]:
@@ -1113,7 +1123,8 @@ def detect_markers(
     The `reason` is always a path that was actually seen, never a category. A
     recommendation the user cannot check is one they have to take on faith.
     """
-    paths = walk_repo(directory).paths
+    walked = walk_repo(directory)
+    paths = walked.paths
     markers: list[str] = []
     trigger_paths: list[str] = []
     recs: list[Recommendation] = []
@@ -1143,9 +1154,10 @@ def detect_markers(
         trigger_paths.append(safe_markdown[0])
     if markdown:
         fenced: list[str] = []
-        # Complete only if every Markdown file was looked at: not cut short by
-        # the probe's cap, and none skipped for being too large or unreadable.
-        complete = len(markdown) <= MAX_MERMAID_PROBES
+        # Complete only if every Markdown file was looked at: the walk not cut
+        # short by its size bounds, the probe not cut short by its cap, and no
+        # candidate skipped for being too large or unreadable.
+        complete = not walked.bounded and len(markdown) <= MAX_MERMAID_PROBES
         for rel in markdown[:MAX_MERMAID_PROBES]:
             # Through the same guarded reader as everything else. walk_repo
             # lists symlinks (git tracks them as ordinary blobs), so a tracked

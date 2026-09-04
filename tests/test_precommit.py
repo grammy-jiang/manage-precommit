@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -4720,6 +4721,39 @@ def test_a_markdown_file_the_probe_could_not_read_makes_its_look_incomplete(repo
     )
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_a_walk_cut_short_by_its_bounds_taints_the_fence_probe(repo, stubs):
+    """A fence under `a/` was seen; a fence four directories deep was beyond
+    MAX_SCAN_DEPTH and not. The walk says it was cut short, so the probe's look
+    is not complete and a renderer scoped to `^a/` does not stand in. A pruned
+    `node_modules/` is policy, not a size cap, and does not taint it."""
+    import precommit as P
+
+    (repo / "a").mkdir()
+    (repo / "a" / "covered.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    deep = repo / "b" / "c" / "d" / "e"
+    deep.mkdir(parents=True)
+    (deep / "uncovered.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^a/'\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook)
+    assert P.walk_repo(str(repo)).bounded is True
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+    # Policy, not a bound: with the deep tree gone and a node_modules/ present,
+    # the walk is incomplete but not bounded, and the alternative stands in.
+    shutil.rmtree(repo / "b")
+    (repo / "node_modules").mkdir()
+    listing = P.walk_repo(str(repo))
+    assert listing.complete is False and listing.bounded is False
+    (repo / ".pre-commit-config.yaml").write_text(hook.replace("'^a/'", "'\\.md$'"))
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
 def test_the_alternatives_point_at_each_other(stubs):
