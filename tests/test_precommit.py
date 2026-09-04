@@ -3322,6 +3322,19 @@ def test_a_continued_block_scalar_filter_is_a_verdict_not_made(repo, stubs):
     assert got["disabled"] == {}, got["disabled"]
 
 
+def test_an_escaped_spelling_of_a_stage_is_that_stage(repo, stubs):
+    """`default_stages: ["pre\\u002dcommit"]` is the commit stage to YAML and
+    to pre-commit; read with the escape left in, every inheriting hook looked
+    parked."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        'default_stages: ["pre\\u002dcommit"]\nrepos:\n'
+        "  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_a_config_wide_filter_that_kills_mermaid_frees_its_alternative(
     repo, keys_file, facts_path, stubs
 ):

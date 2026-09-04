@@ -1216,9 +1216,10 @@ def parse_stages(raw: str) -> set[str]:
 
     Membership, not a substring test: "commit" is a substring of "commit-msg",
     so a hook restricted to commit-msg -- which never scans content on an
-    ordinary commit -- read as running on every one.
+    ordinary commit -- read as running on every one. Each item is read as the
+    scalar it is, so a quoted or escaped spelling of a stage is that stage.
     """
-    return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
+    return set(cfgmod.flow_items(raw))
 
 
 # One `files:`/`exclude:` filter a hook sits behind: where it is declared, the

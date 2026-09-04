@@ -296,6 +296,33 @@ def _unescape_double_quoted(inner: str) -> str:
     return _DQ_ESCAPE_RE.sub(one, inner)
 
 
+def flow_items(raw: str) -> list[str]:
+    """The items of a `[a, "b"]` flow sequence, each read as the scalar it is.
+
+    `parse_stages` used to strip quotes and nothing else, so a stage written as
+    `"pre\\u002dcommit"` -- valid YAML for `pre-commit` -- read as a stage no
+    hook runs on. Items are split on commas outside quotes; a comma inside a
+    quoted item stays.
+    """
+    text = raw.strip(" \t")
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    items: list[str] = []
+    i = start = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            end = _quote_end(text, i)
+            i = len(text) if end == -1 else end
+            continue
+        if ch == ",":
+            items.append(text[start:i])
+            start = i + 1
+        i += 1
+    items.append(text[start:])
+    return [_scalar(item) for item in items if item.strip(" \t")]
+
+
 def _scalar(raw: str) -> str:
     """The value of a scalar: quotes removed, escapes resolved, comment dropped.
 
@@ -314,10 +341,11 @@ def _scalar(raw: str) -> str:
             raise ConfigRefused("a quoted value on this line is never closed")
         inner = raw[1 : end - 1]
         return inner.replace("''", "'") if raw[0] == "'" else _unescape_double_quoted(inner)
-    # Unquoted: a " #" starts a comment, a bare "#" inside a word does not.
-    cut = raw.find(" #")
-    if cut != -1:
-        raw = raw[:cut]
+    # Unquoted: a `#` after a space or a tab starts a comment; a bare `#`
+    # inside a word does not.
+    comment = re.search(r"[ \t]#", raw)
+    if comment:
+        raw = raw[: comment.start()]
     return raw.strip(" \t")
 
 
@@ -799,6 +827,13 @@ def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent:
         if _indent_of(line) <= key_indent:
             break
         text = line.strip(" \t")
+        if double_quoted or (not parts and line.strip(" \t")[0] == '"'):
+            # Inside double quotes, white space at the end of a line folds away
+            # unless it is escaped: `\ ` is a literal space and stays.
+            kept = line.rstrip(" \t")
+            if _ends_with_escape(kept) and len(kept) < len(line.rstrip("\n")):
+                kept = kept + line.rstrip("\n")[len(kept)]
+            text = kept.lstrip(" \t")
         if not parts and text[0] in "\"'":
             quoted = True
             double_quoted = text[0] == '"'

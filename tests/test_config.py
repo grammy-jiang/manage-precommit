@@ -644,6 +644,13 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # A continued line holding only a U+00A0 is content, not a blank line.
     nbsp_line = C.scan("files:\n  ^README$\n  \u00a0\nrepos: []\n")
     assert C.top_level_scalar(nbsp_line, "files") == "^README$ \u00a0"
+    # An escaped space at the end of a double-quoted line is content, and the
+    # break still folds to a space: two spaces, as YAML has it.
+    escaped_space = C.scan('files:\n  "^README\\ \n   [.]md$"\nrepos: []\n')
+    assert C.top_level_scalar(escaped_space, "files") == "^README  [.]md$"
+    # A tab before `#` opens a comment in a block item too.
+    tab_item = C.scan("default_stages:\n  - pre-commit\t# ordinary\nrepos: []\n")
+    assert C.top_level_sequence(tab_item, "default_stages") == "[pre-commit]"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"
@@ -777,3 +784,16 @@ def test_a_dedent_ends_a_block_sequence():
     )
     assert cfg.repos[0].hooks[0].settings["stages"] == "[manual]"
     assert [h.id for h in cfg.repos[0].hooks] == ["a", "b"]
+
+
+def test_flow_items_read_each_item_as_the_scalar_it_is():
+    """`["pre\\u002dcommit"]` is `pre-commit` to YAML; stripping quotes alone
+    left the escape in place, and a stage no hook runs on."""
+    assert C.flow_items("[\"pre\\u002dcommit\", 'manual', plain]") == [
+        "pre-commit",
+        "manual",
+        "plain",
+    ]
+    assert C.flow_items("[manual, pre-push]") == ["manual", "pre-push"]
+    assert C.flow_items('["a,b", c]') == ["a,b", "c"]
+    assert C.flow_items("[]") == []
