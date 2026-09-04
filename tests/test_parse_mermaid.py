@@ -796,3 +796,15 @@ def test_hgroup_is_a_block_level_tag_that_may_interrupt_a_paragraph(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 12: a line that is only a marker ---------------------------------
+
+
+def test_a_lone_quote_marker_leaves_no_paragraph_open(docs, env):
+    """`>` alone is an empty quote line, not prose, so the `2. ` on the next
+    quoted line is not interrupting anything and opens an item."""
+    (docs / "doc.md").write_text(">\n> 2. ```mermaid\n>    flowchart TD\n>    ```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD"]

@@ -3155,31 +3155,34 @@ def test_files_and_exclude_are_one_scope(repo, stubs):
 
 def test_a_scope_beyond_the_scans_reach_is_not_called_dead(repo, stubs):
     """walk_repo stops below MAX_SCAN_DEPTH and after MAX_SCAN_FILES, but the
-    scope verdict rests on the tracked files, which is what pre-commit itself
-    iterates and which has no depth: a hook scoped to `packages/app/src/generated/`
-    in a monorepo is judged against the files that are really there."""
+    scope verdict rests on git's own listing, which has no depth: a hook scoped
+    to `packages/app/src/generated/` in a monorepo is judged against the files
+    that are really there."""
     deep = repo / "a" / "b" / "c" / "d"
     deep.mkdir(parents=True)
     (deep / "deep.txt").write_text("x\n")
-    subprocess.run([REAL_GIT, "-C", str(repo), "add", "a"], check=True)
     got = _disabled_for(repo, stubs, "        files: '^a/b/c/d/'\n")
     assert got["disabled"] == {}, got["disabled"]
 
 
-def test_the_scope_is_judged_on_tracked_files_as_pre_commit_runs_them(repo, stubs):
-    """`pre-commit run --all-files` iterates `git ls-files`. A tracked
-    `vendor/` reaches a hook scoped to it, however walk_repo prunes that tree
-    for the recommendation scan; an untracked file reaches nothing."""
+def test_the_scope_is_judged_on_the_files_git_would_hand_pre_commit(repo, stubs):
+    """Tracked files, which `pre-commit run --all-files` iterates, plus the
+    untracked ones git does not ignore, which the next `git add` turns into
+    hook targets -- and which the scan itself just walked, so the file that got
+    an entry recommended is in the listing its alternative is judged against.
+    A tracked `vendor/` reaches a hook scoped to it however walk_repo prunes
+    that tree; an ignored file reaches nothing."""
     (repo / "vendor").mkdir()
     (repo / "vendor" / "lib.js").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '^vendor/'\n")
+    assert got["disabled"] == {}, got["disabled"]  # untracked, not ignored: a target
+    (repo / ".gitignore").write_text("*.txt\n")
     (repo / "notes.txt").write_text("x\n")
-    got = _disabled_for(repo, stubs, "        files: '^vendor/'\n")
-    assert "gitleaks" in got["disabled"], got["disabled"]  # untracked: not a target yet
-    subprocess.run([REAL_GIT, "-C", str(repo), "add", "vendor"], check=True)
-    got = _disabled_for(repo, stubs, "        files: '^vendor/'\n")
-    assert got["disabled"] == {}, got["disabled"]
     got = _disabled_for(repo, stubs, "        files: '\\.txt$'\n")
-    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "gitleaks" in got["disabled"], got["disabled"]  # ignored: never a target
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-f", "notes.txt"], check=True)
+    got = _disabled_for(repo, stubs, "        files: '\\.txt$'\n")
+    assert got["disabled"] == {}, got["disabled"]  # tracked despite the ignore rule
 
 
 def test_outside_a_work_tree_a_pruned_directory_makes_the_walk_incomplete(tmp_path, stubs):

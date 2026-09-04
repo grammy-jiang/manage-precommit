@@ -1008,8 +1008,8 @@ class Listing(NamedTuple):
     """Paths a scope is judged against, and whether they are all of them.
 
     A recommendation input can be a sample; a verdict that a hook's scope admits
-    no file cannot. `hook_targets` therefore prefers the tracked files, which is
-    what `pre-commit run --all-files` iterates, and falls back to `walk_repo`
+    no file cannot. `hook_targets` therefore prefers git's own listing -- the
+    tracked files plus the untracked ones it does not ignore -- and falls back to `walk_repo`
     outside a work tree -- whose `complete` is False when its depth or count
     bound cut the walk short, or when it pruned a directory that is not version
     control metadata: a plain directory holding `vendor/a.md` beside a hook
@@ -1027,19 +1027,24 @@ MAX_SCOPE_PATHS = 20000
 
 
 def hook_targets(directory: str) -> Listing:
-    """The files pre-commit would run hooks over, and whether that is all of them.
+    """The files pre-commit could be handed, and whether that is all of them.
 
-    `git ls-files`, because that is exactly what `pre-commit run --all-files`
-    iterates: it carries no depth bound, so a hook scoped to a directory four
-    levels down is judged against the files that are really there, and it
-    includes a tracked `vendor/` that walk_repo skips on purpose while leaving
-    out the untracked `node_modules/` that walk_repo skips for the same reason.
-    Outside a work tree the bounded walk stands in, with its own account of
-    completeness. Symlinks and submodule entries ride along; pre-commit lists
-    them too.
+    `git ls-files --cached --others --exclude-standard`: the tracked files,
+    which is what `pre-commit run --all-files` iterates, plus the untracked
+    ones git does not ignore, which is what the next `git add` turns into
+    hook targets -- and what the scan itself just walked, so the `doc.md` that
+    got `mermaid-parse` recommended is in the listing its alternative is judged
+    against. It carries no depth bound, so a hook scoped four directories down
+    is judged against the files that are really there; it includes a tracked
+    `vendor/` that walk_repo skips on purpose, and leaves out the ignored
+    `node_modules/` that walk_repo skips for the same reason. Outside a work
+    tree the bounded walk stands in, with its own account of completeness.
+    Symlinks and submodule entries ride along; pre-commit lists them too.
     """
     if is_work_tree(git, directory):
-        rc, out, _ = git(directory, "ls-files", "-z", strip=False)
+        rc, out, _ = git(
+            directory, "ls-files", "-z", "--cached", "--others", "--exclude-standard", strip=False
+        )
         if rc == 0:
             paths = [p for p in out.split("\0") if p]
             return Listing(paths[:MAX_SCOPE_PATHS], len(paths) <= MAX_SCOPE_PATHS)

@@ -277,7 +277,12 @@ function mermaidBlocks(text) {
       offset += markerEnd + gap;
     }
 
-    // 3. The leaf.
+    // 3. The leaf. A line that was only container markers -- a lone `>` --
+    // has none, and leaves no paragraph open inside the container it opened.
+    if (text.trim() === "") {
+      paragraph = false;
+      return;
+    }
     paragraph = true; // an ordinary line of text, unless something below says otherwise
     if (HEADING.test(text) || THEMATIC.test(text) || (interrupting && SETEXT.test(text))) {
       paragraph = false;
