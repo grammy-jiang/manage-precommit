@@ -115,8 +115,10 @@ Anything already in `previous` is not offered again; say it is already there —
 **unless it also appears in `disabled`**. That means the entry exists but looks
 like it will not run: `stages` that exclude the commit, a `files`/`exclude`
 scope that lets no file in the repository through, a pattern pre-commit would
-refuse to load, `pass_filenames: false` on a hook whose program reads its file
-list, or a scope that never reaches the file the scan found the fence in. Say
+refuse to load, a `types`/`types_or`/`exclude_types` filter no file the entry is
+for can pass (a Markdown check typed `python`), `pass_filenames: false` on a hook
+whose program reads its file list, or a scope that never reaches the file the
+scan found the fence in. Say
 which, and say it is not the coverage it appears to be. **Do not offer to add a working one — this skill cannot.** The fragment
 declares the same hook id that is already present, so selecting it again writes
 nothing and changes nothing; the merge only ever inserts and never edits an

@@ -68,7 +68,20 @@ _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 # recorded because its absence matters when `files` is restrictive, and
 # `pass_filenames` because `always_run` is coverage only for a hook that does
 # not consume the (possibly empty) file list it is handed.
-HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run", "pass_filenames")
+HOOK_GATING_KEYS = (
+    "stages",
+    "files",
+    "exclude",
+    "always_run",
+    "pass_filenames",
+    "types",
+    "types_or",
+    "exclude_types",
+)
+# The gating keys whose value pre-commit wants as text -- a regex. A plain
+# scalar YAML would read as anything else (`files: null`, `files: 123`) is
+# refused for these, since the file would not load; see _scalar.
+TEXT_GATING_KEYS = ("files", "exclude")
 # The top-level keys that gate every hook the same way, and whose values the
 # scan reads once so a refusal lands at scan time with its line.
 TOP_LEVEL_GATING_KEYS = ("files", "exclude", "default_stages")
@@ -342,21 +355,26 @@ def flow_items(raw: str) -> list[str]:
     return [_scalar(item) for item in items if item.strip(" \t")]
 
 
-def _scalar(raw: str) -> str:
+def _scalar(raw: str, *, text: bool = False) -> str:
     """The value of a scalar: quotes removed, escapes resolved, comment dropped.
 
     Only spaces and tabs are trimmed: YAML's white space is those two, and a
     U+00A0 at either end of a plain scalar is content -- a regex ending in one
     is the regex pre-commit compiles, matching nothing a keyboard produces.
+
+    `text` says the caller needs a string -- a `files:` pattern, a `repo:`, a
+    `rev:`, an `id:` -- and refuses a PLAIN scalar YAML resolves to anything
+    else: `null`, `~` or nothing at all, `true`, `123`, `1.5`, a date, `<<`,
+    or a flow collection. pre-commit rejects a non-string there, so the file
+    does not load; read as the text `null`, the value was a live pattern, one
+    reaching `null.md`. Quoted, or tagged `!!str`, the same characters are
+    text and are read as written.
     """
     raw = raw.strip(" \t")
-    if not raw:
-        return ""
+    tagged = raw.startswith("!")
     # A tag says what the value is: `!!str` comes off, anything else refuses.
     raw = _untag(raw)
-    if not raw:
-        return ""  # a tag with no value after it: the empty string, as YAML reads it
-    if raw[0] in "\"'":
+    if raw[:1] in ('"', "'"):
         end = _quote_end(raw, 0)
         if end == -1:
             # Malformed, and the value can only be guessed at from here. The
@@ -368,6 +386,18 @@ def _scalar(raw: str) -> str:
     # inside a word does not, and neither does one inside a quoted item of a
     # flow sequence -- `[commit, "x #y"]` was being cut inside its quotes.
     raw = _code_only(raw).strip(" \t")
+    if text and not tagged:
+        if raw[:1] in ("[", "{"):
+            # A plain scalar cannot start with either, so this is a flow
+            # collection -- or `[.]md$`, which YAML does not parse at all.
+            raise ConfigRefused(f"`{raw}` is a collection to YAML, where pre-commit wants text")
+        if _IMPLICIT_NON_STRING.fullmatch(raw):
+            raise ConfigRefused(
+                "an empty value is null to YAML, and pre-commit wants text here; '' is the "
+                "empty pattern"
+                if not raw
+                else f"`{raw}` is not text to YAML, and pre-commit wants text here; quote it"
+            )
     # A plain scalar cannot start with `[`, so this is a flow sequence. It is
     # returned as written -- flow_items reads it on demand -- but its items are
     # read once here, so that one YAML would refuse (a quote never closed, an
@@ -376,6 +406,27 @@ def _scalar(raw: str) -> str:
     if raw.startswith("[") and raw.endswith("]"):
         flow_items(raw)
     return raw
+
+
+# What YAML reads a PLAIN scalar as when nothing says otherwise, as PyYAML's
+# resolver -- the one under pre-commit's loader -- spells it: null (including
+# no value at all), the YAML 1.1 booleans, integers in every base, floats,
+# timestamps, and the merge and value keys. Anything else is text.
+_IMPLICIT_NON_STRING = re.compile(
+    r"""^(?:
+        ~|null|Null|NULL|                                        # null, or nothing at all
+        |yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF
+        |[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+
+        |[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+
+        |[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?
+        |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)
+        |[0-9]{4}-[0-9]{2}-[0-9]{2}
+        |[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?
+            (?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?
+        |<<|=
+    )$""",
+    re.X,
+)
 
 
 def _code_only(line: str) -> str:
@@ -492,7 +543,7 @@ def scan(text: str) -> Config:
                 # for later, and every hook was then judged as if the config had
                 # never written it.
                 try:
-                    _top_value(lines, i, value)
+                    _top_value(lines, i, value, key)
                 except ConfigRefused as exc:
                     raise _located(exc, i + 1) from None
             i = _skip_block(lines, i + 1)
@@ -638,7 +689,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     key, value = parsed
     if key == "repo":
         _refuse_multiline_scalar(lines, start, key_indent, value, "repo")
-        entry.url = _scalar(value)
+        entry.url = _scalar(value, text=True)
         refuse_unsafe_repo(entry.url, start + 1)
     elif key in ("rev", "hooks"):
         raise ConfigRefused("a repo entry lists `repo:` after another key; unsupported", start + 1)
@@ -672,7 +723,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
             in_hooks = key == "hooks"
             if key == "rev":
                 _refuse_multiline_scalar(lines, i, key_indent, value, "rev")
-                entry.rev = _scalar(value)
+                entry.rev = _scalar(value, text=True)
             elif key == "repo":
                 raise ConfigRefused("a repo entry defines `repo:` twice", i + 1)
             elif in_hooks:
@@ -761,7 +812,7 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
     if parsed is None or parsed[0] != "id":
         raise ConfigRefused("a hook item does not start with `id:`", start + 1)
     _refuse_multiline_scalar(lines, start, item_indent + 2, parsed[1], "id")
-    hook = Hook(id=_scalar(parsed[1]), start=start, end=start)
+    hook = Hook(id=_scalar(parsed[1], text=True), start=start, end=start)
     key_indent = item_indent + 2
     i = start + 1
     while i < len(lines):
@@ -778,7 +829,9 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
                 # is content it keeps.
                 entry = _split_key(line.lstrip(" \t"))
                 if entry and entry[0] in HOOK_GATING_KEYS:
-                    hook.settings[entry[0]] = _gating_value(lines, i, entry[1], key_indent)
+                    hook.settings[entry[0]] = _gating_value(
+                        lines, i, entry[1], key_indent, entry[0]
+                    )
             except ConfigRefused as exc:
                 raise _located(exc, i + 1) from None
         hook.end = i
@@ -786,12 +839,18 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
     return i, hook
 
 
-def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int) -> str:
-    """The value of a hook's gating key, in whichever shape the file used."""
+def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int, key: str) -> str:
+    """The value of a hook's gating key, in whichever shape the file used.
+
+    `files:` and `exclude:` want text (TEXT_GATING_KEYS): a block sequence
+    under one of those is a list where pre-commit wants a regex, and refused
+    the way _scalar refuses a flow one.
+    """
+    text = key in TEXT_GATING_KEYS
     if inline:
         # The key's own value, folded with any lines that continue it; an
         # indicator such as `|-` comes back untouched.
-        return _scalar(_continuation(lines, key_line, inline, key_indent))
+        return _scalar(_continuation(lines, key_line, inline, key_indent), text=text)
     # `stages:` followed by a block sequence -- indented, or at the key's own
     # column -- is the everyday way to write this, and reading only the inline
     # scalar left it as "", which every caller treats as "not set": a hook
@@ -799,9 +858,12 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int)
     # that, a value on the following line(s) -- `files:` over an indented
     # `^docs/` -- reads the way a top-level one does, rather than as "" and
     # then as a pattern matching every path.
-    return _block_sequence(lines, key_line, key_indent) or _scalar(
-        _continuation(lines, key_line, "", key_indent)
-    )
+    block = _block_sequence(lines, key_line, key_indent)
+    if block:
+        if text:
+            raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
+        return block
+    return _scalar(_continuation(lines, key_line, "", key_indent), text=text)
 
 
 def _located(exc: ConfigRefused, line_no: int) -> ConfigRefused:
@@ -1007,7 +1069,7 @@ def _ends_with_escape(text: str) -> bool:
     return trailing % 2 == 1
 
 
-def _top_value(lines: list[str], key_line: int, inline: str) -> tuple[bool, str]:
+def _top_value(lines: list[str], key_line: int, inline: str, key: str) -> tuple[bool, str]:
     """A top-level key's value, and whether it is a block sequence.
 
     A block sequence under the key comes back in the flow shape; anything else
@@ -1018,10 +1080,13 @@ def _top_value(lines: list[str], key_line: int, inline: str) -> tuple[bool, str]
     before anything is judged by it; the public readers below therefore never
     meet one for those keys.
     """
+    text = key in TEXT_GATING_KEYS
     continued = _continuation(lines, key_line, inline)
     if not inline and continued.startswith("- "):
+        if text:
+            raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
         return True, _block_sequence(lines, key_line, 0)
-    return False, _scalar(continued)
+    return False, _scalar(continued, text=text)
 
 
 def top_level_sequence(cfg: Config, key: str) -> str | None:
@@ -1037,7 +1102,7 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    _, value = _top_value(cfg.lines, line, parsed[1] if parsed else "")
+    _, value = _top_value(cfg.lines, line, parsed[1] if parsed else "", key)
     return value or None
 
 
@@ -1059,7 +1124,7 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    sequence, value = _top_value(cfg.lines, line, parsed[1] if parsed else "")
+    sequence, value = _top_value(cfg.lines, line, parsed[1] if parsed else "", key)
     return "" if sequence else value  # a sequence where a scalar was asked for: nothing to read
 
 

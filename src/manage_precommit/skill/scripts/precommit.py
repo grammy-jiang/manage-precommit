@@ -113,6 +113,10 @@ CATALOG: dict[str, dict[str, Any]] = {
         # not given a file it matches -- unlike hygiene's hooks, which match
         # anything and are legitimately quiet in a repo with none of that type.
         "file_scoped": True,
+        # identify's tags every file this entry is for carries -- a `.md` is
+        # `file`, `text` and `markdown` -- so a type filter no such file can
+        # pass is judged. See types_shut_out.
+        "target_tags": ("file", "text", "markdown"),
         "desc": "Markdown linter (config: .markdownlint.yaml)",
     },
     "mermaid-parse": {
@@ -134,6 +138,7 @@ CATALOG: dict[str, dict[str, Any]] = {
         # what parsing alone cannot. A config carrying either is not offered
         # the other (see cmd_recommend).
         "alternatives": ("mermaid",),
+        "target_tags": ("file", "text", "markdown"),
         "desc": "Mermaid syntax check with mermaid.parse(), no browser (local hook; needs node)",
     },
     "mermaid": {
@@ -151,6 +156,7 @@ CATALOG: dict[str, dict[str, Any]] = {
         "executes_assets": True,
         "file_scoped": True,
         "alternatives": ("mermaid-parse",),
+        "target_tags": ("file", "text", "markdown"),
         "desc": "Mermaid diagram validator, rendered (local hook; needs node + a browser)",
     },
     "gitleaks": {
@@ -1377,6 +1383,47 @@ def scope_admits_nothing(
     return f"{named} (together they leave no{'' if intended is None else 'ne'} {what})"
 
 
+# identify's two executability tags: every regular file carries exactly one,
+# and which one is not known from its name.
+EXECUTABILITY = frozenset({"executable", "non-executable"})
+
+
+def types_shut_out(settings: dict[str, str], certain: frozenset[str]) -> str | None:
+    """A type filter no file this entry is for can pass, or None.
+
+    pre-commit applies `types`, `types_or` and `exclude_types` on top of the
+    regex filters, by identify's tags. `certain` is what every file the entry
+    is for carries -- `file`, `text` and `markdown` for a Markdown file -- and
+    with the executability pair it is everything such a file CAN carry. So
+    `types` (every listed tag required) naming one outside that set admits no
+    such file; `types_or` (any listed tag) naming none inside it admits none;
+    `exclude_types` (any listed tag drops the file) naming a certain one drops
+    them all. Anything else -- `types: [text]`, `exclude_types: [executable]`
+    -- may or may not admit a given file and is not judged: identify's full tag
+    database is not something this tool can carry (no third-party runtime
+    dependency), and a guess would be a confident wrong verdict either way.
+    """
+    possible = certain | EXECUTABILITY
+    if "types" in settings:
+        foreign = sorted(set(cfgmod.flow_items(settings["types"])) - possible)
+        if foreign:
+            return f"types: {settings['types']} (no file this entry is for carries `{foreign[0]}`)"
+    if "types_or" in settings:
+        listed = set(cfgmod.flow_items(settings["types_or"]))
+        if listed and not listed & possible:
+            return (
+                f"types_or: {settings['types_or']} (no file this entry is for carries any of these)"
+            )
+    if "exclude_types" in settings:
+        hit = sorted(set(cfgmod.flow_items(settings["exclude_types"])) & certain)
+        if hit:
+            return (
+                f"exclude_types: {settings['exclude_types']} "
+                f"(every file this entry is for carries `{hit[0]}`)"
+            )
+    return None
+
+
 def looks_disabled(
     hook: cfgmod.Hook,
     listing: Listing,
@@ -1384,6 +1431,7 @@ def looks_disabled(
     *,
     intended: re.Pattern[str] | None = None,
     consumes_files: bool = True,
+    tags: tuple[str, ...] | None = None,
 ) -> str | None:
     """What would stop this hook running, or None.
 
@@ -1413,6 +1461,14 @@ def looks_disabled(
         return "pass_filenames: false (this hook reads its file list, and is handed none)"
     if not consumes_files and settings.get("always_run", "").lower() in ("true", "yes", "on"):
         return None
+    # A type filter is applied on top of the regexes; one no file this entry is
+    # for can pass switches the hook off for every such file, whatever `files:`
+    # admits. Judged only where identify's answer is certain (see
+    # types_shut_out); an entry that is for every file has no such certainty.
+    if tags:
+        typed_out = types_shut_out(settings, frozenset(tags))
+        if typed_out:
+            return typed_out
     own: list[Filter] = [
         (key, settings[key], excluding)
         for key, excluding in (("files", False), ("exclude", True))
@@ -1447,7 +1503,14 @@ def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
         for hook in entry.hooks:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
-            if looks_disabled(hook, listing, top, intended=intended, consumes_files=consumes_files):
+            if looks_disabled(
+                hook,
+                listing,
+                top,
+                intended=intended,
+                consumes_files=consumes_files,
+                tags=meta.get("target_tags"),
+            ):
                 continue
             filters = [
                 *top.filters,
@@ -1501,7 +1564,12 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
             why = looks_disabled(
-                hook, listing, top, intended=intended, consumes_files=consumes_files
+                hook,
+                listing,
+                top,
+                intended=intended,
+                consumes_files=consumes_files,
+                tags=meta.get("target_tags"),
             )
             verdicts.setdefault(hook.id, []).append(why)
     out: list[str] = []

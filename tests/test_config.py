@@ -587,6 +587,71 @@ def test_a_hash_inside_a_quoted_flow_item_is_not_a_comment():
     assert C.flow_items(cfg.repos[0].hooks[0].settings["stages"]) == ["commit", "x #y"]
 
 
+def test_a_plain_value_yaml_would_not_read_as_text_refuses_the_config():
+    """`files: null` is None to YAML, `files: 123` a number, `files:` with
+    nothing after it null again, and `files: [.]md$` a flow sequence YAML does
+    not parse at all. pre-commit wants text at every one of these and rejects
+    the file; read as the text `null`, the value was a live pattern, one
+    reaching `null.md`. Quoted, or tagged `!!str`, the same characters are
+    text; a value that only looks like a number to a person is text to YAML;
+    and the booleans are booleans where pre-commit wants one."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    for value in (
+        "null",
+        "~",
+        "",
+        "true",
+        "Yes",
+        "123",
+        "0x1F",
+        "1.5",
+        "2024-01-02",
+        "<<",
+        "[.]md$",
+    ):
+        with pytest.raises(C.ConfigRefused, match="line 5"):
+            C.scan(head + f"        files: {value}\n")
+    with pytest.raises(C.ConfigRefused, match=r"not text.*line 1"):
+        C.scan("exclude: 123\nrepos: []\n")
+    with pytest.raises(C.ConfigRefused, match=r"holds a list.*line 5"):
+        C.scan(head + "        files:\n          - a\n")
+    with pytest.raises(C.ConfigRefused, match=r"holds a list.*line 1"):
+        C.scan("exclude:\n  - a\nrepos: []\n")
+    for spelled, read in (
+        ('"null"', "null"),
+        ("'123'", "123"),
+        ("!!str null", "null"),
+        ("!!str", ""),
+    ):
+        cfg = C.scan(head + f"        files: {spelled}\n")
+        assert cfg.repos[0].hooks[0].settings["files"] == read
+    cfg = C.scan(
+        head + "        files: 1.2.3\n        always_run: true\n        pass_filenames: no\n"
+    )
+    assert cfg.repos[0].hooks[0].settings["files"] == "1.2.3"
+    assert cfg.repos[0].hooks[0].settings["always_run"] == "true"
+    assert cfg.repos[0].hooks[0].settings["pass_filenames"] == "no"
+    # `repo:`, `rev:` and `id:` want text as well.
+    with pytest.raises(C.ConfigRefused, match="not text"):
+        C.scan("repos:\n  - repo: https://x.invalid/r\n    rev: 1.2\n    hooks:\n      - id: a\n")
+    with pytest.raises(C.ConfigRefused, match="not text"):
+        C.scan("repos:\n  - repo: local\n    hooks:\n      - id: 123\n")
+
+
+def test_type_filters_are_captured_like_every_other_gate():
+    """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
+    that never saw them called a `types: [python]` Markdown hook live."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+        "        types: [python]\n        types_or:\n          - yaml\n          - toml\n"
+        "        exclude_types: [markdown]\n"
+    )
+    settings = cfg.repos[0].hooks[0].settings
+    assert C.flow_items(settings["types"]) == ["python"]
+    assert C.flow_items(settings["types_or"]) == ["yaml", "toml"]
+    assert C.flow_items(settings["exclude_types"]) == ["markdown"]
+
+
 def test_double_quoted_scalars_resolve_their_escapes_and_single_quoted_do_not():
     """`files: "\\\\.md$"` is the regex `\\.md$` to YAML and to pre-commit.
     Reading the two backslashes as written compiled a regex for a literal

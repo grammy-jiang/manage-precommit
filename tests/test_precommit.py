@@ -3169,6 +3169,58 @@ def test_a_non_string_tag_on_a_filter_refuses_the_config(repo, stubs):
     assert got["line"] == 8
 
 
+def test_a_type_filter_no_markdown_file_can_pass_is_a_switch(repo, stubs):
+    """pre-commit applies `types`, `types_or` and `exclude_types` on top of the
+    regex filters, by identify's tags. A Markdown file is `file`, `text` and
+    `markdown`, plus one of `executable`/`non-executable`; so `types: [python]`
+    admits no Markdown file, `types_or: [python, yaml]` neither, and
+    `exclude_types: [text]` drops every one -- a mermaid hook so typed never
+    runs on the fence the scan found, and read as covering it. A filter a
+    Markdown file MAY pass -- `types: [text]`, `exclude_types: [executable]` --
+    is not judged: identify's tag database is not something this tool carries,
+    and a guess would be wrong in either direction. gitleaks is for every file,
+    so its type filter is a scope, not a switch."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+
+    def verdict(extra: str) -> str:
+        (repo / ".pre-commit-config.yaml").write_text(hook + extra)
+        got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+        return got["disabled"].get("mermaid-parse", [""])[0]
+
+    assert "no file this entry is for carries `python`" in verdict("        types: [python]\n")
+    assert "types_or: [python, yaml]" in verdict("        types_or: [python, yaml]\n")
+    assert "every file this entry is for carries `text`" in verdict(
+        "        exclude_types:\n          - text\n"
+    )
+    assert verdict("        types: [text]\n") == ""
+    assert verdict("        exclude_types: [executable]\n") == ""
+    got = _disabled_for(repo, stubs, "        types: [python]\n")
+    assert "gitleaks" not in got["disabled"], got["disabled"]
+
+
+def test_an_implicitly_typed_filter_refuses_the_config(repo, stubs):
+    """`files: null` is None to YAML, which pre-commit rejects where it wants a
+    regex, so the file runs no hook. Read as the text `null` it was a live
+    pattern -- one that reaches `null.md`."""
+    (repo / "null.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: null\n"
+    )
+    proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+    assert proc.returncode == 5, proc.stderr
+    got = out_json(proc)
+    assert got["reason"] == "config-refused"
+    assert got["line"] == 8
+
+
 def test_a_valueless_tag_is_the_empty_pattern(repo, stubs):
     """`exclude: !!str` is YAML for `exclude: ''`, and the empty pattern matches
     every path: pre-commit hands the hook nothing. Read as the text `!!str` -- a
