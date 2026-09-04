@@ -848,3 +848,18 @@ def test_non_breaking_spaces_are_content_not_indentation_or_tag_whitespace(docs,
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 18: what may follow a block tag's name -----------------------------
+
+
+def test_a_block_tag_name_followed_by_a_bare_slash_is_prose(docs, env):
+    """A kind-6 opener is the tag name followed by space, tab, `>`, `/>` or the
+    end of the line. `<div/x` is none of those, so it is prose and the fence
+    under it is a fence; `<div/>` is."""
+    (docs / "doc.md").write_text(
+        "<div/x\n```mermaid\nflowchart TD\n  A --> B\n```\n\n<div/>\n```mermaid\nBAD\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
