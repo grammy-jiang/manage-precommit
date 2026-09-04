@@ -688,14 +688,24 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
         if _indent_of(line) == key_indent:
             entry = _split_key(line.strip())
             if entry and entry[0] in HOOK_GATING_KEYS:
-                value = _scalar(entry[1])
-                if not value:
-                    # `stages:` followed by an indented block sequence is the
-                    # everyday way to write this, and reading only the inline
-                    # scalar left it as "" -- which every caller then treats as
-                    # "not set". A hook confined to the manual stage was
-                    # reported as active coverage.
-                    value = _block_sequence(lines, i, key_indent)
+                inline = entry[1].strip()
+                if inline:
+                    # The key's own value, folded with any lines that continue
+                    # it; an indicator such as `|-` comes back untouched.
+                    value = _scalar(_continuation(lines, i, inline, key_indent))
+                else:
+                    # `stages:` followed by a block sequence -- indented, or at
+                    # the key's own column -- is the everyday way to write this,
+                    # and reading only the inline scalar left it as "", which
+                    # every caller treats as "not set": a hook confined to the
+                    # manual stage was reported as active coverage. Failing
+                    # that, a value on the following line(s) -- `files:` over
+                    # an indented `^docs/` -- reads the way a top-level one
+                    # does, rather than as "" and then as a pattern matching
+                    # every path.
+                    value = _block_sequence(lines, i, key_indent) or _scalar(
+                        _continuation(lines, i, "", key_indent)
+                    )
                 hook.settings[entry[0]] = value
         hook.end = i
         i += 1
@@ -738,11 +748,14 @@ def reindent(block: str, spaces: int) -> str:
 _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
 
 
-def _continuation(lines: list[str], key_line: int, inline: str = "") -> str:
-    """The value of a top-level key, folded with the lines that continue it.
+def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent: int = 0) -> str:
+    """The value of a key, folded with the lines that continue it.
 
-    `inline` is what the key's own line carries; the continued lines fold onto
-    it -- `files: ^docs/` over an indented `a\\.md$` is `^docs/ a\\.md$` to YAML.
+    `inline` is what the key's own line carries; the continued lines -- those
+    indented past `key_indent` -- fold onto it: `files: ^docs/` over an indented
+    `a\\.md$` is `^docs/ a\\.md$` to YAML. A block-scalar indicator on the key's
+    line is returned untouched, so `files: |-` stays the "pattern not read" it
+    is rather than folding its lines into something that compiles.
 
     YAML lets a value start on the next line -- `files:\n  ^src/`, or
     `default_stages:\n  [manual]` -- and this reader follows YAML's basic rules
@@ -760,6 +773,8 @@ def _continuation(lines: list[str], key_line: int, inline: str = "") -> str:
     accepted: explicit indentation indicators, anchors and aliases. The scope
     verdict is the only consumer, and it claims nothing it cannot read.
     """
+    if inline and _BLOCK_INDICATOR.fullmatch(inline):
+        return inline
     parts: list[str] = [inline] if inline else []
     quoted = bool(inline) and inline[0] in "\"'"
     double_quoted = bool(inline) and inline[0] == '"'
@@ -771,7 +786,7 @@ def _continuation(lines: list[str], key_line: int, inline: str = "") -> str:
             continue
         if _is_blank_or_comment(line):
             continue
-        if _indent_of(line) == 0:
+        if _indent_of(line) <= key_indent:
             break
         text = line.strip()
         if not parts and text[0] in "\"'":

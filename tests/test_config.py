@@ -575,6 +575,27 @@ def test_top_level_sequence_reads_flow_and_block_forms_alike():
     # config in which this reader would meet one.
 
 
+def test_a_hook_level_value_continued_onto_the_next_line_is_read_the_same_way():
+    """`files:` over an indented `^docs/` inside a hook was stored as "" -- and
+    "" compiles to a pattern that matches every path. The hook's gating keys
+    now read the way a top-level key does; a block sequence is still a block
+    sequence, and a sibling key ends the value."""
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: a\n        entry: x\n        language: system\n"
+        "        files:\n          ^docs/\n"
+        "        exclude: |-\n          ^never/\n"
+        "        stages:\n          - manual\n"
+        "      - id: b\n        entry: x\n        language: system\n"
+        "        files: ^src/\n          a\\.py$\n"
+    )
+    a, b = cfg.repos[0].hooks
+    assert a.settings["files"] == "^docs/"
+    assert a.settings["exclude"] == "|-"
+    assert a.settings["stages"] == "[manual]"
+    assert b.settings["files"] == "^src/ a\\.py$"
+
+
 def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     """`files:\n  ^src/` and `default_stages:\n  [manual]` are ordinary YAML.
     Read from the key's own line only, both came back empty -- a config-wide
@@ -608,6 +629,9 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # folds to a space.
     literal = C.scan("files:\n  '^docs/\\\n   .*\\\\.md$'\nrepos: []\n")
     assert C.top_level_scalar(literal, "files") == "^docs/\\ .*\\\\.md$"
+    # An indicator on the key's line stays the indicator, whatever follows it.
+    on_key = C.scan("files: |-\n  ^docs/\nrepos: []\n")
+    assert C.top_level_scalar(on_key, "files") == "|-"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"

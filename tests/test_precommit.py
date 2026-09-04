@@ -3346,6 +3346,17 @@ def test_a_block_scalar_pattern_is_a_verdict_not_made(repo, stubs, key):
     assert got["disabled"] == {}, got["disabled"]
 
 
+def test_a_hook_filter_continued_onto_the_next_line_is_judged_as_written(repo, stubs):
+    """Inside a hook, `files:` over an indented pattern was stored as "" and
+    compiled to a match-everything filter: a hook scoped to a directory that
+    does not exist read as live, and one scoped to Markdown could have read as
+    dead through an `exclude:` written the same way."""
+    got = _disabled_for(repo, stubs, "        files:\n          ^never/\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    got = _disabled_for(repo, stubs, "        files:\n          \\.md$\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
     """pre-commit stops loading a config whose `files:` will not compile, so the
     hook never runs -- the same answer, reached earlier and said plainly."""
