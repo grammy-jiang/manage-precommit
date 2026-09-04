@@ -762,3 +762,15 @@ def test_a_setext_underline_closes_the_paragraph_above_it(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD"]
+
+
+def test_a_short_hyphen_underline_is_a_setext_heading_too(docs, env):
+    """One or two hyphens under a paragraph are a setext underline, not an
+    empty list item -- an empty item cannot interrupt a paragraph -- so the
+    `2. ` beneath opens an item."""
+    (docs / "doc.md").write_text(
+        "Title\n-\n2. ```mermaid\n   flowchart TD\n   ```\n\nOther\n--\n2. ```mermaid\n   pie\n   ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD", "pie"]

@@ -1229,7 +1229,7 @@ def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | N
     """Why a hook's scope lets no file through, or None when it lets some.
 
     A scope is not a switch. Our own mermaid fragments carry
-    `files: '\\.(md|markdown)$'` and are as live as a hook gets, yet the mere
+    `files: '(?i)\\.(md|markdown)$'` and are as live as a hook gets, yet the mere
     presence of the key used to read as "will not run" -- so every repository
     that selected `mermaid` was told on the next scan that its check was dead.
     What makes a scope a switch is what it does to THIS repository's files, and

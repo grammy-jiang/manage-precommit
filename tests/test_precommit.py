@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -4415,6 +4416,25 @@ def test_an_unfilled_placeholder_in_any_spelling_stops_the_run(
     assert proc.returncode != 0
     assert "unfilled placeholder" in proc.stderr
     assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+@pytest.mark.parametrize("key", ["mermaid-parse", "mermaid"])
+def test_the_mermaid_hooks_take_uppercase_markdown_extensions_like_the_scan_does(key):
+    """detect_markers lowercases the name before it looks for `.md`, so a
+    `README.MD` gets the entry recommended. The hook's own `files:` has to
+    reach that same file, or the recommendation installs a check that never
+    sees the file that triggered it."""
+    import config as C
+    import precommit as P
+
+    text = (SKILL / "templates" / P.CATALOG[key]["fragment"]).read_text(encoding="utf-8")
+    for placeholder in P.CATALOG[key]["npm"]:
+        text = text.replace(placeholder, "0.0.0")
+    (hook,) = C.scan("repos:\n" + text).repos[0].hooks
+    pattern = re.compile(hook.settings["files"])
+    assert pattern.search("docs/README.MD")
+    assert pattern.search("notes.Markdown")
+    assert not pattern.search("script.mdx")
 
 
 def test_this_repository_runs_every_local_hook_it_ships(stubs):

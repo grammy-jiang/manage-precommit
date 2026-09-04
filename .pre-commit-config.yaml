@@ -29,7 +29,7 @@ repos:
         description: Validate fenced mermaid code blocks with mermaid-cli
         entry: node scripts/lint-mermaid.mjs
         language: node
-        files: '\.(md|markdown)$'
+        files: '(?i)\.(md|markdown)$'
         additional_dependencies:
           - "@mermaid-js/mermaid-cli@11.16.0"
   - repo: https://github.com/gitleaks/gitleaks
@@ -46,7 +46,7 @@ repos:
         description: Check that fenced mermaid code blocks parse (syntax only, no browser)
         entry: node scripts/parse-mermaid.mjs
         language: node
-        files: '\.(md|markdown)$'
+        files: '(?i)\.(md|markdown)$'
         additional_dependencies:
           - "mermaid@11.17.2"
           - "linkedom@0.18.13"

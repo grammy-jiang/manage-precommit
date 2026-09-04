@@ -70,12 +70,13 @@ const QUOTE = /^ {0,3}>/;
 const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(?=\S)|[ \t]*$)/;
 // The leaf blocks that end a paragraph without opening one. A thematic break
 // is tried before a list marker, since `* * *` would read as either. A setext
-// underline of `=` closes the paragraph above it into a heading (one of `-`
-// is a thematic break here already, and closes it the same way); with no
-// paragraph open, a line of `=` is text.
+// underline -- a run of `=` or of `-`, one character is enough -- closes the
+// paragraph above it into a heading; a lone `-` there is not an empty list
+// item, since an empty item cannot interrupt a paragraph. With no paragraph
+// open, a line of `=` is text and a line of `-` is whatever else it reads as.
 const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const THEMATIC = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
-const SETEXT = /^ {0,3}=+[ \t]*$/;
+const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
 // CommonMark's seven kinds of HTML block, by what ends them: the first five end
 // at a marker, which may sit on the opening line; the last two end at a blank
