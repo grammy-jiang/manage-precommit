@@ -4554,6 +4554,24 @@ def test_a_live_alternative_stands_in_only_where_it_reaches_the_fence(repo, stub
     assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
+def test_an_unread_filter_on_the_alternative_is_no_evidence_it_covers_the_fence(repo, stubs):
+    """`files: |-` with the pattern below is a filter the scanner captured but
+    did not read. It is not held against the hook (not dead) and not counted for
+    it either (not covering), so the recommendation stands -- being told the
+    check is already there, by a hook whose scope nobody read, is the report
+    this feature exists to prevent."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: |-\n          ^docs/\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

@@ -1383,7 +1383,11 @@ def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
     whose fence got the alternative recommended. So before a live alternative
     is allowed to stand in for a recommendation, it has to admit the very file
     the recommendation names. A filter that could not be read -- a block-scalar
-    indicator -- is taken to admit the file, since nothing is known against it.
+    indicator, or a pattern that will not compile -- is no evidence of
+    coverage: `looks_disabled` claims nothing against such a hook, and this
+    claims nothing for it, so the recommendation stands. Being told the check
+    is already there, by a hook whose scope nobody read, is the false-coverage
+    report this whole feature exists to prevent.
     """
     meta = CATALOG[key]
     url = meta.get("rev_repo") or "local"
@@ -1414,11 +1418,11 @@ def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
 
 def _admits(pattern: str, excluding: bool, path: str) -> bool:
     if BLOCK_SCALAR_RE.fullmatch(pattern):
-        return True  # not read, so not held against the file
+        return False  # not read: no evidence the file gets through
     try:
         hit = bool(re.search(pattern, path))
     except re.error:
-        return True  # pre-commit refuses the config; looks_disabled said so already
+        return False  # pre-commit refuses the config, so nothing gets through
     return hit != excluding
 
 
