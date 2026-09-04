@@ -1236,7 +1236,10 @@ def top_level(cfg: cfgmod.Config) -> TopLevel:
     filters: list[Filter] = []
     for key, excluding in (("files", False), ("exclude", True)):
         value = cfgmod.top_level_scalar(cfg, key)
-        if value:
+        # `is not None`, not truthiness: `exclude: ''` is a pattern, and the
+        # empty pattern matches every path -- pre-commit then hands ordinary
+        # hooks no files at all. Dropped as "unset", it read as no filter.
+        if value is not None:
             filters.append((f"the config's {key}", value, excluding))
     return TopLevel(filters, cfgmod.top_level_sequence(cfg, "default_stages") or "")
 
@@ -1315,13 +1318,16 @@ def scope_admits_nothing(
 
     if any(admitted(p) for p in paths):
         return None
+    shown = {pattern: pattern or "''" for _, pattern, _, _ in compiled}
     for label, pattern, excluding, rx in compiled:
         hits = sum(1 for p in paths if rx.search(p))
         if not excluding and hits == 0:
-            return f"{label}: {pattern} (matches no{'' if intended is None else 'ne'} {what})"
+            return (
+                f"{label}: {shown[pattern]} (matches no{'' if intended is None else 'ne'} {what})"
+            )
         if excluding and hits == len(paths):
-            return f"{label}: {pattern} (matches every {what.removeprefix('of the ')})"
-    named = " with ".join(f"{label}: {pattern}" for label, pattern, _, _ in compiled)
+            return f"{label}: {shown[pattern]} (matches every {what.removeprefix('of the ')})"
+    named = " with ".join(f"{label}: {shown[pattern]}" for label, pattern, _, _ in compiled)
     return f"{named} (together they leave no{'' if intended is None else 'ne'} {what})"
 
 
@@ -1364,7 +1370,7 @@ def looks_disabled(
     own: list[Filter] = [
         (key, settings[key], excluding)
         for key, excluding in (("files", False), ("exclude", True))
-        if settings.get(key)
+        if key in settings  # present, even as '': the empty pattern matches everything
     ]
     return scope_admits_nothing([*top.filters, *own], listing, intended)
 
@@ -1385,7 +1391,12 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     top = top_level(cfg)
     intended = intended_targets(key)
     consumes_files = bool(meta.get("pass_filenames", True))
-    out = []
+    # Per hook id, every declaration's verdict. An id declared twice -- one
+    # parked on `stages: [manual]`, one ordinary -- is covered by the live one,
+    # and reporting the dead one would offer the alternative beside working
+    # coverage. Ids with no live declaration are reported, each dead one with
+    # its reason, so a hygiene entry with one hook parked still says which.
+    verdicts: dict[str, list[str | None]] = {}
     for entry in cfg.repos:
         if entry.url != url:
             continue
@@ -1395,8 +1406,12 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
             why = looks_disabled(
                 hook, listing, top, intended=intended, consumes_files=consumes_files
             )
-            if why:
-                out.append(f"{clean(hook.id)} ({clean(why)})")
+            verdicts.setdefault(hook.id, []).append(why)
+    out: list[str] = []
+    for hook_id, whys in verdicts.items():
+        if any(why is None for why in whys):
+            continue
+        out.extend(f"{clean(hook_id)} ({clean(why)})" for why in whys if why)
     return out
 
 

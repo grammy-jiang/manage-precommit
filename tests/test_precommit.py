@@ -4479,6 +4479,46 @@ def test_always_run_is_not_coverage_for_a_hook_that_consumes_filenames(repo, stu
     assert got["disabled"] == {}, got["disabled"]
 
 
+def test_an_explicitly_empty_exclude_is_a_pattern_that_matches_everything(repo, stubs):
+    """`exclude: ''` compiles to the empty regex, which matches every path, so
+    pre-commit hands the hook no files. Read by truthiness it was "unset", and a
+    hook it had emptied read as live. Both the hook's own and the config's."""
+    got = _disabled_for(repo, stubs, "        exclude: ''\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "exclude: '' (matches every file here)" in got["disabled"]["gitleaks"][0]
+    (repo / ".pre-commit-config.yaml").write_text(
+        "exclude: ''\nrepos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "the config's exclude: ''" in got["disabled"]["gitleaks"][0]
+
+
+def test_a_hook_id_declared_twice_is_covered_while_one_declaration_is_live(repo, stubs):
+    """Two `mermaid-lint` declarations, one parked on `stages: [manual]` and one
+    ordinary: the live one checks the diagrams, so the key is covered and the
+    alternative is not offered. A hygiene entry with only `check-json` parked
+    still reports that one, since no declaration of *that* id is live."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        + hook
+        + "        stages: [manual]\n"
+        + hook
+        + "  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n"
+        "    hooks:\n      - id: trailing-whitespace\n"
+        "      - id: check-json\n        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" not in got["disabled"], got["disabled"]
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+    assert got["disabled"]["hygiene"] == ["check-json (stages: [manual])"]
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 
