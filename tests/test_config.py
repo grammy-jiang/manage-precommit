@@ -625,6 +625,12 @@ def test_a_plain_value_yaml_would_not_read_as_text_refuses_the_config():
     ):
         cfg = C.scan(head + f"        files: {spelled}\n")
         assert cfg.repos[0].hooks[0].settings["files"] == read
+    # The tag holds across a continued value too -- the scanner folds first and
+    # reads the scalar second, and the tag has to reach the second step.
+    cfg = C.scan(head + '        files: !!str "nu\n          ll"\n')
+    assert cfg.repos[0].hooks[0].settings["files"] == "nu ll"
+    cfg = C.scan("files: !!str\n  123\nrepos: []\n")
+    assert C.top_level_scalar(cfg, "files") == "123"
     cfg = C.scan(
         head + "        files: 1.2.3\n        always_run: true\n        pass_filenames: no\n"
     )
