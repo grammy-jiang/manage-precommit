@@ -727,6 +727,29 @@ def test_a_block_list_item_reads_back_whole():
     assert C.flow_items(C.top_level_sequence(top, "default_stages") or "") == ["pre-commit,manual"]
 
 
+def test_what_yaml_rejects_around_a_quoted_value_or_inside_a_flow_list_is_refused():
+    """`files: "^README[.]md$" junk` and `types: [file,,text]` stop YAML's
+    loader; read as the quoted part, or as the shorter list, they judged a hook
+    in a config that does not load. A comment after the quote, and the one
+    empty entry a trailing comma leaves, are the YAML they are."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    with pytest.raises(C.ConfigRefused, match=r"`junk` follows a quoted value.*line 5"):
+        C.scan(head + '        files: "^README[.]md$" junk\n')
+    with pytest.raises(C.ConfigRefused, match=r"follows a quoted value.*line 5"):
+        C.scan(head + "        stages: ['manual'x]\n")
+    for value in ("[file,,text]", "[, text]", "[,]"):
+        with pytest.raises(C.ConfigRefused, match=r"empty entry.*line 5"):
+            C.scan(head + f"        types: {value}\n")
+    cfg = C.scan(
+        head + '        files: "^README[.]md$"   # the one file\n'
+        "        types: [text, ]\n        stages: []\n"
+    )
+    settings = cfg.repos[0].hooks[0].settings
+    assert settings["files"] == "^README[.]md$"
+    assert C.flow_items(settings["types"]) == ["text"]
+    assert C.flow_items(settings["stages"]) == []
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""

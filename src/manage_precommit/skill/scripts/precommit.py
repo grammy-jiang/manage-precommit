@@ -1153,17 +1153,22 @@ def detect_markers(
     # probe below already refuses to READ through a symlink; naming one as the
     # target was the same threat with the guard missing.
     safe_markdown = [p for p in markdown if not os.path.islink(os.path.join(directory, p))]
+    # Complete only if every Markdown file was looked at: the walk not cut short
+    # by its size bounds, and the list not cut short by the probe's cap.
+    complete = not walked.bounded and len(markdown) <= MAX_MERMAID_PROBES
     if safe_markdown:
         recs.append({"name": "markdownlint", "reason": clean(safe_markdown[0])})
-        raw_paths["markdownlint"] = Seen([safe_markdown[0]], True)
+        # Every Markdown file, for the scope judgement, not the first alone: a
+        # linter scoped to `^a/` reaches `a/covered.md` and never sees
+        # `z/uncovered.md`, and judged on the first it read as reaching all.
+        raw_paths["markdownlint"] = Seen(safe_markdown[:MAX_MERMAID_PROBES], complete)
         markers.append(f"markdown ({clean(safe_markdown[0])})")
         trigger_paths.append(safe_markdown[0])
     if markdown:
         fenced: list[str] = []
-        # Complete only if every Markdown file was looked at: the walk not cut
-        # short by its size bounds, the probe not cut short by its cap, and no
-        # candidate skipped for being too large or unreadable.
-        complete = not walked.bounded and len(markdown) <= MAX_MERMAID_PROBES
+        # The fence probe's own account: complete as above, and no candidate
+        # skipped for being too large or unreadable.
+        fence_complete = complete
         for rel in markdown[:MAX_MERMAID_PROBES]:
             # Through the same guarded reader as everything else. walk_repo
             # lists symlinks (git tracks them as ordinary blobs), so a tracked
@@ -1177,7 +1182,7 @@ def detect_markers(
             try:
                 raw = read_bytes_nofollow(os.path.join(directory, rel), MAX_PROBE_BYTES)
             except OSError:
-                complete = False
+                fence_complete = False
                 continue
             text = raw.decode("utf-8", "replace")
             if not MERMAID_FENCE.search(text):
@@ -1195,7 +1200,7 @@ def detect_markers(
                 trigger_paths.append(rel)
             fenced.append(rel)
         if fenced:
-            raw_paths["mermaid-parse"] = Seen(fenced, complete)
+            raw_paths["mermaid-parse"] = Seen(fenced, fence_complete)
 
     # Offered for every repo: a secret scan is not conditional on what the tree
     # happens to contain today.

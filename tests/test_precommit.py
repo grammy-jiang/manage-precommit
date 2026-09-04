@@ -3248,6 +3248,32 @@ def test_an_implicitly_typed_filter_refuses_the_config(repo, stubs):
     assert got["line"] == 8
 
 
+def test_a_markdownlint_scope_is_judged_against_every_markdown_file(repo, stubs):
+    """The probe recorded the first Markdown file alone for markdownlint, so a
+    linter scoped to `^a/` -- live for `a/covered.md` -- read as reaching the
+    `z/uncovered.md` it never sees. Every Markdown file is recorded now, and
+    the first one the scope misses is named; widened to all of them, the entry
+    is simply present."""
+    (repo / "a").mkdir()
+    (repo / "z").mkdir()
+    (repo / "a" / "covered.md").write_text("# a\n")
+    (repo / "z" / "uncovered.md").write_text("# z\n")
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    hook = (
+        "repos:\n  - repo: https://github.com/DavidAnson/markdownlint-cli2\n    rev: v0.1.0\n"
+        "    hooks:\n      - id: markdownlint-cli2\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^a/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "markdownlint" in got["disabled"], got["disabled"]
+    assert "does not reach z/uncovered.md" in got["disabled"]["markdownlint"][0]
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "markdownlint" not in {r["name"] for r in got["recommended"]}
+
+
 def test_a_valueless_tag_is_the_empty_pattern(repo, stubs):
     """`exclude: !!str` is YAML for `exclude: ''`, and the empty pattern matches
     every path: pre-commit hands the hook nothing. Read as the text `!!str` -- a

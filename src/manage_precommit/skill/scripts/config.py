@@ -364,6 +364,11 @@ def flow_items(raw: str, *, text: bool = False) -> list[str]:
             start = i + 1
         i += 1
     items.append(body[start:])
+    # An empty entry is legal only where a trailing comma leaves one -- `[a, ]`
+    # -- and `[]` is the empty sequence. `[a,,b]` and `[, a]` stop YAML's
+    # loader, and dropped here they read as the shorter, valid list.
+    if any(not item.strip(" \t") for item in items[:-1]):
+        raise ConfigRefused("an empty entry inside a flow sequence, which YAML does not allow")
     return [_scalar(item, text=text) for item in items if item.strip(" \t")]
 
 
@@ -393,6 +398,15 @@ def _scalar(raw: str, *, text: bool = False) -> str:
             # module's rule is that a refusal beats a wrong answer.
             raise ConfigRefused("a quoted value on this line is never closed")
         inner = raw[1 : end - 1]
+        # Only white space, or a comment after white space, may follow the
+        # closing quote: `"^README[.]md$" junk` stops YAML's loader, and read
+        # as the quoted part alone it was a live pattern in a config that
+        # does not load.
+        tail = raw[end:]
+        if tail.strip(" \t") and not re.match(r"[ \t]+#", tail):
+            raise ConfigRefused(
+                f"`{tail.strip(' ')}` follows a quoted value, which YAML does not allow"
+            )
         return inner.replace("''", "'") if raw[0] == "'" else _unescape_double_quoted(inner)
     # Unquoted: a `#` after a space or a tab starts a comment; a bare `#`
     # inside a word does not, and neither does one inside a quoted item of a
