@@ -3310,6 +3310,18 @@ def test_a_config_wide_setting_continued_onto_the_next_line_still_counts(repo, s
     assert "gitleaks" in got["disabled"], got["disabled"]
 
 
+def test_a_continued_block_scalar_filter_is_a_verdict_not_made(repo, stubs):
+    """`files:\n  |\n    ^docs/` reaches the scope check as `|`, the same way
+    `files: |` does, and is not judged; folded into `| ^docs/` it compiled to
+    an alternation that matched every path."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "files:\n  |\n    ^never/\nrepos:\n  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_a_config_wide_filter_that_kills_mermaid_frees_its_alternative(
     repo, keys_file, facts_path, stubs
 ):

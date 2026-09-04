@@ -733,35 +733,54 @@ def reindent(block: str, spaces: int) -> str:
     return "\n".join(out)
 
 
-def _continuation(lines: list[str], key_line: int) -> list[str]:
-    """The indented lines that carry a top-level key's value when its own line does not.
+# A YAML block-scalar indicator: `|`, `>`, with optional chomping and
+# indentation indicators in either order.
+_BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
+
+
+def _continuation(lines: list[str], key_line: int) -> str:
+    """The value of a top-level key whose own line does not carry it, folded.
 
     YAML lets a value start on the next line -- `files:\n  ^src/`, or
-    `default_stages:\n  [manual]` -- and folds the lines of a plain or flow
-    scalar with single spaces. A line at column zero is the next key and ends
-    it; blank lines and comments are skipped.
+    `default_stages:\n  [manual]` -- and this reader follows YAML's basic rules
+    for the continued lines of a plain or flow scalar: they fold with single
+    spaces, a blank line between them folds to a newline, a comment ends at its
+    own line (` #` or a tab before `#`), and a value that opens with a quote is
+    taken whole, since a `#` inside it is text. A line at column zero is the
+    next key and ends it. A block-scalar indicator standing alone on the first
+    continued line -- `files:\n  |\n    ^docs/` -- is returned as the indicator,
+    so the caller sees the same "pattern not read" it sees for `files: |`
+    rather than a folded string that happens to compile.
+
+    Not modelled, and accepted: explicit indentation indicators, multi-line
+    quoted scalars with escapes across lines, anchors and aliases. The scope
+    verdict is the only consumer, and it claims nothing it cannot read.
     """
-    out: list[str] = []
-    quoted = False  # once a quoted scalar has opened, a `#` inside it is text
+    parts: list[str] = []
+    quoted = False
+    pending_break = False  # a blank line since the last part: folds to a newline
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
+        if not line.strip():
+            pending_break = bool(parts)
+            continue
         if _is_blank_or_comment(line):
             continue
         if _indent_of(line) == 0:
             break
         text = line.strip()
-        if not out and text[0] in "\"'":
+        if not parts and text[0] in "\"'":
             quoted = True
+        if not parts and _BLOCK_INDICATOR.fullmatch(text):
+            return text
         if not quoted:
-            # A comment on a continued line ends at that line, not the value:
-            # `[manual, # why` then `pre-push]` is both stages, so the comment
-            # comes off before the lines are folded rather than after.
-            cut = text.find(" #")
-            if cut != -1:
-                text = text[:cut].rstrip()
+            cut = re.search(r"[ \t]#", text)
+            if cut:
+                text = text[: cut.start()].rstrip()
         if text:
-            out.append(text)
-    return out
+            parts.append(("\n" if pending_break else " ") + text if parts else text)
+            pending_break = False
+    return "".join(parts)
 
 
 def top_level_sequence(cfg: Config, key: str) -> str | None:
@@ -780,10 +799,10 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
     value = _scalar(parsed[1]) if parsed else ""
     if not value:
         continued = _continuation(cfg.lines, line)
-        if continued and continued[0].startswith("- "):
+        if continued.startswith("- "):
             value = _block_sequence(cfg.lines, line, 0)
         elif continued:
-            value = _scalar(" ".join(continued))
+            value = _scalar(continued)
     return value or None
 
 
@@ -808,8 +827,8 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
     value = _scalar(parsed[1]) if parsed else ""
     if not value:
         continued = _continuation(cfg.lines, line)
-        if continued and not continued[0].startswith("- "):
-            value = _scalar(" ".join(continued))
+        if continued and not continued.startswith("- "):
+            value = _scalar(continued)
     return value
 
 

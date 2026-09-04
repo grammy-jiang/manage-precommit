@@ -590,6 +590,16 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     assert C.top_level_sequence(cfg, "default_stages") == "[manual, pre-push]"
     commented = C.scan("default_stages:\n  [manual, # why\n   pre-push]  # and why\nrepos: []\n")
     assert C.top_level_sequence(commented, "default_stages") == "[manual, pre-push]"
+    tabbed = C.scan("default_stages:\n  [manual,\t# why\n   pre-push]\nrepos: []\n")
+    assert C.top_level_sequence(tabbed, "default_stages") == "[manual, pre-push]"
+    # A blank line inside a continued plain scalar folds to a newline, as YAML
+    # has it -- so the regex pre-commit compiles is the one read here.
+    broken = C.scan("files:\n  ^docs/\n\n  a\\.md$\nrepos: []\n")
+    assert C.top_level_scalar(broken, "files") == "^docs/\na\\.md$"
+    # A block-scalar indicator continued onto the next line is handed back as
+    # the indicator, the same "pattern not read" as `files: |` on the key's line.
+    indicator = C.scan("files:\n  |\n    ^docs/\nrepos: []\n")
+    assert C.top_level_scalar(indicator, "files") == "|"
     block = C.scan("default_stages:\n  - manual\nrepos: []\n")
     assert C.top_level_sequence(block, "default_stages") == "[manual]"
     assert C.top_level_scalar(cfg, "fail_fast") is None
