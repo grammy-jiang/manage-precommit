@@ -832,3 +832,19 @@ def test_a_line_of_non_breaking_spaces_is_not_blank(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 15: Unicode whitespace is content -----------------------------------
+
+
+def test_non_breaking_spaces_are_content_not_indentation_or_tag_whitespace(docs, env):
+    """Four U+00A0 open a paragraph (they are not indentation), so `2. ` under
+    them is prose; `<b>` followed by U+00A0 under a heading is prose too, not a
+    kind-7 tag line, so the fence beneath it is a fence."""
+    (docs / "doc.md").write_text(
+        "\u00a0\u00a0\u00a0\u00a0text\n2. ```mermaid\nBAD\n\n"
+        "# Title\n<b>\u00a0\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
