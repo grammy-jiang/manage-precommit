@@ -889,12 +889,21 @@ def _flow_item(value: str) -> str:
     """`value` spelled as one item of a flow sequence, so flow_items reads it back whole.
 
     A block item may hold what would split or open a flow one -- a comma, a
-    bracket, a brace, a quote, a `#`, white space at an end -- and joined bare,
-    `- "file,text,markdown"` came back as three tags. Quoted here with YAML's
-    own escapes, it comes back as the one it is.
+    bracket, a brace, a quote, a `#`, white space or a line break at an end --
+    and joined bare, `- "file,text,markdown"` came back as three tags, and
+    `- "file\\n"` (the tag `file` plus a newline, one pre-commit rejects) came
+    back trimmed to the tag it is not. Quoted here with YAML's own escapes, it
+    comes back as the one item it is.
     """
-    if not value or value != value.strip(" \t") or any(ch in value for ch in ",[]{}\"'#"):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if not value or value != value.strip(" \t\n\r") or any(ch in value for ch in ",[]{}\"'#\n\r\t"):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        return '"' + escaped + '"'
     return value
 
 
@@ -955,7 +964,7 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
         # The key's own value, folded with any lines that continue it; an
         # indicator such as `|-` comes back untouched.
         raw = _continuation(lines, key_line, inline, key_indent)
-        return _listed(key, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
+        return _listed(key, raw, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
     # `stages:` followed by a block sequence -- indented, or at the key's own
     # column -- is the everyday way to write this, and reading only the inline
     # scalar left it as "", which every caller treats as "not set": a hook
@@ -970,7 +979,7 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
             raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants {wanted}")
         return block
     raw = _continuation(lines, key_line, "", key_indent)
-    return _listed(key, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
+    return _listed(key, raw, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
 
 
 def _boolean(key: str, raw: str, value: str) -> str:
@@ -995,15 +1004,20 @@ def _boolean(key: str, raw: str, value: str) -> str:
     return value
 
 
-def _listed(key: str, value: str) -> str:
+def _listed(key: str, raw: str, value: str) -> str:
     """`value`, once it is the list a LIST_GATING_KEYS key has to hold.
 
     A block sequence never comes through here (it is already a list); this is
-    the inline or continued form, which is a list only as `[...]`. Anything
-    else -- `stages: pre-commit`, `types: text`, or nothing at all -- is a
-    shape pre-commit's schema rejects, and the file does not load.
+    the inline or continued form, which is a list only as `[...]` -- judged on
+    `raw`, the value as written, behind any tag. `types: "[file, text]"` is
+    one string to YAML however much it looks like a list, and `stages:
+    pre-commit`, `types: text`, or nothing at all are no list either: shapes
+    pre-commit's schema rejects, and the file does not load.
     """
-    if key in LIST_GATING_KEYS and not (value.startswith("[") and value.endswith("]")):
+    if key not in LIST_GATING_KEYS:
+        return value
+    written = _split_tag(_code_only(raw).strip(" \t"))[1].strip(" \t")
+    if not (written.startswith("[") and written.endswith("]")):
         what = "nothing" if not value else "a scalar"
         raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a list")
     return value
@@ -1225,7 +1239,7 @@ def _top_value(lines: list[str], key_line: int, inline: str, key: str) -> tuple[
         if text:
             raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
         return True, _block_sequence(lines, key_line, 0)
-    return False, _listed(key, _scalar(continued, text=text, tags=tags))
+    return False, _listed(key, continued, _scalar(continued, text=text, tags=tags))
 
 
 def top_level_sequence(cfg: Config, key: str) -> str | None:

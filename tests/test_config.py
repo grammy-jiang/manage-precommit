@@ -671,9 +671,19 @@ def test_a_scalar_where_pre_commit_wants_a_list_refuses_the_config():
     file does not load. Read as one-item lists they judged a hook in a config
     that runs none. The flow and block forms are the lists they are."""
     head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
-    for line in ("stages: pre-commit", "types: text", "exclude_types: markdown", "stages:"):
-        with pytest.raises(C.ConfigRefused, match=r"wants a list.*line 5"):
+    for line in (
+        "stages: pre-commit",
+        "types: text",
+        "exclude_types: markdown",
+        "stages:",
+        'types: "[file, text]"',
+        "stages: '[manual]'",
+        "stages: !!str [manual]x",
+    ):
+        with pytest.raises(C.ConfigRefused, match=r"line 5"):
             C.scan(head + f"        {line}\n")
+    with pytest.raises(C.ConfigRefused, match=r"wants a list.*line 1"):
+        C.scan('default_stages: "[manual]"\nrepos: []\n')
     with pytest.raises(C.ConfigRefused, match=r"wants a list.*line 1"):
         C.scan("default_stages: manual\nrepos: []\n")
     with pytest.raises(C.ConfigRefused, match=r"holds nothing.*line 1"):
@@ -756,6 +766,13 @@ def test_a_block_list_item_reads_back_whole():
     settings = cfg.repos[0].hooks[0].settings
     assert C.flow_items(settings["types"]) == ["file,text,markdown", "text"]
     assert C.flow_items(settings["stages"]) == ['a"b', "[c] #d", " e "]
+    # A line break inside an item -- `"file\\n"` is the tag `file` plus a
+    # newline, one pre-commit rejects -- survives the trip as well.
+    cfg = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+        '        types:\n          - "file\\n"\n          - "a\\tb"\n'
+    )
+    assert C.flow_items(cfg.repos[0].hooks[0].settings["types"]) == ["file\n", "a\tb"]
     top = C.scan('default_stages:\n  - "pre-commit,manual"\nrepos: []\n')
     assert C.flow_items(C.top_level_sequence(top, "default_stages") or "") == ["pre-commit,manual"]
 
