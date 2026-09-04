@@ -4572,6 +4572,23 @@ def test_an_unread_filter_on_the_alternative_is_no_evidence_it_covers_the_fence(
     assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
 
 
+def test_coverage_is_judged_on_the_path_as_git_names_it(repo, stubs):
+    """`reason` is the trigger path cleaned for display, and `clean` strips
+    whitespace. A file named ` README.md` (leading space) holds the fence; a
+    `mermaid` scoped to `^README` reaches `README.md` and not that file, and
+    judged on the cleaned name it would have seemed to."""
+    (repo / " README.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^README'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]  # live: README.md reaches it
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

@@ -604,6 +604,16 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # the two lines join with nothing between, and the backslash goes.
     escaped = C.scan('files:\n  "^docs/\\\n   .*\\\\.md$"\nrepos: []\n')
     assert C.top_level_scalar(escaped, "files") == "^docs/.*\\.md$"
+    # In single quotes a backslash is a character like any other, and the break
+    # folds to a space.
+    literal = C.scan("files:\n  '^docs/\\\n   .*\\\\.md$'\nrepos: []\n")
+    assert C.top_level_scalar(literal, "files") == "^docs/\\ .*\\\\.md$"
+    # A plain scalar may start on the key's line and continue below it.
+    prefixed = C.scan(
+        "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"
+    )
+    assert C.top_level_scalar(prefixed, "files") == "^docs/ a\\.md$"
+    assert C.top_level_sequence(prefixed, "default_stages") == "[manual, pre-push]"
     block = C.scan("default_stages:\n  - manual\nrepos: []\n")
     assert C.top_level_sequence(block, "default_stages") == "[manual]"
     assert C.top_level_scalar(cfg, "fail_fast") is None

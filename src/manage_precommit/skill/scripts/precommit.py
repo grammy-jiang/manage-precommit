@@ -1098,7 +1098,9 @@ def prerequisites() -> dict[str, str]:
     return {key: status for key, meta in CATALOG.items() if meta.get("npm")}
 
 
-def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], list[str]]:
+def detect_markers(
+    directory: str,
+) -> tuple[list[Recommendation], list[str], list[str], dict[str, str]]:
     """Which catalog entries the repo's contents call for, and the file that says so.
 
     The `reason` is always a path that was actually seen, never a category. A
@@ -1108,6 +1110,11 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
     markers: list[str] = []
     trigger_paths: list[str] = []
     recs: list[Recommendation] = []
+    # The file behind each recommendation as git names it. `reason` is that
+    # path cleaned for display, and `clean` strips whitespace -- so a filename
+    # with a leading space would be tested against a name pre-commit never
+    # sees. Coverage is judged on this copy.
+    raw_paths: dict[str, str] = {}
 
     markdown = [p for p in paths if p.lower().endswith((".md", ".markdown"))]
     # The FIRST one that is a real regular file, not simply the first one. This
@@ -1120,6 +1127,7 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
     safe_markdown = [p for p in markdown if not os.path.islink(os.path.join(directory, p))]
     if safe_markdown:
         recs.append({"name": "markdownlint", "reason": clean(safe_markdown[0])})
+        raw_paths["markdownlint"] = safe_markdown[0]
         markers.append(f"markdown ({clean(safe_markdown[0])})")
         trigger_paths.append(safe_markdown[0])
     if markdown:
@@ -1142,6 +1150,7 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
                 # stays in the catalog for render-level coverage, asked for by
                 # name; cmd_recommend offers neither while the other is present.
                 recs.append({"name": "mermaid-parse", "reason": clean(rel)})
+                raw_paths["mermaid-parse"] = rel
                 markers.append(f"mermaid fence ({clean(rel)})")
                 trigger_paths.append(rel)
                 break
@@ -1149,7 +1158,7 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
     # Offered for every repo: a secret scan is not conditional on what the tree
     # happens to contain today.
     recs.append({"name": "gitleaks", "reason": "any repo -- secret scan"})
-    return recs, markers, trigger_paths
+    return recs, markers, trigger_paths, raw_paths
 
 
 # -- config helpers ----------------------------------------------------------
@@ -2154,20 +2163,22 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     listing = hook_targets(directory)
     disabled = {k: disabled_hooks(cfg, k, listing) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
-    recs, markers, trigger_paths = detect_markers(directory)
+    recs, markers, trigger_paths, raw_paths = detect_markers(directory)
     # An entry the scan named that is present but switched off cannot be
     # repaired by selecting it again -- same hook id, nothing written -- and
     # the fence that got it named is still there. Its live alternative is
     # offered in its place: `mermaid` for a dead `mermaid-parse`, the mirror
     # of the filter below, which keeps `mermaid-parse` on offer beside a dead
     # `mermaid`.
-    substitutes: list[Recommendation] = [
-        {"name": alt, "reason": r["reason"]}
-        for r in recs
-        if r["name"] in disabled
-        for alt in CATALOG[r["name"]].get("alternatives", ())
-        if alt not in previous
-    ]
+    substitutes: list[Recommendation] = []
+    for r in recs:
+        if r["name"] not in disabled:
+            continue
+        for alt in CATALOG[r["name"]].get("alternatives", ()):
+            if alt not in previous:
+                substitutes.append({"name": alt, "reason": r["reason"]})
+                if r["name"] in raw_paths:
+                    raw_paths[alt] = raw_paths[r["name"]]
     recs = [r for r in recs if r["name"] not in previous] + substitutes
     # Nor an entry whose alternative is already there AND live: the two mermaid
     # entries check the same fences, and offering the second beside a working
@@ -2178,12 +2189,11 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
 
     def stood_in_for(rec: Recommendation) -> bool:
         # A live alternative stands in only if it would run on the file the
-        # recommendation names -- `reason` is that path for every entry the
-        # scan recommends from a file it saw.
+        # recommendation names -- judged on the path as git names it, since
+        # `reason` is that path cleaned for display.
         alternatives = set(CATALOG[rec["name"]].get("alternatives", ())) & covering
-        return (
-            any(reaches(cfg, alt, rec["reason"], listing) for alt in alternatives) if cfg else False
-        )
+        path = raw_paths.get(rec["name"], rec["reason"])
+        return any(reaches(cfg, alt, path, listing) for alt in alternatives) if cfg else False
 
     recs = [r for r in recs if not stood_in_for(r)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [

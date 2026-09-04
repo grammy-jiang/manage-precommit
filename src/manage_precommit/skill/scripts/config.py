@@ -738,8 +738,11 @@ def reindent(block: str, spaces: int) -> str:
 _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
 
 
-def _continuation(lines: list[str], key_line: int) -> str:
-    """The value of a top-level key whose own line does not carry it, folded.
+def _continuation(lines: list[str], key_line: int, inline: str = "") -> str:
+    """The value of a top-level key, folded with the lines that continue it.
+
+    `inline` is what the key's own line carries; the continued lines fold onto
+    it -- `files: ^docs/` over an indented `a\\.md$` is `^docs/ a\\.md$` to YAML.
 
     YAML lets a value start on the next line -- `files:\n  ^src/`, or
     `default_stages:\n  [manual]` -- and this reader follows YAML's basic rules
@@ -757,8 +760,9 @@ def _continuation(lines: list[str], key_line: int) -> str:
     accepted: explicit indentation indicators, anchors and aliases. The scope
     verdict is the only consumer, and it claims nothing it cannot read.
     """
-    parts: list[str] = []
-    quoted = False
+    parts: list[str] = [inline] if inline else []
+    quoted = bool(inline) and inline[0] in "\"'"
+    double_quoted = bool(inline) and inline[0] == '"'
     pending_break = False  # a blank line since the last part: folds to a newline
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
@@ -772,6 +776,7 @@ def _continuation(lines: list[str], key_line: int) -> str:
         text = line.strip()
         if not parts and text[0] in "\"'":
             quoted = True
+            double_quoted = text[0] == '"'
         if not parts and _BLOCK_INDICATOR.fullmatch(text):
             return text
         if not quoted:
@@ -779,9 +784,10 @@ def _continuation(lines: list[str], key_line: int) -> str:
             if cut:
                 text = text[: cut.start()].rstrip()
         if text:
-            if parts and quoted and _ends_with_escape(parts[-1]):
+            if parts and double_quoted and _ends_with_escape(parts[-1]):
                 # A trailing backslash in a double-quoted scalar escapes the
-                # line break: no fold at all, and the backslash goes.
+                # line break: no fold at all, and the backslash goes. In single
+                # quotes a backslash is a character like any other.
                 parts[-1] = parts[-1][:-1]
                 parts.append(text)
             else:
@@ -809,14 +815,11 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    value = _scalar(parsed[1]) if parsed else ""
-    if not value:
-        continued = _continuation(cfg.lines, line)
-        if continued.startswith("- "):
-            value = _block_sequence(cfg.lines, line, 0)
-        elif continued:
-            value = _scalar(continued)
-    return value or None
+    inline = parsed[1].strip() if parsed else ""
+    continued = _continuation(cfg.lines, line, inline)
+    if not inline and continued.startswith("- "):
+        return _block_sequence(cfg.lines, line, 0) or None
+    return _scalar(continued) or None
 
 
 def top_level_scalar(cfg: Config, key: str) -> str | None:
@@ -837,12 +840,11 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    value = _scalar(parsed[1]) if parsed else ""
-    if not value:
-        continued = _continuation(cfg.lines, line)
-        if continued and not continued.startswith("- "):
-            value = _scalar(continued)
-    return value
+    inline = parsed[1].strip() if parsed else ""
+    continued = _continuation(cfg.lines, line, inline)
+    if not inline and continued.startswith("- "):
+        return ""  # a sequence where a scalar was asked for: nothing to read
+    return _scalar(continued)
 
 
 def hook_delta(entry: RepoEntry) -> int | None:
