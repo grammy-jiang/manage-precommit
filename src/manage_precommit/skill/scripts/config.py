@@ -789,14 +789,16 @@ def _continuation(lines: list[str], key_line: int, inline: str = "", key_indent:
     pending_break = False  # a blank line since the last part: folds to a newline
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
-        if not line.strip():
+        # Blank and comment lines by YAML's own white space -- space and tab --
+        # so a line holding only a U+00A0 is the content it is.
+        if not line.strip(" \t"):
             pending_break = bool(parts)
             continue
-        if _is_blank_or_comment(line):
+        if line.strip(" \t").startswith("#"):
             continue
         if _indent_of(line) <= key_indent:
             break
-        text = line.strip(" \t")  # YAML's white space; a U+00A0 at an end is content
+        text = line.strip(" \t")
         if not parts and text[0] in "\"'":
             quoted = True
             double_quoted = text[0] == '"'

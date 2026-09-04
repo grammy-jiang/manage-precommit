@@ -884,3 +884,13 @@ def test_a_vertical_tab_is_tag_whitespace_too(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_non_breaking_space_after_a_list_marker_is_content(docs, env):
+    """`- ` then U+00A0: the marker is a marker and the NBSP is the item's
+    text, so the fence indented beneath it is inside the item and an
+    unindented closer leaves it unclosed."""
+    (docs / "doc.md").write_text("- \u00a0text\n\n  ```mermaid\n  flowchart TD\n```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert "never closed" in proc.stderr

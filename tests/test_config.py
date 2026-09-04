@@ -641,6 +641,9 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # is one value, to YAML and to pre-commit.
     hashed = C.scan("files: README\u00a0#missing\nrepos: []\n")
     assert C.top_level_scalar(hashed, "files") == "README\u00a0#missing"
+    # A continued line holding only a U+00A0 is content, not a blank line.
+    nbsp_line = C.scan("files:\n  ^README$\n  \u00a0\nrepos: []\n")
+    assert C.top_level_scalar(nbsp_line, "files") == "^README$ \u00a0"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"

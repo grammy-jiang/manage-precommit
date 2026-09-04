@@ -67,7 +67,7 @@ const CLOSING = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const QUOTE = /^ {0,3}>/;
 // A list marker with content after it, or a bare one ending the line: an empty
 // item is an item too, and the indented fence under it is inside it.
-const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(?=\S)|[ \t]*$)/;
+const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(?=[^ \t])|[ \t]*$)/; // content is anything but space or tab
 // The leaf blocks that end a paragraph without opening one. A thematic break
 // is tried before a list marker, since `* * *` would read as either. A setext
 // underline -- a run of `=` or of `-`, one character is enough -- closes the
