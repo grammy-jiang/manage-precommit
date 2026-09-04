@@ -588,6 +588,8 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     assert C.top_level_scalar(cfg, "files") == "^src/"
     assert C.top_level_scalar(cfg, "exclude") == "^vendor/"
     assert C.top_level_sequence(cfg, "default_stages") == "[manual, pre-push]"
+    commented = C.scan("default_stages:\n  [manual, # why\n   pre-push]  # and why\nrepos: []\n")
+    assert C.top_level_sequence(commented, "default_stages") == "[manual, pre-push]"
     block = C.scan("default_stages:\n  - manual\nrepos: []\n")
     assert C.top_level_sequence(block, "default_stages") == "[manual]"
     assert C.top_level_scalar(cfg, "fail_fast") is None

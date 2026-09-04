@@ -863,3 +863,15 @@ def test_a_block_tag_name_followed_by_a_bare_slash_is_prose(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_form_feed_is_tag_whitespace(docs, env):
+    """CommonMark's tag whitespace is space, tab and form feed. `<div` followed
+    by a form feed opens a block-level HTML block, so the fence under it is raw
+    until the blank line."""
+    (docs / "doc.md").write_text(
+        "<div\f\n```mermaid\nBAD\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]

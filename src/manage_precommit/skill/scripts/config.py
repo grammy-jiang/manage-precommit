@@ -742,13 +742,25 @@ def _continuation(lines: list[str], key_line: int) -> list[str]:
     it; blank lines and comments are skipped.
     """
     out: list[str] = []
+    quoted = False  # once a quoted scalar has opened, a `#` inside it is text
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
         if _is_blank_or_comment(line):
             continue
         if _indent_of(line) == 0:
             break
-        out.append(line.strip())
+        text = line.strip()
+        if not out and text[0] in "\"'":
+            quoted = True
+        if not quoted:
+            # A comment on a continued line ends at that line, not the value:
+            # `[manual, # why` then `pre-push]` is both stages, so the comment
+            # comes off before the lines are folded rather than after.
+            cut = text.find(" #")
+            if cut != -1:
+                text = text[:cut].rstrip()
+        if text:
+            out.append(text)
     return out
 
 
