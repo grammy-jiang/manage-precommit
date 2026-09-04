@@ -497,6 +497,188 @@ def test_a_porcelain_path_that_will_not_decode_comes_back_as_it_arrived():
     assert shared.porcelain_path(' M "' + escaped + '"') == escaped
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        pytest.param(
+            "https://token@registry.npmjs.org/",
+            "https://***@registry.npmjs.org/",
+            id="a bare token",
+        ),
+        pytest.param(
+            "fatal: https://user:pw@github.com/x.git denied",
+            "fatal: https://***@github.com/x.git denied",
+            id="user and password, mid-sentence",
+        ),
+        pytest.param(
+            "https://registry.npmjs.org/",
+            "https://registry.npmjs.org/",
+            id="nothing to redact",
+        ),
+        pytest.param("mail me at a@b.com", "mail me at a@b.com", id="an at-sign that is not a URL"),
+        # An unescaped @ is legal in userinfo and parsers take the LAST one as
+        # the authority delimiter, so stopping at the first leaves the tail of
+        # the secret behind.
+        pytest.param(
+            "https://user@example.com@host/",
+            "https://***@host/",
+            id="an email-shaped username",
+        ),
+        pytest.param(
+            "https://user:p@ss@host/x",
+            "https://***@host/x",
+            id="an at-sign inside the password",
+        ),
+        pytest.param(
+            "https://host/path@x",
+            "https://host/path@x",
+            id="an at-sign in the path is not userinfo",
+        ),
+        # A query carries a token as easily as userinfo does, and taking it out
+        # by parameter name means keeping a list of the names I have met.
+        pytest.param(
+            "https://registry.example/?token=sekrit",
+            "https://registry.example/?***",
+            id="a token in the query",
+        ),
+        pytest.param(
+            "https://host?token=x", "https://host?***", id="a query with no path before it"
+        ),
+        pytest.param(
+            "https://user:p@ss@host/x?k=v#f",
+            "https://***@host/x?***",
+            id="userinfo and query together",
+        ),
+        pytest.param("https://host/x#frag", "https://host/x#***", id="a fragment"),
+        # A question mark is legal fragment data, so looking for `?` first cut
+        # after the secret and left it in front of a `***` claiming otherwise.
+        pytest.param(
+            "https://host/#token=sekrit?next",
+            "https://host/#***",
+            id="a question mark inside the fragment",
+        ),
+        pytest.param("https://host?a#b", "https://host?***", id="query first, no path between"),
+        # An apostrophe is a valid sub-delimiter in userinfo and in a query, so
+        # treating it as a delimiter truncated the match inside the credential:
+        # the first of these went out untouched and the second went out looking
+        # redacted with the tail of the secret still on it.
+        pytest.param(
+            "https://sec'ret@host/", "https://***@host/", id="an apostrophe in the credential"
+        ),
+        pytest.param(
+            "https://host/?token=sec'ret",
+            "https://host/?***",
+            id="an apostrophe in the query token",
+        ),
+        pytest.param(
+            "said 'https://a@h/x' ok",
+            "said 'https://***@h/x' ok",
+            id="a quoted URL still keeps its quotes",
+        ),
+        pytest.param(
+            'json "https://a@h/x" end',
+            'json "https://***@h/x" end',
+            id="a double-quoted URL is not swallowed",
+        ),
+        # With a query, and that is the case that tells the two delimiters
+        # apart: `"` still ends the match so the closing quote survives the
+        # truncation, where the apostrophe deliberately does not.
+        pytest.param(
+            'npm said "https://h/?k=v" once',
+            'npm said "https://h/?***" once',
+            id="a double-quoted URL with a query keeps its quote",
+        ),
+        pytest.param(
+            "a https://u@h1/?k=1 and https://v@h2/?k=2 b",
+            "a https://***@h1/?*** and https://***@h2/?*** b",
+            id="two of them in one line",
+        ),
+    ],
+)
+def test_url_credentials_are_removed_before_anything_is_relayed(text, expected):
+    """git and npm both take credentials in a URL and both print the URL back."""
+    assert shared.redact_urls(text) == expected
+
+
+@pytest.mark.parametrize(
+    "configured,relayed",
+    [
+        pytest.param(
+            "https://registry.example/npm/sekrit/",
+            "https://registry.example/***",
+            id="a key in the path",
+        ),
+        pytest.param(
+            "https://registry.npmjs.org/", "https://registry.npmjs.org/", id="a bare root stays"
+        ),
+        pytest.param(
+            "https://registry.npmjs.org", "https://registry.npmjs.org", id="no path at all stays"
+        ),
+        pytest.param("https://h:8443/a/b", "https://h:8443/***", id="the port is not a secret"),
+        pytest.param(
+            "https://u:p@h/npm/key/?t=1#f",
+            "https://***@h/***?***",
+            id="userinfo, path and query together",
+        ),
+        pytest.param("not a url", "not a url", id="not a URL at all"),
+    ],
+)
+def test_a_registry_path_can_be_a_credential_too(configured, relayed):
+    """Registries authenticate by path segment, and a registry is not any URL.
+
+    `redact_urls` removes what can be a secret in *any* URL -- userinfo, query,
+    fragment -- and a path is not that: in npm's own error text the path is the
+    package, and blanking it there would destroy the one part worth reading. A
+    configured registry is the exception, because a path-based key lives exactly
+    where npm's own package path would otherwise be, so the trim belongs to this
+    narrower helper rather than to redaction in general.
+
+    Which server answered is what the field is for, and scheme, host and port
+    already say it.
+    """
+    assert shared.redact_registry(configured) == relayed
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        pytest.param(
+            "npm error 403 Forbidden - GET https://registry.example/npm/sekrit/@sc%2fname",
+            "npm error 403 Forbidden - GET https://registry.example/***",
+            id="a registry that authenticates by path",
+        ),
+        pytest.param(
+            "GET https://registry.npmjs.org/@sc%2fname",
+            "GET https://registry.npmjs.org/***",
+            id="the ordinary case loses the package path too",
+        ),
+        pytest.param("nothing to see here", "nothing to see here", id="no URL at all"),
+    ],
+)
+def test_npm_error_text_is_cut_down_to_the_server(text, expected):
+    """npm quotes the URL it asked for, so a path-based key is in the prose too.
+
+    Redacting only the `registry` field left the same secret in `detail` and in
+    the sentence beside it. Paths go wholesale rather than by matching the
+    configured registry: that needs another query which can itself fail, and a
+    redaction that works only when a lookup succeeds fails exactly when things
+    are already going wrong. Nothing is lost -- `target` names the package and
+    `registry` names the server, both structured and both already redacted.
+    """
+    assert shared.strip_url_paths(text) == expected
+
+
+def test_credentials_are_removed_before_control_characters_are(monkeypatch):
+    """Order, and it is not cosmetic.
+
+    `clean` turns a control character into a space, and a space ends the run
+    this pattern matches -- so cleaning first leaves `tok ***@` and half the
+    token behind. bounded_err redacts first for that reason.
+    """
+    assert "en@" not in shared.bounded_err("fatal: https://tok\x00en@host/repo denied")
+    assert shared.bounded_err("https://tok\x00en@host/x") == "https://***@host/x"
+
+
 def test_a_missing_git_binary_stops_with_a_sentence(monkeypatch):
     def absent(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory")
@@ -519,3 +701,29 @@ def test_a_git_call_that_hangs_is_stopped_and_named(monkeypatch):
     git = shared.make_git(stopper)
     with pytest.raises(Stop, match="timed out after"):
         git("/tmp", "status")
+
+
+def test_a_hanging_git_can_be_routed_somewhere_other_than_die(monkeypatch):
+    """A stalled remote is a different answer from a git that refused.
+
+    Version pinning reports the two as different causes, and it must not tell
+    them apart by reading the wording of this message -- that is classifying by
+    prose, one file away from the code that produces it. Without the hook, a
+    remote that hangs leaves through the plain die() and the caller loses the
+    machine-readable failure it was promised.
+    """
+
+    def hang(argv, **kwargs):
+        raise shared.subprocess.TimeoutExpired(argv, kwargs.get("timeout", 120))
+
+    monkeypatch.setattr(shared.subprocess, "run", hang)
+    routed = []
+
+    def elsewhere(message):
+        routed.append(message)
+        raise Stop(message)
+
+    git = shared.make_git(stopper, on_timeout=elsewhere)
+    with pytest.raises(Stop, match="timed out after"):
+        git("/tmp", "status")
+    assert routed, "on_timeout was declared and then not consulted"

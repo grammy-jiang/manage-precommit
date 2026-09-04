@@ -152,6 +152,22 @@ turn the suite red.
   back on a stage it was excluded from.
 - **`--verify` requires `--facts`.** Without them nothing can be checked against
   or recorded, and a vacuous pass reports success.
+- **Version pinning is isolated from the repository, and only from it.** Both
+  `git ls-remote` and `npm view` run in a scratch directory, so the repo being
+  configured cannot supply a `.npmrc` or a git config that redirects the
+  lookup. The *user's* own configuration is deliberately honoured: no
+  `--registry`, and the proxy variables are passed through. The environments
+  this failed on reach a registry only through a mirror or a proxy, so pinning
+  the public registry would turn a working machine into a broken one to defend
+  against a setting its owner already controls. npm's cache is the exception,
+  because an unwritable one is not a preference — see `--cache` in
+  `npm_latest`, and `npm_cache_env` for the same problem inside `pre-commit`.
+- **A failed pin says why in JSON, not only in English.** Exit 6 with
+  `reason=version_pin_failed` and a `cause` from a fixed set, classified off
+  npm's own `npm error code` line rather than its prose — with `unknown` as a
+  real bucket, because an outcome that matches nothing must arrive named rather
+  than vanish. SKILL.md turns each cause into different advice, so widening the
+  set means widening that list too.
 
 ## Releasing
 

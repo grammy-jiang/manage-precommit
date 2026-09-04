@@ -20,6 +20,7 @@ Exit codes:
   3  unknown catalog key -- recoverable; re-ask with the near matches printed
   4  a file this run would write already carries an uncommitted change
   5  the existing config uses YAML this tool will not guess at
+  6  a version could not be pinned -- nothing was written; `cause` says why
 """
 
 from __future__ import annotations
@@ -27,13 +28,16 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Any, NoReturn
+from urllib.parse import unquote, urlsplit
 
 import config as cfgmod
 from hookoutput import is_vacuous, skipped_hooks
@@ -41,9 +45,13 @@ from shared import (
     PRECOMMIT_CONFIG_NAME,
     Facts,
     ManagedFile,
+    NotARegularFile,
     Recommendation,
     RecommendReport,
+    SymlinkRefused,
+    TooLarge,
     atomic_write_bytes,
+    bounded_err,
     clean,
     default_file_mode,
     emit,
@@ -55,9 +63,11 @@ from shared import (
     read_bytes_nofollow,
     read_bytes_or_die,
     read_json_or_die,
+    redact_registry,
     refuse_facts_inside_repo,
     refuse_option_like,
     safe_porcelain,
+    strip_url_paths,
     write_json_or_die,
 )
 
@@ -70,6 +80,7 @@ EXIT_ERROR = 1
 EXIT_UNKNOWN_KEY = 3
 EXIT_DIRTY = 4
 EXIT_REFUSED = 5
+EXIT_PIN_FAILED = 6
 
 # A hook can print a whole file -- gitleaks echoes match context, markdownlint
 # lists every violation. The agent reads this to judge the run, so it is bounded
@@ -161,6 +172,177 @@ def version_key(tag: str) -> list[int]:
     return [int(n) for n in re.findall(r"\d+", tag)]
 
 
+# Long enough for a registry that is slow rather than absent.
+NPM_TIMEOUT = 90
+
+
+# Every value `cause` can take, in one place. SKILL.md turns each into different
+# advice and a test reads this tuple against that list, because a cause added
+# here without a sentence there fails the way a renamed sentinel does: the agent
+# falls through to wording that does not fit, and nothing looks wrong.
+PIN_CAUSES = (
+    "filesystem",
+    "auth",
+    "not-found",
+    "network",
+    "timeout",
+    "npm-missing",
+    "unrunnable",
+    "invalid-version",
+    "git-ls-remote",
+    "no-version-tags",
+    "not-isolated",
+    "forbidden",
+    "unknown",
+)
+
+# And every key the payload can carry, for the same reason. A field the agent is
+# never told about is a field it will not read: `registry` was added because a
+# 404 from a mirror is not a 404 from npmjs, and that distinction is worth
+# nothing if SKILL.md does not name the key that draws it.
+PIN_FIELDS = (
+    "source",
+    "target",
+    "cause",
+    "npm_code",
+    "npm_path",
+    "detail",
+    "registry",
+    "registry_is_public",
+)
+
+
+def scratch_root() -> str:
+    """Where a scratch directory would have gone, for when one cannot be made.
+
+    Best effort on purpose: `gettempdir()` raises for the same reason
+    `TemporaryDirectory()` just did, and a failure to name the place is not a
+    reason to withhold the rest of the report.
+    """
+    try:
+        return tempfile.gettempdir()
+    except OSError:  # pragma: no cover - unreachable for the reason below
+        return ""
+
+
+def scratch_or_pin_failed(source: str, target: str) -> tempfile.TemporaryDirectory[str]:
+    """A scratch directory, or exit 6 saying the filesystem is why.
+
+    Both pin sources need one before they can start, and an OSError from here
+    is neither a stalled remote nor a missing npm -- left alone it was a
+    traceback and exit 1 out of `latest_tag`, and `npm-missing` out of
+    `npm_latest`, since tempfile raises the same FileNotFoundError a missing
+    executable does.
+
+    Untested, and this is the one branch in these scripts that cannot be:
+    tempfile walks $TMPDIR, /tmp, /var/tmp, /usr/tmp and then the cwd, so
+    reaching it needs every one of them unusable at once, which a test cannot
+    arrange without breaking the machine it runs on. Kept because the
+    classification is the whole point of it.
+    """
+    try:
+        holder = tempfile.TemporaryDirectory()
+    except OSError as exc:  # pragma: no cover - see above
+        pin_failed(
+            source,
+            target,
+            f"no scratch directory to pin in: {exc}",
+            "filesystem",
+            npm_path=clean(scratch_root()),
+        )
+    seal_scratch(holder.name, source, target)
+    return holder
+
+
+def seal_scratch(where: str, source: str, target: str) -> None:
+    """Stop git and npm walking out of the scratch directory into a project.
+
+    Neither can be told to ignore an enclosing one: git discovers the first
+    `.git` above cwd and npm the first `package.json`, and a TMPDIR under
+    anybody's repository -- not only the one being configured -- therefore hands
+    that repository the vote this directory exists to deny it. It can rewrite a
+    catalog URL with `url.<other>.insteadOf` or name the registry, and the pin
+    that comes back looks like any other.
+
+    Both tools stop at the first marker they find, so the scratch is given its
+    own: an empty repository and an empty project, whose configuration is
+    nothing. Sealing rather than refusing, because the location is the
+    environment's to choose -- `/tmp` is itself inside a git repository on at
+    least one machine this was written on -- and a run that can make itself
+    isolated has no business demanding the machine be rearranged.
+
+    Fails closed: an unsealed scratch is not one to pin from.
+    """
+    reason = try_seal(where)
+    if reason:
+        pin_failed(
+            source, target, f"could not isolate a scratch directory: {reason}", "not-isolated"
+        )
+
+
+def try_seal(where: str) -> str:
+    """Plant the markers, and say what stopped it if either did not land.
+
+    Split from `seal_scratch` because not every scratch belongs to a pin.
+    `npm_config` asks npm a question and degrades to "no answer"; turning a
+    failure there into exit 6 would report a pin failure for a probe.
+    """
+    # `--template=` empty, because `git init` copies a template directory into
+    # the new repository and that template may contain a `config`. `isolated`
+    # turns off the system and global files; GIT_TEMPLATE_DIR is a third way in
+    # that it does not cover, and a template carrying `url.<other>.insteadOf`
+    # would be copied straight into the repository this seal just created --
+    # defeating the seal with the very command that applies it.
+    rc, _, err = git(where, "init", "--quiet", "--template=", isolated=True)
+    if rc != 0:
+        return err or "git init failed"
+    # Checked, not assumed. `git init` reports success for repositories other
+    # than the one asked for -- an exported GIT_DIR sends it somewhere else
+    # entirely -- so the exit code says a repository was initialised, not that
+    # THIS directory was. `isolated` clears those variables; this is what
+    # notices if a later git grows one it does not know about.
+    if not os.path.isdir(os.path.join(where, ".git")):
+        return "git init reported success but left no repository in the scratch directory"
+    try:
+        for name, body in (("package.json", b"{}\n"), (".npmrc", b"")):
+            atomic_write_bytes(os.path.join(where, name), body)
+    except OSError as exc:  # pragma: no cover - a directory just created
+        return str(exc)
+    return ""
+
+
+def pin_failed(source: str, target: str, msg: str, cause: str, **fields: object) -> NoReturn:
+    """Refuse a pin, saying what could not be pinned and why, machine-readably.
+
+    Nothing has been written at this point and nothing will be: every version is
+    fetched before the first byte of config, so this exit is always a repository
+    left exactly as it was found. That half was already true; what was missing
+    is a `cause` the agent can act on. An unwritable cache, a 404 and a dropped
+    connection each need a different sentence to the user, and working that out
+    from npm's stderr is a guess -- which is the one thing SKILL.md is not
+    supposed to ask a model to do.
+
+    Both pin sources exit the same way. `git ls-remote` failing and `npm view`
+    failing are the same event to the caller, and a contract that numbered them
+    differently would be one more thing to remember and get wrong.
+    """
+    # Impossible states, asserted rather than relayed: both are contracts with
+    # SKILL.md, and a value it has no sentence for is worse than a crash here.
+    if cause not in PIN_CAUSES:
+        die(f"internal: {cause!r} is not one of the declared pin causes")
+    if undeclared := sorted(set(fields) - set(PIN_FIELDS)):
+        die(f"internal: undeclared pin fields {undeclared}")
+    die(
+        msg,
+        code=EXIT_PIN_FAILED,
+        reason="version_pin_failed",
+        source=source,
+        target=clean(target),
+        cause=cause,
+        **fields,
+    )
+
+
 def latest_tag(repo_url: str) -> str:
     """The newest release tag on a hook repository, fetched live.
 
@@ -168,13 +350,61 @@ def latest_tag(repo_url: str) -> str:
     `v2-beta` ref can never be pinned as though it were a release.
     """
     url = refuse_option_like(repo_url, "repo url", die)
+
+    # A remote that stalls past make_git's timeout used to leave through the
+    # plain die(): exit 1 with no JSON, losing the exit-6 contract in the case
+    # where a caller most wants to be told it was reachability and not their
+    # repository. Only the timeout is rerouted -- make_git's other refusal is a
+    # missing git, which is a prerequisite this run never had and not a pin that
+    # failed. Untested here for the reason the npm timeout is: reaching it costs
+    # a real two-minute wait. `make_git` dispatching to the hook at all is
+    # tested in test_shared.py, which can fake the clock.
+    def stalled(msg: str) -> NoReturn:  # pragma: no cover - see above
+        pin_failed("git", url, msg, "timeout")
+
     # In a scratch directory, with no system or global config: see make_git's
     # `isolated`. Running this under the target repo's config would let that
     # repo decide which server answers for a catalog URL.
-    with tempfile.TemporaryDirectory() as elsewhere:
-        rc, out, err = git(elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True)
+    pinning_git = make_git(die, on_timeout=stalled)
+    scratch = scratch_or_pin_failed("git", url)
+    try:
+        with scratch as elsewhere:
+            try:
+                rc, out, err = pinning_git(
+                    elsewhere, "ls-remote", "--tags", "--refs", url, isolated=True
+                )
+            except OSError as exc:  # pragma: no cover - see below
+                # make_git handles a git that is absent and one that hangs; a
+                # git that is *there and will not start* -- the wrong bits on
+                # the file, a bad interpreter -- comes out of it as a plain
+                # OSError. Caught here rather than by the cleanup handler
+                # below, which would tell the user their temporary filesystem
+                # was at fault and send them to look at the wrong thing
+                # entirely.
+                #
+                # Untested: exec walks PATH past a file it cannot start, so a
+                # broken git first on PATH finds the real one behind it, and a
+                # PATH holding only the broken one fails at the first git call
+                # this run makes, long before pinning.
+                pin_failed("git", url, f"could not run git for {repo_url}: {exc}", "unrunnable")
+    except OSError as exc:  # pragma: no cover - only the cleanup reaches here
+        # With the path: an empty `npm_path` is documented as "no scratch
+        # directory could be made", and this one was made and would not go.
+        pin_failed(
+            "git",
+            url,
+            f"scratch directory would not go away: {exc}",
+            "filesystem",
+            npm_path=clean(scratch.name),
+        )
     if rc != 0:
-        die(f"git ls-remote failed for {repo_url}: {err}")
+        pin_failed(
+            "git",
+            url,
+            f"git ls-remote failed for {repo_url}: {err}",
+            "git-ls-remote",
+            detail=err,
+        )
     tags = []
     for line in out.splitlines():
         if "refs/tags/" not in line:
@@ -183,9 +413,371 @@ def latest_tag(repo_url: str) -> str:
         if VER_RE.match(ref):
             tags.append(ref)
     if not tags:
-        die(f"no version tags found for {repo_url}")
+        pin_failed(
+            "git",
+            url,
+            f"no version tags found for {repo_url}",
+            "no-version-tags",
+        )
     tags.sort(key=version_key)
     return tags[-1]
+
+
+# npm's own machine-readable discriminants, not its prose. Classifying by
+# English sentence is how an outcome ends up matching no bucket and vanishing;
+# these three lines are a stable contract that says the same thing in every
+# locale. Both prefixes are matched because npm 8 and earlier print `npm ERR!`
+# where npm 9 and later print `npm error`, and a tool that exists to pin
+# versions outlives one npm major.
+#
+# `\S+` and not `npm`, because the word at the front is the `heading` config and
+# a user may set it to anything. `--heading=npm` is passed as well; this is the
+# half that holds when a flag is not honoured, the way the ANSI strip backs up
+# `--no-color`.
+NPM_FIELD_RE = re.compile(r"^\S+ (?:ERR!|error) (code|syscall|path) (.+)$", re.M)
+
+# npm colours that prefix, and `color=always` in a user or global .npmrc makes
+# it do so into a pipe -- which this deliberately honours, like the rest of
+# their npm configuration. The escapes land between `npm` and `error`, so the
+# pattern above matches nothing and every classified failure arrives `unknown`.
+# `--no-color` on the command line prevents it and this removes what prevention
+# missed, because the two together are cheap and the parse decides the advice.
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+# Each cause is a different sentence to the user: a cache they cannot write is
+# theirs to fix, a 404 means the package name is wrong, and a network failure is
+# worth simply retrying. `unknown` is a bucket on purpose -- an unmatched code
+# must still arrive named rather than disappear into the default.
+NPM_CAUSES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("auth", frozenset({"E401", "ENEEDAUTH", "EAUTHUNKNOWN", "EAUTHIP", "EOTP"})),
+    # Not `auth`. npm labels any HTTP failure `E<status>` and special-cases
+    # only 401, so a 403 is as likely a corporate registry refusing a package
+    # by policy to an account that authenticated perfectly well. "Your
+    # credentials are missing" is the wrong sentence for that, and the wrong
+    # thing to go and check.
+    ("forbidden", frozenset({"E403"})),
+    ("not-found", frozenset({"E404"})),
+    # Name resolution, then the connect errnos the kernel hands back when the
+    # route or the host is not there. All of these exit normally, which is why
+    # none of them is a `TimeoutExpired`.
+    (
+        "network",
+        frozenset(
+            {
+                "ENOTFOUND",
+                "ECONNREFUSED",
+                "ECONNRESET",
+                "ECONNABORTED",
+                "EPROTO",
+                "EPIPE",
+                "ENETUNREACH",
+                "ENETDOWN",
+                "ENETRESET",
+                "EHOSTUNREACH",
+                "EHOSTDOWN",
+                "EADDRNOTAVAIL",
+            }
+        ),
+    ),
+    # npm gave up on a slow socket by itself, and exited normally doing it -- so
+    # this never reaches the TimeoutExpired handler, which only fires when the
+    # whole command outlives NPM_TIMEOUT. Reported as `network` these were a
+    # `timeout` bucket that almost nothing could ever land in, under a code
+    # literally named ETIMEDOUT.
+    # ETIMEDOUT is the socket's; the four E*TIMEOUTs are @npmcli/agent's own
+    # names for giving up on connect, idle, response and transfer. All of them
+    # exit normally, so none reaches the TimeoutExpired handler.
+    (
+        "timeout",
+        frozenset(
+            {
+                "ETIMEDOUT",
+                "ESOCKETTIMEDOUT",
+                "ERR_SOCKET_TIMEOUT",
+                "ECONNECTIONTIMEOUT",
+                "EIDLETIMEOUT",
+                "ERESPONSETIMEOUT",
+                "ETRANSFERTIMEOUT",
+            }
+        ),
+    ),
+    # ENOENT belongs here rather than under "missing": npm reports the failure to
+    # create its own cache directory that way, which is the whole of issue #16.
+    (
+        "filesystem",
+        frozenset(
+            {
+                "EACCES",
+                "EPERM",
+                "EROFS",
+                "ENOSPC",
+                "EDQUOT",
+                "EFBIG",
+                "EIO",
+                "ELOOP",
+                "ENAMETOOLONG",
+                "ENOTEMPTY",
+                "EEXIST",
+                "EXDEV",
+                "EBUSY",
+                "ETXTBSY",
+                "EISDIR",
+                "ENOTDIR",
+                "ENOENT",
+            }
+        ),
+    ),
+)
+
+
+def npm_scalar(out: str) -> str:
+    """npm's answer as a plain string, whether or not it came back as JSON.
+
+    The format is asked for rather than assumed. A `json=true` in a user or
+    global .npmrc -- configuration this deliberately honours -- otherwise quotes
+    every value npm prints, and the version check then rejects a perfectly good
+    lookup as garbage and refuses to write anything at all. Asking for `--json`
+    and parsing makes the shape ours instead of theirs, and covers `parseable`
+    and `long` in the same move rather than one config at a time.
+
+    Falling back to the raw text, because an npm that does not honour the flag
+    should keep working rather than fail differently.
+    """
+    text = out.strip()
+    if not text:
+        return ""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    return value if isinstance(value, str) else ""
+
+
+def npm_fields(stderr: str) -> dict[str, str]:
+    """npm's `code`/`syscall`/`path` lines, last one winning."""
+    return {key: value.strip() for key, value in NPM_FIELD_RE.findall(ANSI_RE.sub("", stderr))}
+
+
+def npm_error(stdout: str, stderr: str) -> tuple[dict[str, str], str]:
+    """What npm said went wrong: its fields, and its own words.
+
+    Two sources, because npm has two and the user's configuration decides which
+    one carries anything. Under `--json` the failure arrives as an object on
+    stdout, and that is the copy to trust: the stderr lines are prefixed with
+    whatever the `heading` config says -- `npm` by default, but it is a string
+    a user may set to anything -- and suppressed altogether by
+    `loglevel=silent`. Both are honoured here like the rest of their npm
+    configuration, so neither can be assumed, and a pattern anchored on `^npm`
+    was assuming both.
+
+    stderr stays as the fallback rather than the source, for an npm whose
+    `--json` does not carry the error.
+    """
+    fields: dict[str, str] = {}
+    words = ""
+    try:
+        payload = json.loads(stdout.strip() or "null")
+    except ValueError:
+        payload = None
+    reported = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(reported, dict):
+        for key in ("code", "syscall", "path"):
+            value = reported.get(key)
+            if isinstance(value, str) and value.strip():
+                fields[key] = value.strip()
+        words = " ".join(
+            reported[key]
+            for key in ("summary", "detail")
+            if isinstance(reported.get(key), str) and reported[key].strip()
+        )
+    # Merged, not chosen between. npm's JSON error carries `code` but not
+    # `path`, which only ever appears on stderr -- so taking the object whole
+    # when it had anything at all dropped the one field SKILL.md tells the agent
+    # to name, and dropped it into a meaning: an empty `npm_path` is documented
+    # as "the scratch directory could not be made", which is a different failure
+    # from a write inside one that was.
+    for key, value in npm_fields(stderr).items():
+        fields.setdefault(key, value)
+    return fields, stderr if stderr.strip() else words
+
+
+# Both spellings npm accepts for a selector, lower-cased for comparison:
+# npm reads `npm_config_*` environment names case-insensitively.
+NPM_WORKSPACE_VARS = frozenset({"npm_config_workspace", "npm_config_workspaces"})
+
+PUBLIC_NPM_HOST = "registry.npmjs.org"
+PUBLIC_NPM_SCHEME = "https"
+PUBLIC_NPM_PORT = 443
+
+
+def normalised_path(path: str) -> str:
+    """A URL path with percent-encoding and dot segments resolved.
+
+    Only for deciding whether a path IS the root. Decoding can change how the
+    segments read -- `%2f` becomes a separator -- and that is fine here, since
+    anything it turns into is still not the root and the answer stays on the
+    side that costs a minute rather than a misdirected bug report.
+    """
+    raw = unquote(path or "")
+    return posixpath.normpath(raw) if raw else ""
+
+
+def is_public_registry(url: str) -> bool:
+    """Whether that is npm's own registry root, however it happens to be spelled.
+
+    `npm config get registry` returns what the user wrote, so the same registry
+    arrives with or without a trailing slash -- and comparing the string in
+    SKILL.md then reads npmjs as a company mirror and tells someone a bug in
+    this catalog is theirs to go and fix. Whether two URLs name one endpoint is
+    a fact, so it is settled here rather than described there.
+
+    Exhaustive by construction, not clause by clause. This grew a rule per
+    review round -- hostname, then port, then path, then query and fragment --
+    because npm appends the package name to the configured string whole, so
+    every part of that string is a part that can make it a different endpoint
+    wearing npmjs's name. So each component `urlsplit` produces is named below,
+    and anything a future reader adds to that list defaults to "must be empty".
+
+    Userinfo is the one deliberate exception: credentials change who is asking,
+    not who answers, and npmjs with a token in front of it is still npmjs. (The
+    payload gets that URL redacted; see `redact_urls`.)
+
+    https only. Over plain http nothing authenticates the far end, so a proxy or
+    any intermediary can answer for that name -- including with a 404 -- and
+    this field's whole job is telling "npmjs said no" apart from "something else
+    said no". An unencrypted endpoint cannot support the claim.
+
+    Wrong in the `True` direction is the expensive one -- it sends someone to
+    report a bug here about a package their own registry does not carry -- so
+    anything unrecognised is `False`.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port  # a property, and it raises on a port that is not one
+    except ValueError:
+        return False
+    return (
+        parts.scheme == PUBLIC_NPM_SCHEME
+        # One trailing dot removed: `registry.npmjs.org.` is the same host
+        # written with the DNS root label, npm keeps the spelling, and the
+        # certificate is accepted for it. Exactly one, so `...org..` -- which is
+        # not a hostname at all -- stays refused, and a lookalike ending in a
+        # dot loses only its own root label and still fails on the name.
+        and (parts.hostname or "").removesuffix(".") == PUBLIC_NPM_HOST
+        and port in (None, PUBLIC_NPM_PORT)
+        # Normalised, not compared as written. `/./`, `/%2e/` and `/a/../` are
+        # all spellings of the root that npm preserves and node resolves before
+        # asking, and matching the literal made each one a new special case --
+        # this is the seventh spelling of "the same endpoint" to come through
+        # review. One normalisation ends the class instead.
+        and normalised_path(parts.path) in ("", "/")
+        and not parts.query
+        and not parts.fragment
+    )
+
+
+def npm_registry_for(pkg: str) -> str | None:
+    """The registry npm would ask for THIS package, or None if it will not say.
+
+    `@scope:registry` routes a scoped package on its own while `registry` still
+    reads as npmjs -- and every npm package this catalog pins is scoped. Asking
+    only the default therefore names the wrong server in the one field SKILL.md
+    uses to decide whether a 404 is the user's mirror or a bug in this catalog,
+    and names it confidently.
+
+    None, and not `""`, when the answer cannot be had. An empty string flowed
+    into `is_public_registry` and came back False, which reads as "a mirror
+    answered" -- inventing the very fact this field exists to supply, in the
+    direction that sends someone to fix a registry that may be fine. Nothing
+    known is reported as nothing known.
+    """
+    if pkg.startswith("@") and "/" in pkg:
+        answered, scoped = npm_config(f"{pkg.split('/', 1)[0]}:registry")
+        if not answered:
+            # Not the same as unset. Falling through here would name the default
+            # registry as the one that served a scoped package whose routing
+            # could not be read -- and a private mirror reported as npmjs sends
+            # the user to blame this catalog.
+            return None
+        if scoped:
+            return scoped
+    # No `answered` guard on this one: a query npm would not answer yields None
+    # for the value too, so the fallback is already "nothing known". The scoped
+    # guard above is the load-bearing one, because there a refusal would
+    # otherwise fall THROUGH to a different question.
+    return npm_config("registry")[1]
+
+
+# node surfaces OpenSSL's certificate-verify strings verbatim, and they are NOT
+# recognisable by name: UNABLE_TO_VERIFY_LEAF_SIGNATURE, CRL_HAS_EXPIRED,
+# SUBJECT_ISSUER_MISMATCH and half the rest carry no CERT/TLS/SSL token at all.
+# A first attempt at "a family, not a list" matched on those three words and
+# quietly dropped UNABLE_TO_VERIFY_LEAF_SIGNATURE from `network` into `unknown`,
+# which is the failure an intercepting proxy actually produces.
+#
+# So: the closed list where the list is closed. These come from OpenSSL's
+# X509_verify_cert_error_string and change about once a decade, and a code that
+# is missed still arrives as `unknown` with npm's own words attached -- an
+# unhelpful answer rather than a wrong one.
+OPENSSL_VERIFY_CODES = frozenset(
+    {
+        "UNABLE_TO_GET_ISSUER_CERT",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "UNABLE_TO_GET_CRL",
+        "UNABLE_TO_GET_CRL_ISSUER",
+        "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+        "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+        "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "CERT_SIGNATURE_FAILURE",
+        "CRL_SIGNATURE_FAILURE",
+        "CERT_NOT_YET_VALID",
+        "CERT_HAS_EXPIRED",
+        "CRL_NOT_YET_VALID",
+        "CRL_HAS_EXPIRED",
+        "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+        "ERROR_IN_CERT_NOT_AFTER_FIELD",
+        "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+        "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
+        "DEPTH_ZERO_SELF_SIGNED_CERT",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "CERT_CHAIN_TOO_LONG",
+        "CERT_REVOKED",
+        "CERT_UNTRUSTED",
+        "CERT_REJECTED",
+        "INVALID_CA",
+        "INVALID_PURPOSE",
+        "PATH_LENGTH_EXCEEDED",
+        "HOSTNAME_MISMATCH",
+        "SUBJECT_ISSUER_MISMATCH",
+        "AKID_SKID_MISMATCH",
+        "AKID_ISSUER_SERIAL_MISMATCH",
+        "KEYUSAGE_NO_CERTSIGN",
+        "UNHANDLED_CRITICAL_EXTENSION",
+    }
+)
+
+# node's own TLS errors, which unlike OpenSSL's *are* a prefix family and an
+# open-ended one -- ERR_TLS_CERT_ALTNAME_INVALID, ERR_SSL_WRONG_VERSION_NUMBER.
+# A pattern is right here for the same reason it was wrong above.
+TLS_CODE_RE = re.compile(r"^ERR_(TLS|SSL)_")
+
+# getaddrinfo's codes that mean "the name did not resolve", and only those.
+# `^EAI_` looked like a family the way `ERR_TLS_*` is one, and it is not: the
+# prefix also covers EAI_BADFLAGS, EAI_MEMORY and EAI_OVERFLOW, which are bad
+# arguments, no memory and a full buffer -- none of them reachability, and all
+# of them told to go and retry the network. Enumerated, like the OpenSSL codes
+# and for the same reason: the shared prefix is not a shared meaning.
+RESOLVER_CODES = frozenset({"EAI_AGAIN", "EAI_FAIL", "EAI_NONAME", "EAI_NODATA"})
+
+
+def npm_cause(code: str) -> str:
+    for cause, codes in NPM_CAUSES:
+        if code in codes:
+            return cause
+    if code in OPENSSL_VERIFY_CODES or code in RESOLVER_CODES or TLS_CODE_RE.match(code):
+        return "network"
+    return "unknown"
 
 
 def npm_latest(pkg: str) -> str:
@@ -194,27 +786,162 @@ def npm_latest(pkg: str) -> str:
     # supply an .npmrc. Pinning also sets an explicit cache path in that scratch
     # directory so inherited npm cache settings (for example an unwritable
     # NPM_CONFIG_CACHE) cannot break version lookup.
+    #
+    # The registry is deliberately NOT forced. The isolation this wants is from
+    # the *repository being configured*, and cwd is the whole of that. The
+    # user's own npm configuration -- a user or global .npmrc, NPM_CONFIG_REGISTRY,
+    # the proxy variables -- is honoured, because on the machines this failure
+    # was reported from a mirror or proxy is the only route to a registry at
+    # all, and a hardcoded --registry would turn a working environment into a
+    # broken one to defend against a threat the user already controls.
+    # Outside the handlers below, because it happens before npm is involved at
+    # all: tempfile raises the same FileNotFoundError a missing executable does,
+    # and reported as `npm-missing` that sends someone off to install something
+    # they already have.
+    scratch = scratch_or_pin_failed("npm", name)
     try:
-        with tempfile.TemporaryDirectory() as elsewhere:
+        with scratch as elsewhere:
             cache = os.path.join(elsewhere, "npm-cache")
-            out = subprocess.run(
-                ["npm", "view", name, "version", "--cache", cache],
-                cwd=elsewhere,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=90,
-            )
-    except FileNotFoundError:
-        die(f"npm not found; it is needed to pin {pkg}")
-    except (OSError, subprocess.SubprocessError) as exc:
-        die(f"could not run npm for {pkg}: {exc}")
+            root_args = npm_root_args(elsewhere)
+            if root_args is None:
+                pin_failed(
+                    "npm",
+                    name,
+                    "npm would not say where its global config lives, so this "
+                    "pin cannot be isolated without risking the wrong registry "
+                    "-- a `workspace=` in an .npmrc refuses every npm config "
+                    "command, which is the usual cause",
+                    "not-isolated",
+                )
+            try:
+                out = subprocess.run(
+                    # Every part of this is spelled out because each is otherwise
+                    # taken from the user's npm configuration, which this honours:
+                    # `@latest` because a `tag=next` would pin whatever that
+                    # points at, `--json` because `json=true` quotes the answer,
+                    # and `--no-color` because `color=always` writes escapes
+                    # through the middle of `npm error code`.
+                    [
+                        "npm",
+                        "view",
+                        f"{name}@latest",
+                        "version",
+                        "--cache",
+                        cache,
+                        "--json",
+                        "--no-color",
+                        # `loglevel=silent` otherwise leaves nothing on stderr
+                        # to fall back to, and nothing to quote to the user.
+                        "--loglevel=error",
+                        # The word npm puts at the front of every log line, which
+                        # is otherwise theirs to choose -- and `path` is only
+                        # ever on stderr, so losing the prefix loses the field.
+                        "--heading=npm",
+                        # Names the project root outright, rather than letting
+                        # npm find one. A scratch under a workspace whose glob
+                        # covers it is otherwise read as a member, and a
+                        # member's project config is the ROOT's -- so the two
+                        # files planted in the scratch stop being the ones npm
+                        # reads. `--no-workspaces` turns that off too, but it
+                        # refuses to run at all beside an inherited
+                        # `workspace=` selector, which a user or global .npmrc
+                        # may set and this cannot rewrite. `--prefix` conflicts
+                        # with nothing.
+                        *root_args,
+                    ],
+                    cwd=elsewhere,
+                    env=npm_env(),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=NPM_TIMEOUT,
+                )
+            except FileNotFoundError:
+                # An npm on PATH whose shebang interpreter is gone raises the
+                # same FileNotFoundError as no npm at all, and the contract
+                # distinguishes them: `npm-missing` says install it,
+                # `unrunnable` says the one you have is broken. `which` is what
+                # tells them apart, since the exception cannot.
+                if shutil.which("npm") is None:
+                    pin_failed(
+                        "npm", name, f"npm not found; it is needed to pin {pkg}", "npm-missing"
+                    )
+                pin_failed(
+                    "npm",
+                    name,
+                    f"npm is on PATH but would not start; it is needed to pin {pkg}",
+                    "unrunnable",
+                )
+            except subprocess.TimeoutExpired:  # pragma: no cover - see below
+                # Before the generic handler: TimeoutExpired is a SubprocessError,
+                # and "could not run npm" is the wrong sentence for a registry
+                # that answered too slowly rather than not at all.
+                #
+                # Untested on purpose. Reaching it costs a real 90-second wait,
+                # and the alternative is a test-only override of NPM_TIMEOUT in
+                # shipped code -- the first environment knob in these scripts
+                # that exists for the suite rather than for a user. A two-line
+                # handler is not worth either.
+                pin_failed("npm", name, f"npm view {pkg} timed out after {NPM_TIMEOUT}s", "timeout")
+            except (OSError, subprocess.SubprocessError) as exc:
+                pin_failed("npm", name, f"could not run npm for {pkg}: {exc}", "unrunnable")
+    except OSError as exc:  # pragma: no cover - only the cleanup reaches here
+        # See latest_tag: the directory existed, so it is named.
+        pin_failed(
+            "npm",
+            name,
+            f"scratch directory would not go away: {exc}",
+            "filesystem",
+            npm_path=clean(scratch.name),
+        )
     if out.returncode != 0:
-        die(f"npm view {pkg} failed: {clean(out.stderr)}")
-    version = out.stdout.strip()
+        fields, words = npm_error(out.stdout, out.stderr)
+        code = fields.get("code", "")
+        # Bound once and used twice. npm's stderr is a registry's text, the
+        # same category as git's remote-server text, and SKILL.md relays the
+        # sentence as well as the field.
+        # Paths stripped as well as credentials: npm quotes the URL it asked
+        # for, and a registry that authenticates by path puts its key in front
+        # of the package name there. See strip_url_paths.
+        detail = bounded_err(strip_url_paths(words))
+        cause = npm_cause(code)
+        extra: dict[str, object] = {}
+        if cause == "not-found":
+            # Which registry said no, because honouring the user's own is a
+            # decision this file made (see below) and a mirror that does not
+            # carry a package answers E404 exactly like a wrong package name.
+            # Asked only here: it costs a subprocess, and only this one cause
+            # cannot be acted on without knowing.
+            registry = npm_registry_for(name)
+            # Redacted for the payload only. npm returns the registry exactly
+            # as configured, credentials and all, and SKILL.md hands this field
+            # to the agent -- classification below keeps the whole URL.
+            extra["registry"] = clean(redact_registry(registry or ""))
+            # Omitted rather than guessed when npm would not say which registry
+            # it asked. A `False` here is a claim, and SKILL.md acts on it.
+            if registry:
+                extra["registry_is_public"] = is_public_registry(registry)
+        pin_failed(
+            "npm",
+            name,
+            f"npm view {pkg} failed: {detail}",
+            cause,
+            npm_code=code,
+            npm_path=clean(fields.get("path", "")),
+            detail=detail,
+            **extra,
+        )
+    version = npm_scalar(out.stdout)
     if not VER_RE.match(version):
-        die(f"npm returned an unexpected version for {pkg}: {clean(version)!r}")
+        answered = bounded_err(version)
+        pin_failed(
+            "npm",
+            name,
+            f"npm returned an unexpected version for {pkg}: {answered!r}",
+            "invalid-version",
+            detail=answered,
+        )
     return version
 
 
@@ -1197,23 +1924,156 @@ def creatable_dir(path: str) -> bool:
         probe = parent
 
 
-def npm_cache_dir() -> str | None:
-    """Where npm says its cache is, or None if it will not say.
+def npm_env() -> dict[str, str]:
+    """The environment for an npm call, minus any workspace selector.
 
-    Asked rather than reconstructed. npm resolves this from the command line,
-    the environment, a user `.npmrc` and a global one, in that order, and a
-    reimplementation of that precedence here would be a guess that breaks
+    `npm config get` refuses to run at all when a workspace is selected --
+    `ENOWORKSPACES`, "This command does not support workspaces" -- so an
+    inherited `workspace=` costs the registry lookup entirely, and with it the
+    field that tells a 404 from a mirror apart from a bug in this catalog.
+
+    Only the environment layer, because it is the only one that can be cleared.
+    A selector in a user or global `.npmrc` cannot be: removing it means
+    rewriting their config, and even locating that file needs `npm config get
+    userconfig`, which the selector breaks in the same way. `npm config list`
+    and `ls` refuse too, so there is no second way to ask. When it comes from a
+    file the registry stays unknown, which the payload reports as unknown and
+    SKILL.md answers by attributing nothing.
+    """
+    return {k: v for k, v in os.environ.items() if k.lower() not in NPM_WORKSPACE_VARS}
+
+
+def inside_a_workspace(where: str) -> bool:
+    """Whether any directory above `where` declares a workspace.
+
+    Read off the filesystem rather than asked of npm, and asked at all so that
+    `--prefix` is passed only when it is needed. `--prefix` is what drags in the
+    globalconfig question, and that question cannot always be answered -- so
+    making every pin depend on it turned an unanswerable probe into a refusal
+    for machines that were never at risk.
+
+    A manifest that will not PARSE is not one npm would honour either, so it
+    declares nothing. A manifest that could not be READ is a different answer
+    and gets the opposite treatment: npm follows a symlinked `package.json`
+    quite happily, and this reader refuses one on a rule of its own -- so
+    "I could not look" was being counted as "there is nothing there", which is
+    how an enclosing workspace with a symlinked root went undetected and
+    redirected the pin it was supposed to be isolated from.
+
+    Unreadable therefore means "assume a root". The cost is a `--prefix` and
+    the question behind it; the alternative cost is the isolation itself.
+
+    The scratch's own manifest is skipped: the seal plants it, and it names no
+    workspaces.
+    """
+    probe = os.path.dirname(os.path.realpath(where))
+    while True:
+        manifest = os.path.join(probe, "package.json")
+        if os.path.isfile(manifest):
+            try:
+                raw = read_bytes_nofollow(manifest, max_bytes=1 << 20)
+            except (OSError, SymlinkRefused, NotARegularFile, TooLarge):
+                return True
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                data = None
+            if isinstance(data, dict) and data.get("workspaces"):
+                return True
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return False
+        probe = parent
+
+
+def npm_root_args(elsewhere: str, rooted: bool = True) -> list[str] | None:
+    """`--prefix`, and the global config file that `--prefix` might displace.
+
+    `--prefix` is what stops a scratch inside a workspace being read as a
+    member, whose project config is the ROOT's rather than the files planted
+    beside it. But npm documents `globalconfig` as defaulting to
+    `{prefix}/etc/npmrc`, so naming a prefix can silently move which global
+    file is read -- and the user's registry, proxy and credentials may live
+    only in that file, which this deliberately honours everywhere else.
+
+    So the path is pinned to whatever npm says it is when not asked to move.
+    Not reproduced on npm 10.9.8, where `--prefix` leaves globalconfig alone
+    and a planted `<prefix>/etc/npmrc` is ignored; kept because the
+    documentation defines it the other way, the cost is one question, and the
+    failure it prevents is silently ignoring the mirror a user is required to
+    go through.
+
+    None when that question cannot be answered -- a workspace selector in a
+    file refuses every `npm config` command, this one included. Then `--prefix`
+    is unsafe to pass and omitting it is unsafe too, so neither is chosen here:
+    the caller decides, and both callers refuse rather than proceed. Continuing
+    with `--prefix` and no pin is the one option that must not happen, because
+    on an npm that moves globalconfig it reads the empty scratch file and pins
+    from npmjs while the user's registry is a mirror they are required to use.
+    """
+    if not rooted or not inside_a_workspace(elsewhere):
+        # Nothing above declares a workspace, so nothing will read this scratch
+        # as a member and there is no reason to name a prefix -- which keeps the
+        # globalconfig question, and its failure mode, out of the ordinary case
+        # entirely.
+        return []
+    answered, path = npm_config("globalconfig", rooted=False)
+    if not answered:
+        return None
+    args = ["--prefix", elsewhere]
+    if path:
+        args += ["--globalconfig", path]
+    return args
+
+
+def npm_config(key: str, *, rooted: bool = True) -> tuple[bool, str | None]:
+    """Whether npm answered, and what it said.
+
+    Two outcomes, not one. `None` alone meant both "npm says this is unset" and
+    "npm would not tell me", and a caller that falls back on the first is wrong
+    to fall back on the second -- a scoped key that could not be read is not a
+    scoped key that is absent, and treating it as absent names the default
+    registry as the one that served a package it never saw.
+
+    Asked rather than reconstructed. npm resolves each of these from the command
+    line, the environment, a user `.npmrc` and a global one, in that order, and
+    a reimplementation of that precedence here would be a guess that breaks
     quietly on the next npm major -- while npm itself answers exactly, offline,
-    and without needing the directory to exist.
+    and without needing anything to exist.
 
     Run in a scratch directory for the same reason `npm_latest` is: the
     repository being configured must not get a vote via its own `.npmrc`.
+
+    `rooted=False` asks without `--prefix`, which is how the globalconfig path
+    that `--prefix` might move is learned in the first place. One level only:
+    the unrooted call adds no flags and so asks nothing further.
     """
     try:
         with tempfile.TemporaryDirectory() as elsewhere:
+            # Sealed like a pin's scratch, and for the same reason: unsealed,
+            # the project enclosing whatever TMPDIR names gets to answer this,
+            # and the registry reported to the user is then a stranger's rather
+            # than the one npm asked. A probe that cannot be isolated answers
+            # nothing rather than answering wrongly.
+            if try_seal(elsewhere):
+                return False, None
+            # A probe that cannot be rooted safely answers nothing; naming a
+            # registry read from the wrong global file is the harmful outcome.
+            root_args = npm_root_args(elsewhere, rooted)
+            if root_args is None:
+                return False, None
             out = subprocess.run(
-                ["npm", "config", "get", "cache"],
+                [
+                    "npm",
+                    "config",
+                    "get",
+                    refuse_option_like(key, "npm config key", die),
+                    "--json",
+                    "--no-color",
+                    *root_args,
+                ],
                 cwd=elsewhere,
+                env=npm_env(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1221,12 +2081,17 @@ def npm_cache_dir() -> str | None:
                 timeout=90,
             )
     except (OSError, subprocess.SubprocessError):
-        return None
+        return False, None
     if out.returncode != 0:
-        return None
-    value = out.stdout.strip()
+        return False, None
+    value = npm_scalar(out.stdout)
     # npm prints the string `undefined` for a config it has no value for.
-    return value if value and value != "undefined" else None
+    return True, (value if value and value != "undefined" else None)
+
+
+def npm_cache_dir() -> str | None:
+    _, value = npm_config("cache")
+    return value
 
 
 def npm_cache_env(cfg: cfgmod.Config | None, scratch: str) -> dict[str, str] | None:

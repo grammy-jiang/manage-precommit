@@ -317,7 +317,175 @@ def porcelain_path(line: str) -> str:
     return path
 
 
+# `git rev-parse --local-env-vars` on git 2.55.0 -- git's own answer to "what in
+# the environment selects a repository or supplies configuration". Written out
+# rather than queried so that isolation costs no subprocess, and paired with a
+# check that the seal actually landed, which catches anything a later git adds
+# to this list.
+GIT_LOCAL_ENV_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+
 MAX_ERR_LEN = 400  # git stderr can carry arbitrary remote-server text
+
+
+# `https://token@host/...`. npm and git both accept credentials in a URL and
+# both print the URL back -- in an error, in a remote, in a summary line. What
+# sits between `://` and `@` is a username, a token, or a user:password pair,
+# and none of the three has any business in a string that is about to become an
+# agent's context and somebody's session log.
+# Any URL in relayed text. Matched whole, because the parts that can carry a
+# secret are not all in one place: userinfo before the authority, and a token in
+# a query or fragment after it.
+#
+# What ends the match is only what cannot appear in a URI -- whitespace, and the
+# `"` `<` `>` that text uses to wrap one. An apostrophe is NOT excluded, however
+# much it looks like a delimiter: it is a valid sub-delimiter in userinfo and in
+# a query, so excluding it truncated the match inside the credential. That left
+# `https://sec'ret@host/` untouched, and `?token=sec'ret` as `?***'ret` -- which
+# is the worse of the two, because it looks redacted.
+#
+# The cost is that a single-quoted URL carrying a query loses its closing quote:
+# `'https://h/?k=v'` relays as `'https://h/?***`. Left that way on purpose --
+# putting the quote back means keeping a trailing apostrophe that the URL might
+# equally have owned, and one character of a secret is worse than one unbalanced
+# quote in an error message.
+URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"<>]+")
+
+
+def _redact_one_url(match: re.Match[str]) -> str:
+    """One URL with everything that can be a credential taken out of it.
+
+    Through the LAST at-sign, not the first: an unescaped `@` is legal in
+    userinfo, so `https://user@example.com@host/` has everything up to the final
+    one as the credential and stopping early leaves the tail of it behind.
+
+    Query and fragment go wholesale rather than by parameter name. Deciding
+    which keys are secret means keeping a list of the ones I have met --
+    `token`, `apikey`, `auth` -- and the first name missing from it leaks in
+    full. Nothing downstream needs those values; `?***` says one was there.
+    """
+    url = match.group(0)
+    scheme, sep, rest = url.partition("://")
+    end = len(rest)
+    for ch in "/?#":
+        at = rest.find(ch)
+        if at >= 0:
+            end = min(end, at)
+    authority, tail = rest[:end], rest[end:]
+    if "@" in authority:
+        authority = "***@" + authority.rsplit("@", 1)[1]
+    # The EARLIEST of the two, not `?` first. A fragment may legally contain a
+    # question mark, so `#token=sekrit?next` was cut at the `?` -- leaving the
+    # fragment's secret in front of a `***` that says it was handled.
+    cuts = [at for at in (tail.find("?"), tail.find("#")) if at >= 0]
+    if cuts:
+        at = min(cuts)
+        tail = tail[:at] + tail[at] + "***"
+    return scheme + sep + authority + tail
+
+
+def redact_urls(text: str) -> str:
+    """The same text with any credentials inside URLs replaced."""
+    return URL_RE.sub(_redact_one_url, text)
+
+
+def redact_registry(url: str) -> str:
+    """A registry URL cut down to the endpoint it names.
+
+    `redact_urls` takes out userinfo, query and fragment, which is the whole of
+    what can be a secret in an arbitrary URL appearing in someone's error text.
+    A *configured registry* has one more: registries do authenticate by path
+    segment, so `https://registry.example/npm/<key>/` puts the key in the path,
+    and relaying it names the server at the cost of handing over the key.
+
+    The path goes, because this field's job is saying WHICH SERVER answered and
+    scheme, host and port already say it. A bare root stays -- `/` is not a
+    secret, and keeping it means the common case reads unchanged.
+
+    Only the copy that leaves. `is_public_registry` still sees the whole URL,
+    so trimming here cannot change what the run decides.
+    """
+    trimmed = redact_urls(url)
+    scheme, sep, rest = trimmed.partition("://")
+    if not sep:
+        return trimmed
+    end = len(rest)
+    for ch in "/?#":
+        at = rest.find(ch)
+        if at >= 0:
+            end = min(end, at)
+    authority, tail = rest[:end], rest[end:]
+    cut = len(tail)
+    for ch in "?#":
+        at = tail.find(ch)
+        if at >= 0:
+            cut = min(cut, at)
+    path, suffix = tail[:cut], tail[cut:]
+    if path not in ("", "/"):
+        # Everything below the root goes, whatever it is. Picking out which
+        # segment is the key would mean keeping a list of the shapes I have met,
+        # and that is how every other redaction on this branch went wrong.
+        path = "/***"
+    tail = path + suffix
+    return scheme + sep + authority + tail
+
+
+def strip_url_paths(text: str) -> str:
+    """The same text with every URL cut down to the server it names.
+
+    For npm's error text specifically, not for foreign stderr in general. npm
+    quotes the URL it requested, and when the configured registry carries a
+    credential in its own path -- `https://registry.example/npm/<key>/` -- that
+    request is `<key>/<package>`, so the secret is in the prose as well as in
+    the `registry` field. Redacting only the field left the same string in
+    `detail` and in the sentence beside it.
+
+    Paths go wholesale rather than by matching the configured registry against
+    the text: knowing the registry needs another query that can itself fail, and
+    a redaction that only works when a lookup succeeds is one that fails exactly
+    when things are already going wrong. What the path carried is not lost --
+    `target` names the package and `registry` names the server, both structured
+    and both already redacted.
+
+    git keeps its paths: there the path is the repository's identity, tokens go
+    in userinfo rather than the path, and `bounded_err` alone covers that.
+    """
+    return URL_RE.sub(lambda m: redact_registry(m.group(0)), text)
+
+
+def bounded_err(text: str) -> str:
+    """Foreign stderr, neutralised and capped, ready to print or store.
+
+    git and npm both hand back text written by a server the user did not
+    choose, and both of those strings end up in the agent's context, because
+    SKILL.md relays them. One cap and one marker, in one place: bounding the
+    copy that goes into JSON while the copy that goes to stderr runs free
+    bounds nothing.
+
+    Credentials go before anything else touches the text. `clean` replaces a
+    control character with a space, and a space ends the run this pattern
+    matches -- so cleaning first turns `://tok\x00en@` into `tok ***@` and
+    leaves half the token behind.
+    """
+    err = clean(redact_urls(text))
+    if len(err) > MAX_ERR_LEN:
+        err = err[:MAX_ERR_LEN] + " ...(truncated)"
+    return err
 
 
 # The file this whole skill is about. Declared once: precommit.py and gitwork.py
@@ -386,7 +554,10 @@ def safe_porcelain(
 
 
 def make_git(
-    die: Callable[[str], NoReturn], *, timeout: int = 120
+    die: Callable[[str], NoReturn],
+    *,
+    timeout: int = 120,
+    on_timeout: Callable[[str], NoReturn] | None = None,
 ) -> Callable[..., tuple[int, str, str]]:
     """Build a hardened `git` runner bound to a script's own die().
 
@@ -457,6 +628,16 @@ def make_git(
             # inside any repository.
             env["GIT_CONFIG_NOSYSTEM"] = "1"
             env["GIT_CONFIG_GLOBAL"] = os.devnull
+            # And every variable that picks a repository or injects settings.
+            # GIT_DIR is the sharp one: exported, `git -C <elsewhere> init`
+            # reinitialises *that* repository, reports success, and leaves
+            # nothing behind in the directory that was supposed to be sealed --
+            # so the seal reads as applied while the other repository's config
+            # is still the one in force. GIT_CONFIG_COUNT and
+            # GIT_CONFIG_PARAMETERS are config injection outright, which no
+            # amount of turning off files defends against.
+            for name in GIT_LOCAL_ENV_VARS:
+                env.pop(name, None)
         # diff.external gets a flag, not a `-c`. Setting it empty does NOT
         # disable it: git then tries to EXEC the empty string and every diff
         # dies with "cannot run :". `--no-ext-diff` is the mechanism that works,
@@ -487,12 +668,14 @@ def make_git(
         except FileNotFoundError:
             die("git not found")
         except subprocess.TimeoutExpired:
-            die(f"git {' '.join(args)} timed out after {timeout}s")
+            # Separable because a stalled remote is a different answer from a
+            # git that refused: version pinning reports the two as different
+            # causes, and telling them apart by the wording of this string
+            # would be classifying by prose.
+            (on_timeout or die)(f"git {' '.join(args)} timed out after {timeout}s")
         # git's stderr can carry text straight from a remote server, so it is
         # neutralised before it is printed or stored, like any other display string.
-        err = clean(proc.stderr) if proc.stderr.strip() else ""
-        if len(err) > MAX_ERR_LEN:
-            err = err[:MAX_ERR_LEN] + " ...(truncated)"
+        err = bounded_err(proc.stderr) if proc.stderr.strip() else ""
         if check and proc.returncode != 0:
             die(f"git {' '.join(args)} failed (exit {proc.returncode}): {err}")
         out = proc.stdout.strip() if strip else proc.stdout.rstrip("\n")

@@ -195,6 +195,72 @@ You delete both temp files once each command returns: `rm -f "<keys.txt>"`, and
   contains one and that this skill will not carry it forward. Otherwise tell the
   user the hook has to be added by hand, or the construct simplified. Do not
   edit the file yourself.
+- **exit 6, a version could not be pinned** — **nothing was written.** Every
+  version is fetched before the first byte of config, so this is always a repo
+  left exactly as it was found; say so, because "it failed partway" is the
+  reasonable assumption and it is wrong. The JSON on stdout carries `source`
+  (`npm`, `git`, or `scratch` for a failure that precedes both), `target` (the
+  package or repository), and `cause`. Use the cause — do not re-derive it from
+  the English:
+  - `filesystem` — something could not be written. **Read `npm_path` before
+    saying what to fix, and check whether it is set at all.** Pinning always
+    works in a temporary directory and passes its own `--cache` inside it, so
+    the *temporary filesystem* is the usual subject — full, read-only, or a
+    `TMPDIR` this process cannot use — and telling them to change
+    `NPM_CONFIG_CACHE` or `HOME` is advice that cannot work. A set `npm_path` is
+    the directory to name. An **empty** one means the scratch directory itself
+    could not be made, so there is no path to name: say that the temporary
+    filesystem is unusable and quote the message, which carries the error.
+  - `auth` — the registry wants credentials this environment does not have.
+  - `forbidden` — the registry refused the request, and that is *not* the same
+    as wanting credentials: npm labels any HTTP failure `E<status>`, so a 403 is
+    as likely a company registry blocking a package by policy, or an account
+    that authenticated and is not permitted. Say both possibilities and let them
+    tell which; do not send them to fix a login that may be working.
+  - `not-found` — a registry answered that there is no such package. `registry`
+    names it and **`registry_is_public` says whether it was npm's own** — do not
+    compare the URL yourself, the same registry is written several ways. False
+    means the likely cause is a mirror or proxy that does not carry this
+    package: theirs to fix by pointing npm somewhere that does, and not a bad
+    package name — this skill deliberately does not override their registry.
+    Only when it is true is the catalog itself wrong, and that is a bug here
+    rather than anything they can do. **An empty `registry`, with no
+    `registry_is_public` beside it, means npm would not say which registry it
+    asked.** Attribute nothing then: report that the package was not found and
+    that the registry could not be identified. Two ordinary causes are worth
+    offering — npm withholds a registry carrying credentials, and it refuses
+    every `npm config` command outright when their npm configuration selects a
+    workspace (`workspace=` in an `.npmrc`). Either way it is theirs to look at
+    with `npm config get registry`, not something to guess at from here.
+  - `network` — DNS, connection or TLS. Worth retrying once; say that it is a
+    reachability problem and not their repository.
+  - `timeout` — a remote answered too slowly rather than not at all. **Say which
+    one, from `source`**: `npm` is the registry, `git` is the hook repository's
+    host, and sending someone to check the wrong service is worse than saying
+    nothing. Otherwise the same advice as `network`.
+  - `npm-missing` / `unrunnable` — the tool named by `source` is absent, or is
+    there and would not start. For `npm` that is only `mermaid`'s problem: every
+    other selection succeeds without it. For `git` it stops the whole run, and
+    "would not start" means something on their PATH is broken rather than
+    missing — quote the message, which names it.
+  - `invalid-version` — the registry answered with something that is not a
+    version, and it was refused rather than written into their config.
+  - `git-ls-remote` — the hook repository's lookup failed, and that is *all*
+    this one means. git offers no machine-readable code the way npm does, so
+    everything the run knows is in `detail` — **relay it verbatim.** It covers
+    an unreachable host, TLS, credentials and a repository that is not there,
+    none of which is a version-tag problem, and none of which is worth guessing
+    at from the wording.
+  - `no-version-tags` — the repository answered, and carries no tag that is
+    purely a version. Nothing to retry: either this catalog's `rev_repo` is
+    wrong, which is a bug here, or upstream has stopped tagging releases.
+  - `not-isolated` — nothing was attempted. The scratch directory pinning works
+    in could not be sealed off from whatever project encloses it, so git or npm
+    might have taken configuration from a repository that has no business
+    choosing which server answers for a catalog URL. The message says what
+    failed. Not the user's configuration to fix — relay it and stop.
+  - `unknown` — an npm code with no bucket here. Relay `npm_code` and `detail`
+    verbatim and say it is unclassified, rather than picking the nearest label.
 - **anything else** — report it verbatim and end the run. Two of these happen
   *after* the config has been written, and the message says so: a foreign
   executable asset appearing between the pre-check and the copy ("The config has

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import stat
 import subprocess
+import sys
 
 import pytest
 
 from conftest import NPM_VERSION, REAL_GIT, SKILL, out_json, run, stub_calls
+
+sys.path.insert(0, str(SKILL / "scripts"))
 
 
 def generate(repo, keys_file, facts_path, stubs, *names, force=False, scripts=None):
@@ -65,8 +69,12 @@ def test_generate_pins_the_newest_version_tag_only(repo, keys_file, facts_path, 
 
 def test_generate_refuses_when_no_release_tag_exists(repo, keys_file, facts_path, no_tags_stub):
     proc = generate(repo, keys_file, facts_path, no_tags_stub, "hygiene")
-    assert proc.returncode == 1
+    assert proc.returncode == 6
     assert "no version tags" in proc.stderr
+    got = out_json(proc)
+    assert got["reason"] == "version_pin_failed"
+    assert got["cause"] == "no-version-tags"
+    assert got["source"] == "git"
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
@@ -692,9 +700,1583 @@ def test_a_garbage_npm_version_is_refused(repo, keys_file, facts_path, tmp_path,
     fake = _fake_bin(tmp_path, "npmjunk", "#!/bin/sh\necho not-a-version\n")
     (fake / "git").symlink_to(stubs / "git")
     proc = generate(repo, keys_file, facts_path, fake, "mermaid")
-    assert proc.returncode != 0
+    assert proc.returncode == 6
     assert "unexpected version" in proc.stderr
+    assert out_json(proc)["cause"] == "invalid-version"
     assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+# npm's `code` line, verbatim from the failures each one names. `npm error` is
+# npm 9 and later; `npm ERR!` is npm 8 and earlier, and both are still in the
+# wild, so the parser is asked about both here rather than about whichever one
+# happens to be installed.
+NPM_FAILURES = [
+    pytest.param(
+        "npm error code ENOENT\nnpm error syscall mkdir\nnpm error path /root/.npm\n",
+        "filesystem",
+        "/root/.npm",
+        id="unwritable cache (the report this exit exists for)",
+    ),
+    pytest.param("npm error code E404\n", "not-found", "", id="no such package"),
+    pytest.param("npm ERR! code E401\n", "auth", "", id="registry wants credentials"),
+    # Not auth: npm labels any HTTP failure E<status> and special-cases only
+    # 401, so a 403 is as likely a company registry blocking a package by
+    # policy for an account that authenticated perfectly well.
+    pytest.param("npm error code E403\n", "forbidden", "", id="refused, not unauthenticated"),
+    pytest.param("npm error code ENOTFOUND\n", "network", "", id="dns"),
+    # getaddrinfo's family, matched as a family: EAI_AGAIN was in the set and
+    # EAI_FAIL was not, which is the difference between a rule and a memory.
+    pytest.param("npm error code EAI_AGAIN\n", "network", "", id="resolver: try again"),
+    pytest.param("npm error code EAI_FAIL\n", "network", "", id="resolver: gave up"),
+    pytest.param("npm ERR! code EAI_NONAME\n", "network", "", id="resolver: no such name"),
+    pytest.param("npm error code EAI_NODATA\n", "network", "", id="resolver: no address"),
+    # The same prefix, and not the same meaning: bad arguments, no memory and a
+    # full buffer are not reachability, and "retry the network" is the wrong
+    # sentence for all three. A shared prefix is not a shared cause.
+    pytest.param("npm error code EAI_BADFLAGS\n", "unknown", "", id="resolver: bad arguments"),
+    pytest.param("npm error code EAI_MEMORY\n", "unknown", "", id="resolver: out of memory"),
+    pytest.param("npm error code EAI_OVERFLOW\n", "unknown", "", id="resolver: buffer too small"),
+    pytest.param("npm error code EAUTHIP\n", "auth", "", id="the registry refused this IP"),
+    pytest.param("npm error code ESOCKETTIMEDOUT\n", "timeout", "", id="socket timed out"),
+    pytest.param("npm ERR! code ECONNREFUSED\n", "network", "", id="connection refused"),
+    # The kernel's answer when there is no route at all, which is what a laptop
+    # off the VPN reports rather than any of the friendlier ones above.
+    pytest.param("npm error code ENETUNREACH\n", "network", "", id="no route to the network"),
+    pytest.param("npm error code EHOSTUNREACH\n", "network", "", id="no route to the host"),
+    pytest.param("npm ERR! code EPIPE\n", "network", "", id="connection went away mid-write"),
+    # npm gives up on the socket itself and exits normally, so this never
+    # reaches the TimeoutExpired handler. Reported as `network` it left the
+    # `timeout` bucket with almost nothing that could land in it.
+    pytest.param("npm error code ETIMEDOUT\n", "timeout", "", id="npm gave up on the socket"),
+    pytest.param("npm ERR! code ERR_SOCKET_TIMEOUT\n", "timeout", "", id="socket timeout"),
+    # @npmcli/agent's own four, for connect, idle, response and transfer. Each
+    # exits normally, so none of them reaches the TimeoutExpired handler either.
+    pytest.param("npm error code ECONNECTIONTIMEOUT\n", "timeout", "", id="agent: connect"),
+    pytest.param("npm error code EIDLETIMEOUT\n", "timeout", "", id="agent: idle"),
+    pytest.param("npm error code ERESPONSETIMEOUT\n", "timeout", "", id="agent: response"),
+    pytest.param("npm error code ETRANSFERTIMEOUT\n", "timeout", "", id="agent: transfer"),
+    pytest.param(
+        "npm error code ENOSPC\nnpm error path /tmp/x/npm-cache\n",
+        "filesystem",
+        "/tmp/x/npm-cache",
+        id="the scratch cache filled the disk",
+    ),
+    # The disk has room and the user does not: a quota is the same advice as a
+    # full filesystem and arrives under a different name.
+    pytest.param(
+        "npm error code EDQUOT\nnpm error path /tmp/x\n",
+        "filesystem",
+        "/tmp/x",
+        id="the quota ran out",
+    ),
+    pytest.param("npm error code EIO\n", "filesystem", "", id="the device errored"),
+    pytest.param("npm ERR! code ENAMETOOLONG\n", "filesystem", "", id="path too long"),
+    pytest.param(
+        "npm error code EACCES\nnpm error path /opt/x\n", "filesystem", "/opt/x", id="perm"
+    ),
+    pytest.param("npm error code EWEIRDNESS\n", "unknown", "", id="a code with no bucket"),
+    pytest.param("something went wrong\n", "unknown", "", id="npm said nothing machine-readable"),
+    # SKILL.md promises that `network` covers TLS, and openssl's verify codes
+    # are far too many to enumerate -- so the family is matched as a family, and
+    # these are the ones a corporate middlebox actually produces.
+    pytest.param("npm error code CERT_HAS_EXPIRED\n", "network", "", id="expired certificate"),
+    pytest.param(
+        "npm error code UNABLE_TO_GET_ISSUER_CERT_LOCALLY\n",
+        "network",
+        "",
+        id="an intercepting proxy's root is not trusted",
+    ),
+    pytest.param(
+        "npm error code ERR_TLS_CERT_ALTNAME_INVALID\n", "network", "", id="wrong hostname"
+    ),
+    pytest.param(
+        "npm error code SELF_SIGNED_CERT_IN_CHAIN\n", "network", "", id="self-signed chain"
+    ),
+    pytest.param(
+        "npm error code ERR_SSL_WRONG_VERSION_NUMBER\n", "network", "", id="not actually TLS"
+    ),
+    # The three that carry no CERT/TLS/SSL token at all, which is why matching
+    # on those words was the wrong shape: the first of these is what an
+    # intercepting proxy usually produces, and it had been classified correctly
+    # until a "family, not a list" rewrite dropped it into `unknown`.
+    pytest.param(
+        "npm error code UNABLE_TO_VERIFY_LEAF_SIGNATURE\n",
+        "network",
+        "",
+        id="the proxy's chain cannot be verified",
+    ),
+    pytest.param("npm error code CRL_HAS_EXPIRED\n", "network", "", id="stale revocation list"),
+    pytest.param(
+        "npm error code SUBJECT_ISSUER_MISMATCH\n", "network", "", id="chain does not join up"
+    ),
+]
+
+
+@pytest.mark.parametrize("stderr,cause,path", NPM_FAILURES)
+def test_a_failed_pin_names_its_cause(
+    repo, keys_file, facts_path, tmp_path, stubs, stderr, cause, path
+):
+    """Five different remedies, and the agent should not be guessing which.
+
+    An unwritable cache is the user's to fix, a 404 is a bug in this catalog, a
+    dropped connection is worth retrying -- and npm says which in a `code` line
+    that means the same thing in every locale, unlike the sentence beside it.
+    `unknown` is a bucket rather than a default, because the failure that
+    matches no rule is exactly the one that must not disappear.
+    """
+    quoted = stderr.replace("\n", "\\n")
+    fake = _fake_bin(tmp_path, "npmcoded", f'#!/bin/sh\nprintf "{quoted}" >&2\nexit 1\n')
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["reason"] == "version_pin_failed"
+    assert got["source"] == "npm"
+    assert got["target"] == "@mermaid-js/mermaid-cli"
+    assert got["cause"] == cause
+    assert got["npm_path"] == path
+    # Whatever the classification, npm's own words survive it.
+    assert got["detail"], "the raw complaint must not be swallowed by the label"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+# Written out here rather than read from the source, deliberately: a test that
+# imports the same set it is checking proves only that a set equals itself. This
+# is the list from node's own documentation of what TLS verification can fail
+# with, and it is the outside opinion the classifier is measured against.
+TLS_CODES_FROM_NODE_DOCS = [
+    "UNABLE_TO_GET_ISSUER_CERT",
+    "UNABLE_TO_GET_CRL",
+    "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+    "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+    "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+    "CERT_SIGNATURE_FAILURE",
+    "CRL_SIGNATURE_FAILURE",
+    "CERT_NOT_YET_VALID",
+    "CERT_HAS_EXPIRED",
+    "CRL_NOT_YET_VALID",
+    "CRL_HAS_EXPIRED",
+    "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+    "ERROR_IN_CERT_NOT_AFTER_FIELD",
+    "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+    "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "CERT_CHAIN_TOO_LONG",
+    "CERT_REVOKED",
+    "INVALID_CA",
+    "PATH_LENGTH_EXCEEDED",
+    "INVALID_PURPOSE",
+    "CERT_UNTRUSTED",
+    "CERT_REJECTED",
+    "HOSTNAME_MISMATCH",
+]
+
+
+def test_the_whole_tls_verify_family_is_reachability_advice(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """SKILL.md promises `network` for TLS, and half these codes are not named
+    for it.
+
+    The previous attempt matched any code containing CERT, TLS or SSL, which
+    reads as thorough and silently loses UNABLE_TO_VERIFY_LEAF_SIGNATURE,
+    CRL_HAS_EXPIRED and SUBJECT_ISSUER_MISMATCH -- the first being what a
+    corporate middlebox actually reports. One case per code, so a rewrite of the
+    classifier has to keep the whole family and not the recognisable half.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmtls",
+        '#!/bin/sh\nprintf "npm error code %s\\n" "$(cat "$MP_TLS_CODE")" >&2\nexit 1\n',
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    code_file = tmp_path / "tls-code.txt"
+    monkeypatch.setenv("MP_TLS_CODE", str(code_file))
+    unclassified = []
+    for code in TLS_CODES_FROM_NODE_DOCS:
+        code_file.write_text(code)
+        proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+        assert proc.returncode == 6, proc.stderr
+        if out_json(proc)["cause"] != "network":
+            unclassified.append(code)
+    assert not unclassified, f"TLS codes that got the unclassified answer: {unclassified}"
+
+
+def test_a_coloured_npm_is_still_classified(repo, keys_file, facts_path, tmp_path, stubs):
+    """`color=always` in a user .npmrc is configuration this skill honours.
+
+    npm then writes escapes into a pipe, between `npm` and `error` -- straight
+    through the middle of the line the cause is read from. Every classified
+    failure would arrive `unknown`, which is the answer that fits none of
+    SKILL.md's advice, on a machine whose only fault is a colour preference.
+
+    The stub also proves `--no-color` was passed, since prevention and the
+    strip are meant to be belt and braces rather than one dressed as two.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmcolour",
+        "#!/bin/sh\n"
+        'case " $* " in *" --no-color "*) ;; *) echo "no --no-color" >&2; exit 7;; esac\n'
+        'printf "npm \\033[31merror\\033[0m code E403\\n" >&2\n'
+        'printf "npm \\033[31merror\\033[0m 403 Forbidden\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert out_json(proc)["cause"] == "forbidden"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_scoped_registry_is_the_one_reported(repo, keys_file, facts_path, tmp_path, stubs):
+    """Every npm package this catalog pins is scoped, so this is the usual case.
+
+    `@scope:registry` routes a scoped package on its own while `registry` still
+    reads as npmjs -- so asking only the default reports npmjs confidently, and
+    SKILL.md then blames this catalog for a package the company mirror simply
+    does not carry. Which is precisely the misdiagnosis the `registry` field was
+    added to prevent.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmscoped",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        '    @*:registry) echo "https://npm.corp.invalid/" ;;\n'
+        '    *) echo "https://registry.npmjs.org/" ;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+
+
+@pytest.mark.parametrize(
+    "answered,public",
+    [
+        pytest.param("https://registry.npmjs.org/", True, id="npmjs, as npm writes it"),
+        pytest.param("https://registry.npmjs.org", True, id="npmjs, no trailing slash"),
+        pytest.param("HTTPS://Registry.NPMJS.org/", True, id="npmjs, shouted"),
+        pytest.param("https://npm.corp.invalid/", False, id="a company mirror"),
+        pytest.param("https://registry.npmjs.org.evil.invalid/", False, id="a lookalike host"),
+        # The name alone is not the endpoint: a port means something local is
+        # answering for it, and this field exists to tell "npmjs said no" apart
+        # from "your mirror said no".
+        pytest.param("https://registry.npmjs.org:4873/", False, id="a proxy on npmjs's name"),
+        pytest.param("https://registry.npmjs.org:443/", True, id="the default port, spelled out"),
+        # Not over plain http: nothing authenticates the far end, so a proxy
+        # can answer for that name -- including with a 404 -- and this field
+        # exists to tell "npmjs said no" from "something else said no".
+        pytest.param("http://registry.npmjs.org/", False, id="npmjs over plain http"),
+        pytest.param("ftp://registry.npmjs.org/", False, id="not a scheme npm speaks"),
+        pytest.param("https://registry.npmjs.org:nope/", False, id="a port that is not a number"),
+        # The DNS root label. Same host, npm keeps the spelling, and the
+        # certificate is accepted for it -- so refusing it told people an
+        # npmjs 404 probably came from their own mirror.
+        pytest.param("https://registry.npmjs.org./", True, id="written with the DNS root label"),
+        pytest.param("https://registry.npmjs.org../", False, id="two dots is not a hostname"),
+        pytest.param(
+            "https://registry.npmjs.org.evil.invalid./",
+            False,
+            id="a lookalike keeps failing on the name",
+        ),
+        # Spellings of the root that npm preserves and node resolves before
+        # asking. Normalised rather than matched one at a time -- this was the
+        # seventh spelling of the same endpoint to come through review.
+        pytest.param("https://registry.npmjs.org/./", True, id="a dot segment"),
+        pytest.param("https://registry.npmjs.org/%2e/", True, id="an encoded dot segment"),
+        pytest.param("https://registry.npmjs.org/a/../", True, id="up out of a segment"),
+        pytest.param(
+            "https://registry.npmjs.org/custom/./", False, id="a real path with a dot segment"
+        ),
+        # npm keeps the base path and appends the package to it, so a path is a
+        # different endpoint wearing the same name, exactly as a port is.
+        pytest.param("https://registry.npmjs.org/custom/", False, id="a base path on npmjs's name"),
+        pytest.param("https://registry.npmjs.org/", True, id="the root, which is the real one"),
+        # npm appends the package to the configured string whole, so a query or
+        # a fragment leaves the request inside it rather than at the root.
+        pytest.param("https://registry.npmjs.org/?mirror=corp", False, id="a query string"),
+        pytest.param("https://registry.npmjs.org/#frag", False, id="a fragment"),
+        # Credentials change who is asking, not who answers.
+        pytest.param("https://token@registry.npmjs.org/", True, id="npmjs with a token"),
+    ],
+)
+def test_whether_the_registry_was_npms_own_is_decided_here(
+    repo, keys_file, facts_path, tmp_path, stubs, answered, public
+):
+    """One registry, several spellings, and the agent must not be comparing them.
+
+    `npm config get registry` returns whatever the user wrote, so npmjs itself
+    arrives with or without a trailing slash -- and a string test in SKILL.md
+    then reads it as a company mirror and tells someone that a bug in this
+    catalog is theirs to go and fix. The lookalike host is here because a
+    substring test would call it npmjs, which is the other way to get it wrong.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmspelling",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        # Quoted, because `--json` is passed and this is what npm answers with.
+        # Passed as an ARGUMENT, not as printf's format string: a `%2e` in
+        # the URL is otherwise read as a conversion spec and the stub
+        # answers something this test never wrote.
+        f"    *) printf '\"%s\"\\n' '{answered}' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert out_json(proc)["registry_is_public"] is public
+
+
+def test_a_token_in_the_registry_url_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
+    """npm returns the registry exactly as configured, credentials and all.
+
+    SKILL.md hands `registry` to the agent, so an unredacted one puts a token
+    into the model's context and into whatever log the session writes -- and
+    `clean()` only removes control characters. The classification still runs on
+    the whole URL, so allowing credentials there (they change who is asking, not
+    who answers) does not have to mean printing them.
+
+    npm's own error text is redacted too: it quotes the URL it requested.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmtoken",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://s3cr3t-token@registry.npmjs.org/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        'printf "npm error 404 GET https://s3cr3t-token@registry.npmjs.org/x\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert "s3cr3t-token" not in proc.stdout
+    assert "s3cr3t-token" not in proc.stderr
+    assert got["registry"] == "https://***@registry.npmjs.org/"
+    assert "?" not in got["registry"]
+    assert "s3cr3t-token" not in got["detail"]
+    # And redacting the copy that leaves did not blind the copy that decides.
+    assert got["registry_is_public"] is True
+
+
+def test_a_path_credential_is_gone_from_npms_own_words_too(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The same secret appears twice, and fixing the field fixed one of them.
+
+    npm quotes the URL it requested, so a registry authenticating by path puts
+    its key in front of the package name in the failure text -- which reaches
+    the agent as `detail` and as the printed sentence.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmpathdetail",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.corp.invalid/npm/sekrit/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E403\\n" >&2\n'
+        'printf "npm error 403 Forbidden - GET '
+        'https://registry.corp.invalid/npm/sekrit/@mermaid-js%%2fmermaid-cli\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert "sekrit" not in proc.stdout, "the payload still carries it"
+    assert "sekrit" not in proc.stderr, "the printed sentence still carries it"
+    got = out_json(proc)
+    assert got["cause"] == "forbidden"
+    assert "registry.corp.invalid" in got["detail"], "the server is still named"
+
+
+def test_a_token_in_the_registry_path_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
+    """End to end: the payload must not carry it, and classification must not
+    change because the payload stopped carrying it."""
+    fake = _fake_bin(
+        tmp_path,
+        "npmpathtoken",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.corp.invalid/npm/sekrit/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert "sekrit" not in proc.stdout
+    got = out_json(proc)
+    assert got["registry"] == "https://registry.corp.invalid/***"
+    assert got["registry_is_public"] is False
+
+
+def test_a_token_in_the_registry_query_is_not_relayed(repo, keys_file, facts_path, tmp_path, stubs):
+    """A query carries a secret as readily as userinfo does.
+
+    `https://registry.example/?token=...` is a shape real registries use, and
+    the earlier redaction only looked before the authority's at-sign. What the
+    agent needs from this field is which server answered, which the query never
+    tells it.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmquerytoken",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.corp.invalid/?token=sekrit\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        'printf "npm error 404 GET https://registry.corp.invalid/?token=sekrit\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    assert "sekrit" not in proc.stdout
+    assert "sekrit" not in proc.stderr
+    got = out_json(proc)
+    assert got["registry"] == "https://registry.corp.invalid/?***"
+    assert "sekrit" not in got["detail"]
+    assert got["registry_is_public"] is False
+
+
+def test_an_empty_scoped_answer_means_unset_and_does_fall_back(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The other half of the tri-state: answered-with-nothing is not refused.
+
+    npm printing nothing for a key is npm saying the key is unset, and the
+    default registry is then the right one to report. Reading that as "could not
+    ask" would throw away an answer the run actually has -- the opposite error
+    to the one its sibling test guards, and equally a wrong report.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmscopedempty",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo ;;\n"
+        "    *) printf '\"https://npm.corp.invalid/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["registry"] == "https://npm.corp.invalid/"
+    assert got["registry_is_public"] is False
+
+
+def test_a_pin_refuses_when_the_global_config_cannot_be_pinned(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """Two earlier fixes meeting, and the meeting point had to be closed.
+
+    `--prefix` stops a scratch inside a workspace being read as a member, and
+    npm defines `globalconfig` as `{prefix}/etc/npmrc` -- so `--prefix` without
+    the pin can move which global file is read. A selector in a user or global
+    `.npmrc` refuses every `npm config` command, the pin's own probe included,
+    and continuing then meant `--prefix` with no pin: the empty scratch config,
+    and a version taken from npmjs while the user's registry is a mirror they
+    are required to use. A wrong pin that looks like any other.
+
+    So it refuses instead, loudly and with the usual cause named. The cost is
+    real -- that configuration cannot pin at all now -- and it is the cheaper
+    side of the trade.
+    """
+    # Inside a workspace, because that is the only place `--prefix` is passed
+    # and so the only place the globalconfig question is asked at all.
+    root = tmp_path / "wsroota"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmnoglobalconfig",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then\n'
+        '  echo "npm error code ENOWORKSPACES" >&2\n'
+        '  echo "This command does not support workspaces." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-isolated"
+    assert "workspace=" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_symlinked_root_manifest_still_counts_as_a_workspace(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """ "Could not read it" is not "there is nothing there".
+
+    npm follows a symlinked `package.json` quite happily; this reader refuses
+    one on a rule of its own. Counting that refusal as proof of no workspace let
+    an enclosing project redirect the pin it was supposed to be isolated from --
+    the same conflation of "no" with "don't know" that has bitten this branch
+    elsewhere, here between a reader's policy and a fact about the filesystem.
+
+    The stub demands `--prefix`, so this passes only if the unreadable manifest
+    was treated as a root.
+    """
+    root = tmp_path / "symlinkws"
+    (root / "packages").mkdir(parents=True)
+    real = tmp_path / "elsewhere-manifest.json"
+    real.write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    (root / "package.json").symlink_to(real)
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+
+    fake = _fake_bin(
+        tmp_path,
+        "npmsymlinkws",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then printf \'"/etc/npmrc"\\n\'; exit 0; fi\n'
+        'case " $* " in *" --prefix "*) ;; *)\n'
+        '  echo "a symlinked root was read as no workspace: $*" >&2; exit 9;; esac\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_an_unparseable_manifest_declares_nothing(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The other half, and it goes the other way.
+
+    A `package.json` that will not parse is not one npm would honour either, so
+    it declares no workspace and must not drag in `--prefix` and the globalconfig
+    question behind it. Unreadable and unparseable are different answers.
+    """
+    root = tmp_path / "brokenws"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text("{ this is not json\n")
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmbrokenws",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then echo "refused" >&2; exit 1; fi\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_workspaces_key_with_no_members_is_not_a_workspace(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """`workspaces: []` declares nobody, so nothing can be read as a member.
+
+    Treating the key's presence as enough would pass `--prefix` there, and with
+    it the globalconfig question -- which is exactly the dependency that has to
+    stay out of runs that were never at risk. The stub refuses that question, so
+    this passes only if it is never asked.
+    """
+    root = tmp_path / "emptyws"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":[]}\n')
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmemptyws",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then echo "refused" >&2; exit 1; fi\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_a_probe_that_cannot_be_rooted_answers_nothing(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The same failure on the registry probe degrades rather than refuses.
+
+    A probe naming a registry read from the wrong global file is worse than a
+    probe naming none: the payload is what SKILL.md attributes blame from. The
+    pin refuses, this answers nothing, and both come from the same unanswerable
+    question.
+    """
+    # Inside a workspace, because that is the only place `--prefix` is passed
+    # and so the only place the globalconfig question is asked at all.
+    root = tmp_path / "wsrootb"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+    fake = _fake_bin(
+        tmp_path,
+        "npmnoglobalcfg2",
+        "#!/bin/sh\n"
+        'if [ "$3" = "globalconfig" ]; then echo "nope" >&2; exit 1; fi\n'
+        'if [ "$1" = "config" ]; then printf \'"https://npm.corp.invalid/"\\n\'; exit 0; fi\n'
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    # The pin refuses first, on the same question -- which is the point: one
+    # unanswerable probe, two callers, neither of them proceeding regardless.
+    assert proc.returncode == 6
+    assert out_json(proc)["cause"] == "not-isolated"
+
+
+def test_an_inherited_workspace_selector_is_kept_out_of_npms_environment(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """`npm config get` refuses to run at all when a workspace is selected.
+
+    ENOWORKSPACES, "This command does not support workspaces" -- so an inherited
+    `workspace=` costs the registry lookup entirely, and with it the field that
+    tells a 404 from a mirror apart from a bug in this catalog. `npm view`
+    survives it; the probes do not, which is why fixing the pin last round left
+    this behind.
+
+    The environment is the only layer that can be cleared, and it is cleared.
+    A selector in a user or global `.npmrc` stays, and the registry stays
+    unknown -- reported as unknown rather than guessed.
+    """
+    monkeypatch.setenv("npm_config_workspace", "foo")
+    monkeypatch.setenv("NPM_CONFIG_WORKSPACES", "true")
+    fake = _fake_bin(
+        tmp_path,
+        "npmwsenv",
+        "#!/bin/sh\n"
+        '[ -z "${npm_config_workspace:-}" ] || { echo "selector survived" >&2; exit 9; }\n'
+        '[ -z "${NPM_CONFIG_WORKSPACES:-}" ] || { echo "selector survived" >&2; exit 9; }\n'
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://npm.corp.invalid/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+
+
+def test_a_scoped_lookup_that_fails_does_not_fall_back_to_the_default(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """A scoped key that could not be read is not a scoped key that is absent.
+
+    npm answering "unset" and npm refusing to answer both arrived as `None`, and
+    the fallback treated them alike -- so a wrapper that rejects scoped config
+    queries made the default registry look like the one that served a scoped
+    package it never saw. With the default being npmjs, that reports
+    `registry_is_public=true` for a private mirror's 404 and sends the user to
+    blame this catalog.
+
+    Only the scoped query fails here; the default one answers perfectly well,
+    which is what makes the fallback look reasonable and be wrong.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmscopedfail",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        '    @*:registry) echo "scoped config is not permitted here" >&2; exit 1 ;;\n'
+        "    *) printf '\"https://registry.npmjs.org/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "", "a registry that could not be determined must not be named"
+    assert "registry_is_public" not in got, "and must not be called npmjs"
+
+
+def test_a_registry_npm_will_not_name_is_reported_as_unknown_not_as_a_mirror(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """Not knowing is not the same as knowing it was a mirror.
+
+    npm withholds a registry that carries credentials, and the empty string it
+    left behind went through `is_public_registry` and came back False -- which
+    SKILL.md reads as "their mirror said no", so someone is sent to fix a
+    registry that may be perfectly fine while a real catalog bug goes
+    unreported. The field is now absent rather than false, and `registry` is
+    empty, which the procedure treats as "attribute nothing".
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmcoy",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  echo "The registry option is protected, and can not be retrieved in this way." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == ""
+    assert "registry_is_public" not in got, "a False here is a claim the run cannot make"
+
+
+def test_a_404_says_which_registry_answered(repo, keys_file, facts_path, tmp_path, stubs):
+    """Honouring the user's registry makes this the ordinary case, not an edge.
+
+    An enterprise mirror that does not proxy the package answers E404 exactly
+    the way a wrong package name does. Told only "no such package", the agent
+    reports a bug in this catalog at a user who can fix it in a minute by
+    pointing npm somewhere that carries it -- so the run says which registry
+    said no rather than leaving that to be inferred.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmmirror",
+        "#!/bin/sh\n"
+        # A scope with no registry of its own: npm answers `undefined`, and the
+        # default is what actually served the request.
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        '    *) echo "https://npm.corp.invalid/" ;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_the_path_survives_when_json_supplied_the_code(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """npm splits one failure across both streams, so both have to be read.
+
+    Its JSON error object carries `code`, `summary` and `detail`; `path` is only
+    ever logged to stderr. Taking the object whole when it had anything at all
+    therefore dropped `path` -- and dropped it into a meaning, because SKILL.md
+    documents an empty `npm_path` as "the scratch directory could not be made",
+    which is a different failure from a write that failed inside one that was.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmsplit",
+        "#!/bin/sh\n"
+        'printf "npm error path /tmp/x/npm-cache\\n" >&2\n'
+        'printf \'%s\' \'{"error":{"code":"ENOSPC","summary":"no space"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "filesystem"
+    assert got["npm_code"] == "ENOSPC"
+    assert got["npm_path"] == "/tmp/x/npm-cache", "the stream that has it is the one it came on"
+
+
+def test_the_path_survives_a_renamed_log_heading(repo, keys_file, facts_path, tmp_path, stubs):
+    """The word at the front of every npm log line is the user's to choose.
+
+    Reading the cause from the JSON object fixed `heading=corp` for
+    classification, but `path` is only ever on stderr, so a pattern anchored on
+    `npm` still lost it -- and an empty `npm_path` is documented as "the scratch
+    directory could not be made", which is a different failure from a write
+    inside one that was. Two earlier fixes leaving a gap between them.
+
+    The stub answers with a renamed heading *despite* being asked for
+    `--heading=npm`, which is the case the flag cannot cover: an npm that does
+    not honour it. The flag itself is pinned by the sibling test.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmheading",
+        "#!/bin/sh\n"
+        'printf "corp error path /tmp/pin/npm-cache\\n" >&2\n'
+        'printf \'%s\' \'{"error":{"code":"EACCES","summary":"denied"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "filesystem"
+    assert got["npm_path"] == "/tmp/pin/npm-cache"
+
+
+def test_both_npm_calls_refuse_to_be_a_workspace_member(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """A sealed scratch inside a workspace stops being sealed.
+
+    npm decides membership from the ROOT's glob, not from the member, so a
+    TMPDIR under `packages/` in a repo with `workspaces: ["packages/*"]` makes
+    the scratch a member -- and a member's project config is the root's, not the
+    two files planted beside it. Observed on npm 10.9.8: `npm view` in that
+    position answers nothing at all, and `npm config get` refuses outright;
+    npm 11 is reported to answer from the workspace's `.npmrc` instead, which is
+    the same seal failing more quietly.
+
+    Both npm calls are checked, because the pin and the registry probe are
+    separate commands and only one of them was covered when this was written.
+
+    `--prefix` rather than `--no-workspaces`: the latter isolates just as well
+    and then refuses to run at all beside an inherited `workspace=` selector,
+    which a user or global .npmrc may set and this cannot rewrite. Naming the
+    project root outright conflicts with nothing.
+
+    And `--globalconfig` beside it, because npm documents that file as living
+    under the prefix -- so naming a prefix can move which global npmrc is read,
+    and the user's registry or proxy may live only there. The stub checks that
+    the probe which learns that path is itself unrooted, since a rooted one
+    would be asking the question it exists to answer.
+    """
+    root = tmp_path / "wsroot"
+    (root / "packages").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"r","workspaces":["packages/*"]}\n')
+    (root / ".npmrc").write_text("registry=https://evil.invalid/\n")
+    monkeypatch.setenv("TMPDIR", str(root / "packages"))
+
+    fake = _fake_bin(
+        tmp_path,
+        "npmworkspace",
+        "#!/bin/sh\n"
+        # The scratch is what --prefix must name, and the stub is run with the
+        # scratch as its cwd -- so this checks the value, not just the flag.
+        # The globalconfig probe is the one call that must NOT be rooted --
+        # it is how the path --prefix might displace is learned.
+        'if [ "$3" = "globalconfig" ]; then\n'
+        '  case " $* " in *" --prefix "*)\n'
+        '    echo "the globalconfig probe must not be rooted" >&2; exit 8;; esac\n'
+        "  printf '\"/etc/npmrc\"\\n'; exit 0\n"
+        "fi\n"
+        'case " $* " in *" --prefix $PWD "*) ;; *)\n'
+        '  echo "not asked with --prefix at the scratch: $*" >&2; exit 9;; esac\n'
+        # Everything else must carry the pinned global config beside --prefix,
+        # or --prefix may quietly move which global npmrc npm reads.
+        'case " $* " in *" --globalconfig /etc/npmrc "*) ;; *)\n'
+        '  echo "global config not pinned: $*" >&2; exit 7;; esac\n'
+        'if [ "$1" = "config" ]; then\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://registry.npmjs.org/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    # Reached the registry probe, which means the pin call carried the flag too:
+    # without it the stub exits 9 and the cause would be `unknown`.
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://registry.npmjs.org/"
+
+
+def test_the_pin_asks_npm_for_a_stable_log_heading(repo, keys_file, facts_path, tmp_path, stubs):
+    """Prevention as well as recovery, since the loosened pattern is a fallback
+    and a fallback nobody needs is cheaper than one everybody does.
+
+    The decoy line guards the other direction: loosening the prefix must not
+    become matching any sentence that happens to contain the word `path`, which
+    would take a warning's filename over the one npm reported the error for.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmheadflag",
+        "#!/bin/sh\n"
+        'case " $* " in *" --heading=npm "*) ;; *) echo "no --heading" >&2; exit 8;; esac\n'
+        'printf "npm error code EACCES\\nnpm error path /tmp/pin/npm-cache\\n" >&2\n'
+        # A decoy after the real line, because these are read last-one-wins: a
+        # pattern loose enough to match ordinary prose would take this instead.
+        'printf "npm warn deprecated check the path /not/the/cache\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "filesystem"
+    assert got["npm_path"] == "/tmp/pin/npm-cache"
+
+
+def test_the_json_copy_wins_where_the_two_streams_disagree(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """Merging needs a direction, and stderr is the copy the user can reshape.
+
+    `heading`, `loglevel` and `color` all rewrite the stderr lines; nothing
+    the user configures touches the JSON error object. So where both name a
+    field, the object is the one to believe -- filling gaps from stderr must
+    not become overwriting from it.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmdisagree",
+        "#!/bin/sh\n"
+        'printf "npm error code E404\\n" >&2\n'
+        'printf \'%s\' \'{"error":{"code":"E401","summary":"Unauthorized"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["npm_code"] == "E401"
+    assert got["cause"] == "auth"
+
+
+def test_non_json_on_stdout_does_not_stop_the_classification(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """`--json` is asked for, not guaranteed.
+
+    An npm that answers a failure with something other than a JSON object --
+    an older one, or a wrapper script on PATH -- must not turn a parse error
+    into a crash. The stderr lines are still there, and they still say E401.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmjunkout",
+        '#!/bin/sh\necho "not json at all"\nprintf "npm error code E401\\n" >&2\nexit 1\n',
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "auth"
+    assert got["npm_code"] == "E401"
+
+
+@pytest.mark.parametrize(
+    "stderr_line,label",
+    [
+        pytest.param("corp error code E403", "a renamed heading", id="heading=corp"),
+        pytest.param("", "nothing on stderr at all", id="loglevel=silent"),
+    ],
+)
+def test_the_cause_survives_npms_logging_configuration(
+    repo, keys_file, facts_path, tmp_path, stubs, stderr_line, label
+):
+    """`^npm error code` assumed two settings that are the user's to change.
+
+    `heading` is the string npm puts in front of every log line -- `npm` by
+    default and anything at all if they say so -- and `loglevel=silent` removes
+    the lines entirely. Both are honoured here like the rest of their npm
+    configuration, so a pattern anchored on `npm` was reading `unknown` off a
+    machine whose only fault was a logging preference.
+
+    Under `--json` npm reports the failure as an object on stdout, which no
+    logging setting touches. The stub emits that and whatever stderr the setting
+    would have left.
+    """
+    emit = f"printf \"%s\\n\" '{stderr_line}' >&2\n" if stderr_line else ""
+    fake = _fake_bin(
+        tmp_path,
+        "npmlogcfg",
+        "#!/bin/sh\n"
+        'case " $* " in *" --loglevel=error "*) ;; *) echo "no --loglevel" >&2; exit 7;; esac\n'
+        + emit
+        + 'printf \'%s\' \'{"error":{"code":"E403","summary":"Forbidden"}}\'\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "forbidden", label
+    assert got["npm_code"] == "E403"
+    assert got["detail"], "something of npm's own must survive to be quoted"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_huge_npm_complaint_is_bounded_in_both_places_it_is_relayed(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The sentence and the JSON field are the same channel.
+
+    npm's stderr is a registry's text, and SKILL.md relays the failure message
+    as well as the structured fields -- so capping `detail` while the message it
+    is printed beside runs free caps nothing. A verbose npm, or a registry that
+    answers with a megabyte, reaches the agent's context either way.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmshouty",
+        "#!/bin/sh\n"
+        'i=0; while [ $i -lt 400 ]; do printf "npm error xxxxxxxxxxxxxxxxxxxx\\n" >&2; i=$((i+1)); done\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert len(got["detail"]) < 600, "the JSON field is unbounded"
+    assert len(proc.stderr) < 600, "the printed sentence is unbounded"
+    assert "(truncated)" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_an_npm_that_will_not_start_is_not_reported_as_missing(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The exception cannot tell these apart, and the advice differs.
+
+    An npm on PATH whose shebang interpreter is gone raises the same
+    FileNotFoundError as no npm at all -- so "install npm" was the answer given
+    to someone whose npm is installed and broken. `only_path`, because exec
+    walks past a file it cannot start and would otherwise find the real npm
+    behind this one, and the test would pass by asking that.
+    """
+    fake = _fake_bin(tmp_path, "npmbroken", "#!/nonexistent/interpreter\n")
+    (fake / "git").symlink_to(stubs / "git")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=fake,
+        only_path=True,
+    )
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "unrunnable"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_missing_npm_is_named_as_such(repo, keys_file, facts_path, tmp_path, stubs):
+    """Only `mermaid` needs npm; the agent has to be able to say that rather
+    than report a generic failure over the whole selection."""
+    bare = tmp_path / "nonpm"
+    bare.mkdir()
+    (bare / "git").symlink_to(stubs / "git")
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=bare,
+        only_path=True,
+    )
+    assert proc.returncode == 6
+    assert out_json(proc)["cause"] == "npm-missing"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_a_git_init_that_seals_nothing_is_not_believed(repo, keys_file, facts_path, tmp_path):
+    """Exit zero is not evidence that this directory was sealed.
+
+    `git init` reports success for repositories other than the one asked for --
+    an exported GIT_DIR was one way, and clearing those variables closes that
+    way rather than the shape of it. The check is what notices a later git
+    growing a route nobody here knows about, so it is tested on its own terms:
+    a git that says yes and does nothing.
+    """
+    fake = tmp_path / "gitlyinginit"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "init" ]; then exit 0; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-isolated"
+    assert "left no repository" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_an_exported_git_dir_cannot_hollow_out_the_seal(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """`git init` reports success for a repository other than the one asked for.
+
+    With GIT_DIR exported, `git -C <scratch> init` reinitialises *that*
+    repository, exits 0, and leaves nothing in the scratch directory -- so the
+    seal read as applied while the other repository's config was still the one
+    in force, and its `url.<other>.insteadOf` could still redirect the lookup.
+    A guard that reports success having done nothing is worse than no guard.
+
+    The stub checks the two things that were false: that the lookup runs with no
+    repository-selecting variable in its environment, and that the scratch
+    really does hold a repository of its own.
+    """
+    external = tmp_path / "external"
+    external.mkdir()
+    subprocess.run(["git", "-C", str(external), "init", "--quiet"], check=True)
+    subprocess.run(
+        ["git", "-C", str(external), "config", "url.https://evil.invalid/.insteadOf", "https://"],
+        check=True,
+    )
+    monkeypatch.setenv("GIT_DIR", str(external / ".git"))
+
+    fake = tmp_path / "gitdircheck"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'here=""; prev=""; want=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-C" ]; then here="$a"; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then want=yes; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'if [ "$want" = yes ]; then\n'
+        '  [ -z "${GIT_DIR:-}" ] || { echo "GIT_DIR survived into the lookup" >&2; exit 9; }\n'
+        '  [ -e "$here/.git" ] || { echo "the scratch $here holds no repository" >&2; exit 9; }\n'
+        "  printf '%s\\n' "
+        '"1111111111111111111111111111111111111111\trefs/tags/v10.0.1"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 0, proc.stderr
+    assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
+
+
+def test_a_git_template_cannot_smuggle_config_into_the_seal(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """The command that applies the seal can carry the thing it seals against.
+
+    `git init` copies a template directory into the new repository, and that
+    template may hold a `config`. `isolated` turns off the system and global
+    files; GIT_TEMPLATE_DIR is a third way in that it does not cover, so a
+    template carrying `url.<other>.insteadOf` was copied straight into the
+    scratch repository the seal had just made -- leaving the seal in place and
+    the redirect inside it.
+
+    The stub asks real git, in the directory git was pointed at, so this fails
+    if `--template=` is ever dropped rather than asserting that a flag was
+    passed.
+    """
+    tpl = tmp_path / "tpl"
+    tpl.mkdir()
+    (tpl / "config").write_text('[url "https://evil.invalid/"]\n\tinsteadOf = https://\n')
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(tpl))
+
+    fake = tmp_path / "templatecheck"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'here=""; prev=""; want=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-C" ]; then here="$a"; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then want=yes; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'if [ "$want" = yes ]; then\n'
+        f'  if {REAL_GIT} -C "$here" config --get url.https://evil.invalid/.insteadOf >/dev/null 2>&1\n'
+        "  then\n"
+        '    echo "the template config is inside the sealed scratch $here" >&2; exit 9\n'
+        "  fi\n"
+        "  printf '%s\\n' "
+        '"1111111111111111111111111111111111111111\trefs/tags/v10.0.1"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 0, proc.stderr
+    assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
+
+
+def test_a_tmpdir_inside_someones_repository_cannot_reach_the_pin(
+    repo, keys_file, facts_path, stubs, tmp_path, monkeypatch
+):
+    """The scratch cwd is pinning's isolation, and where it lands is not ours.
+
+    git discovers the first `.git` above cwd and npm the first `package.json`,
+    so a TMPDIR under any repository -- the target, or a stranger's -- lets that
+    repository rewrite a catalog URL with `url.<other>.insteadOf` or name the
+    registry, and the pin that comes back looks like any other. `/tmp` is itself
+    a git repository on at least one machine this was written on, so refusing
+    such a TMPDIR would refuse the machine; the scratch is sealed instead, with
+    its own empty repository and empty project for both tools to stop at.
+
+    The stub asks real git, from its own cwd, whether the hostile setting is
+    visible -- so this fails if the seal ever stops working, rather than
+    asserting that a flag was passed.
+    """
+    hostile = tmp_path / "someones-repo"
+    (hostile / "tmp").mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(hostile)], check=True)
+    subprocess.run(
+        ["git", "-C", str(hostile), "config", "url.https://evil.invalid/.insteadOf", "https://"],
+        check=True,
+    )
+    (hostile / "package.json").write_text("{}\n")
+    (hostile / ".npmrc").write_text("registry=https://evil.invalid/\n")
+
+    fake = tmp_path / "sealcheck"
+    fake.mkdir()
+    g = fake / "git"
+    # `-C <dir>` moves git's idea of where it is, not this script's, so the
+    # check has to be made in that directory or it inspects the wrong one --
+    # which is how the first version of this test passed while proving nothing.
+    g.write_text(
+        "#!/bin/sh\n"
+        'here=""; prev=""; want=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-C" ]; then here="$a"; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then want=yes; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'if [ "$want" = yes ]; then\n'
+        f'  if {REAL_GIT} -C "$here" config --get url.https://evil.invalid/.insteadOf >/dev/null 2>&1\n'
+        "  then\n"
+        '    echo "the enclosing repository is visible from $here" >&2; exit 9\n'
+        "  fi\n"
+        "  printf '%s\\n' "
+        '"1111111111111111111111111111111111111111\trefs/tags/v10.0.1"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    monkeypatch.setenv("TMPDIR", str(hostile / "tmp"))
+
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 0, proc.stderr
+    assert "rev: v10.0.1" in (repo / ".pre-commit-config.yaml").read_text()
+
+
+def test_a_probe_that_cannot_be_sealed_answers_nothing(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """Sealing the probe is only half of it; the other half is what happens when
+    the seal fails.
+
+    An unsealed probe that answers anyway reports whichever registry the
+    enclosing project names, which is worse than reporting none: SKILL.md reads
+    an empty `registry` as "npm would not say" and attributes nothing, and reads
+    a filled one as fact. The stub lets the pin's own seal succeed and fails
+    every one after it, which is the only way to reach the probe's.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmprobeunsealed",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then printf \'"https://npm.corp.invalid/"\\n\'; exit 0; fi\n'
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    counter = tmp_path / "init-count"
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "init" ]; then\n'
+        f'    n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{counter}"\n'
+        '    [ "$n" -le 1 ] || { echo "fatal: no more repositories for you" >&2; exit 128; }\n'
+        "  fi\n"
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6, proc.stderr
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "", "an unsealed probe must not name a registry"
+    assert "registry_is_public" not in got
+
+
+def test_the_registry_probe_is_sealed_like_the_pin_is(repo, keys_file, facts_path, tmp_path, stubs):
+    """`npm config get registry` is asked in a scratch too, and it decides what
+    the user is told about who refused their package.
+
+    Unsealed, the project enclosing whatever TMPDIR names answers it, and the
+    registry reported is a stranger's rather than the one npm asked -- which is
+    the exact wrongness the field exists to prevent, one function away from the
+    seal that prevents it.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmprobeseal",
+        "#!/bin/sh\n"
+        'if [ "$1" = "config" ]; then\n'
+        '  [ -f "$PWD/package.json" ] || { echo "probe scratch not sealed" >&2; exit 9; }\n'
+        '  [ -f "$PWD/.npmrc" ] || { echo "probe scratch not sealed" >&2; exit 9; }\n'
+        '  case "$3" in\n'
+        "    @*:registry) echo undefined ;;\n"
+        "    *) printf '\"https://npm.corp.invalid/\"\\n' ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf "npm error code E404\\n" >&2\n'
+        "exit 1\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 6
+    got = out_json(proc)
+    assert got["cause"] == "not-found"
+    assert got["registry"] == "https://npm.corp.invalid/"
+
+
+def test_the_scratch_carries_the_marker_npm_stops_at(repo, keys_file, facts_path, stubs, tmp_path):
+    """git's half of the seal and npm's are separate, and so are their proofs.
+
+    npm walks up for a `package.json` and reads the `.npmrc` beside it, so the
+    scratch needs both of its own or the enclosing project's registry is the one
+    it asks. The stub checks its own cwd, which is the scratch, rather than
+    trusting that planting them happened.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmsealed",
+        "#!/bin/sh\n"
+        '[ -f "$PWD/package.json" ] || { echo "no package.json in the scratch" >&2; exit 9; }\n'
+        '[ -f "$PWD/.npmrc" ] || { echo "no .npmrc in the scratch" >&2; exit 9; }\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_a_scratch_that_cannot_be_sealed_stops_the_run(repo, keys_file, facts_path, tmp_path):
+    """An unsealed scratch is not one to pin from.
+
+    If the seal cannot be applied there is no isolation, and pinning anyway
+    would produce a version that looks exactly like a trustworthy one. Fails
+    closed, before any version is fetched and so before anything is written.
+    """
+    fake = tmp_path / "gitnoinit"
+    fake.mkdir()
+    g = fake / "git"
+    g.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "init" ]; then echo "fatal: cannot init" >&2; exit 128; fi\n'
+        "done\n"
+        f'exec {REAL_GIT} "$@"\n'
+    )
+    g.chmod(0o755)
+    proc = generate(repo, keys_file, facts_path, fake, "hygiene")
+    assert proc.returncode == 6, proc.stderr
+    assert out_json(proc)["cause"] == "not-isolated"
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_the_pin_runs_where_the_repos_own_npmrc_cannot_reach_it(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The repository being configured does not get a vote on the registry.
+
+    npm reads `.npmrc` from the directory it is run in and from that project's
+    ancestors, so pinning inside the target repo would let the repo name the
+    server that answers for a catalog package. The scratch cwd is the whole of
+    the defence, and nothing asserted it -- so `cwd=elsewhere` could have been
+    dropped as a tidy-up with the suite still green.
+
+    Note what is NOT claimed: the user's own npm configuration is deliberately
+    honoured, no `--registry` is forced, and the proxy variables are passed
+    through. See `npm_latest`.
+
+    `cwd=repo` on the run itself is load-bearing, and this test was wrong once
+    without it: a child with no cwd of its own inherits the parent's, and the
+    parent here is pytest sitting in the checkout. So deleting `cwd=elsewhere`
+    still put npm somewhere outside the repository and the test passed while
+    proving nothing. Started from inside the repo, the same deletion fails.
+    """
+    (repo / ".npmrc").write_text("registry=http://not-the-registry.invalid/\n")
+    fake = _fake_bin(
+        tmp_path,
+        "npmcwd",
+        f'#!/bin/sh\nprintf "%s" "$PWD" > "$MP_CWD_LOG"\necho {NPM_VERSION}\n',
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    cwd_log = tmp_path / "npm-cwd.txt"
+    monkeypatch.setenv("MP_CWD_LOG", str(cwd_log))
+
+    proc = run(
+        "precommit.py",
+        "--dir",
+        str(repo),
+        "--templates-file",
+        str(keys_file("mermaid")),
+        "--facts-out",
+        str(facts_path),
+        stubs=fake,
+        cwd=repo,
+    )
+    assert proc.returncode == 0, proc.stderr
+    where = os.path.realpath(cwd_log.read_text())
+    root = os.path.realpath(repo)
+    assert where != root
+    assert not where.startswith(root + os.sep)
+    # And the bait was really there, so a run that stopped calling npm at all
+    # could not pass this by doing nothing.
+    assert (repo / ".npmrc").is_file()
+    assert not os.path.exists(os.path.join(where, ".npmrc"))
+
+
+def test_the_pin_does_not_need_a_writable_home(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """`--cache` was the point, but HOME is the thing that was really missing.
+
+    npm's cache defaults under `$HOME`, and its log directory hangs off the
+    cache -- so with the cache named explicitly, nothing in the pin should need
+    a home directory it can write to. That is a deduction until something runs
+    it: the environment in the report had `HOME=/root` and no way to create
+    anything beneath it.
+    """
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    nowhere = str(blocker / "home")
+    fake = _fake_bin(
+        tmp_path,
+        "npmnohome",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f'[ "$HOME" = "{nowhere}" ] || {{ echo "HOME was repaired for us" >&2; exit 5; }}\n'
+        f"echo {NPM_VERSION}\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    monkeypatch.setenv("HOME", nowhere)
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_the_pin_names_its_cache_even_when_nothing_was_inherited(
+    repo, keys_file, facts_path, tmp_path, stubs, monkeypatch
+):
+    """The ordinary environment, stated rather than assumed.
+
+    Every other test here runs with `NPM_CONFIG_CACHE` unset, which makes this
+    the case that is covered everywhere and asserted nowhere -- and a "fix" that
+    only passed `--cache` when it saw a hostile value would sail through all of
+    them.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmnoenv",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        '[ -z "${NPM_CONFIG_CACHE-}" ] || { echo "expected it unset" >&2; exit 5; }\n'
+        'case " $* " in *" --cache "*) ;; *) echo "no --cache" >&2; exit 6;; esac\n'
+        f"echo {NPM_VERSION}\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    monkeypatch.delenv("NPM_CONFIG_CACHE", raising=False)
+    monkeypatch.delenv("npm_config_cache", raising=False)
+
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
 
 
 def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(
@@ -745,6 +2327,55 @@ def test_mermaid_pin_uses_an_isolated_temporary_npm_cache(
     assert cache
     assert cache != "/root/.npm"
     assert not os.path.exists(cache), "temporary npm cache should be cleaned up"
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_the_pin_asks_for_latest_and_for_a_shape_it_chose(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """npm reads the tag AND the output format out of the user's .npmrc.
+
+    `tag=next` makes `npm view <pkg> version` answer for that tag instead, and
+    a prerelease that happens to look like a version is written into their
+    config as though it were the latest release -- the quiet half. `json=true`
+    is the loud half: every answer comes back quoted, the version check calls a
+    perfectly good lookup garbage, and mermaid can never be installed at all.
+
+    Both are asked for explicitly rather than hoped for, so the stub refuses
+    anything else and answers in JSON as npm would.
+    """
+    fake = _fake_bin(
+        tmp_path,
+        "npmspec",
+        "#!/bin/sh\n"
+        'case " $* " in *" @mermaid-js/mermaid-cli@latest "*) ;; *)\n'
+        '  echo "asked for the configured tag, not latest" >&2; exit 5;; esac\n'
+        'case " $* " in *" --json "*) ;; *) echo "no --json" >&2; exit 6;; esac\n'
+        f"printf '\"{NPM_VERSION}\"\\n'\n",
+    )
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+
+
+def test_an_npm_that_ignores_the_format_flag_still_works(
+    repo, keys_file, facts_path, tmp_path, stubs
+):
+    """The flag is prevention, and prevention that has no fallback is a bet.
+
+    An npm old or odd enough to print a bare version despite `--json` should
+    keep working rather than fail in a new way -- the parse falls back to the
+    raw text, which is what every npm printed before this branch existed.
+    """
+    fake = _fake_bin(tmp_path, "npmbare", f"#!/bin/sh\necho {NPM_VERSION}\n")
+    (fake / "git").symlink_to(stubs / "git")
+    proc = generate(repo, keys_file, facts_path, fake, "mermaid")
+    assert proc.returncode == 0, proc.stderr
     assert (
         f"@mermaid-js/mermaid-cli@{NPM_VERSION}" in (repo / ".pre-commit-config.yaml").read_text()
     )
@@ -1662,20 +3293,40 @@ def test_a_failing_install_stops_before_any_json(repo, keys_file, facts_path, st
 
 
 def test_a_failing_ls_remote_is_reported(repo, keys_file, facts_path, tmp_path):
+    """`git-ls-remote` is a bucket with nothing in it but git's own words.
+
+    git has no machine-readable code line to classify on, so unreachable host,
+    TLS, credentials and a repository that is not there all arrive under this
+    one cause -- and SKILL.md's answer is to relay `detail` verbatim rather than
+    guess from the wording. That only works if `detail` is actually populated,
+    which is what this pins.
+    """
     fake = tmp_path / "badremote"
     fake.mkdir()
     g = fake / "git"
     g.write_text(
         "#!/bin/sh\n"
         'for a in "$@"; do\n'
-        '  if [ "$a" = "ls-remote" ]; then echo "fatal: unreachable" >&2; exit 128; fi\n'
+        '  if [ "$a" = "ls-remote" ]; then\n'
+        '    echo "fatal: unreachable: https://github.com/pre-commit/pre-commit-hooks.git" >&2\n'
+        "    exit 128\n"
+        "  fi\n"
         "done\n"
         f'exec {REAL_GIT} "$@"\n'
     )
     g.chmod(0o755)
     proc = generate(repo, keys_file, facts_path, fake, "hygiene")
-    assert proc.returncode != 0
+    assert proc.returncode == 6
     assert "ls-remote failed" in proc.stderr
+    got = out_json(proc)
+    assert got["source"] == "git"
+    assert got["cause"] == "git-ls-remote"
+    assert "unreachable" in got["detail"], "git's own message is the whole of what is known"
+    # And the repository path survives. npm's error text has its paths stripped
+    # because a registry can hide a key in one; a git URL's path is the
+    # repository's identity, tokens go in its userinfo instead, and blanking it
+    # would leave "could not read from https://github.com/***".
+    assert "pre-commit-hooks" in got["detail"]
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
@@ -2299,6 +3950,38 @@ def test_the_mermaid_prerequisite_is_reported_rather_than_probed(repo, stubs):
     assert got["prerequisites"]["mermaid"] in ("binaries present",) or got["prerequisites"][
         "mermaid"
     ].startswith("missing: ")
+
+
+def _declared_tuple(name: str) -> list[str]:
+    """A module-level tuple-of-strings literal, read out of the script itself."""
+    tree = ast.parse((SKILL / "scripts" / "precommit.py").read_text(encoding="utf-8"))
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Tuple):
+            continue
+        if any(getattr(t, "id", "") == name for t in stmt.targets):
+            return [el.value for el in stmt.value.elts]
+    raise AssertionError(f"{name} is not a plain tuple literal any more")
+
+
+@pytest.mark.parametrize("name,least", [("PIN_CAUSES", 10), ("PIN_FIELDS", 6)])
+def test_every_part_of_the_pin_failure_contract_is_named_in_SKILL_md(name, least):
+    """The taxonomy and the procedure are one contract in two files.
+
+    A cause with no sentence beside it fails the way a renamed sentinel does:
+    the agent falls through to wording that does not fit and nothing about the
+    run looks wrong. A *field* with no sentence is quieter still -- it is simply
+    never read, so the distinction it was added to draw is not drawn. `registry`
+    exists because a 404 from a company mirror is not a 404 from npmjs, and it
+    would have been worth nothing unmentioned.
+
+    Read out of the source rather than restated here, so adding one and
+    forgetting the other is red instead of a third list to keep in step.
+    """
+    declared = _declared_tuple(name)
+    assert len(declared) >= least
+    advice = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    missing = [d for d in declared if f"`{d}`" not in advice]
+    assert not missing, f"{name} entries the procedure says nothing about: {missing}"
 
 
 def test_the_prerequisite_sentinel_is_the_string_SKILL_md_branches_on(repo, stubs):
