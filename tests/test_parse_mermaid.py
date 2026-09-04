@@ -595,3 +595,34 @@ def test_a_blank_line_inside_a_list_item_fence_is_content_not_an_exit(docs, env)
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n\n  A --> B"]
+
+
+# -- review round 4: deeper items, and HTML that ends with its item -------------
+
+
+def test_a_marker_is_read_relative_to_the_enclosing_item(docs, env):
+    """A third-level item sits six columns from the margin and is still a list
+    marker; read against the margin it was not, so a fence opened on it was
+    text. Likewise under a two-digit ordered marker."""
+    (docs / "doc.md").write_text(
+        "- a\n  - b\n    - ```mermaid\n      flowchart TD\n        A --> B\n      ```\n\n"
+        '10. ten\n    - sub\n\n      ```mermaid\n      pie\n        "x": 1\n      ```\n'
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B", 'pie\n  "x": 1']
+
+
+def test_an_html_block_ends_with_the_list_item_it_started_in(docs, env):
+    """`- <div>` opens a blank-line-terminated HTML block inside the item; an
+    unindented fence on the next line is outside the item, so the item ends,
+    the block with it, and the fence is a fence. The same for a comment the
+    item never closed. Indented, the fence is still inside both."""
+    (docs / "doc.md").write_text(
+        "- <div>\n```mermaid\nflowchart TD\n  A --> B\n```\n\n"
+        "- <!--\n```mermaid\nflowchart TD\n  C --> D\n```\n\n"
+        "- <div>\n  ```mermaid\n  BAD\n  ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B", "flowchart TD\n  C --> D"]

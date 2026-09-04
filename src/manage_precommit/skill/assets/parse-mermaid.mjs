@@ -145,7 +145,7 @@ function mermaidBlocks(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const blocks = [];
   let open = null; // the fence being read: char, length, lang, depth, container, column, line, body
-  let html = null; // the raw HTML block being skipped, and what ends it
+  let html = null; // the raw HTML block being skipped: what ends it, and the list item it is in
   let columns = []; // content columns of the list items enclosing this line
   let quoted = 0; // the quote depth those columns were measured at
   let afterBlank = true; // whether a paragraph could be in progress
@@ -195,9 +195,15 @@ function mermaidBlocks(text) {
     }
     const blank = unquoted.trim() === "";
     if (html !== null) {
-      if (html.end === null ? blank : html.end.test(unquoted)) html = null;
-      afterBlank = blank;
-      return;
+      if (!blank && indentOf(unquoted) < html.container) {
+        // Indented short of the list item the block started in: the item has
+        // ended, and the block with it, whatever kind it was. Read afresh.
+        html = null;
+      } else {
+        if (html.end === null ? blank : html.end.test(unquoted)) html = null;
+        afterBlank = blank;
+        return;
+      }
     }
     if (blank) {
       afterBlank = true; // blank lines leave lists as they are
@@ -212,26 +218,30 @@ function mermaidBlocks(text) {
     if (indent - container >= 4) return; // an indented code block, whatever it contains
 
     // The line relative to its container: its own indentation (at most three
-    // columns) and the text, with any list marker it opens taken off first.
+    // columns) and the text, with any list marker it opens taken off first. A
+    // marker is read relative to the enclosing item too, so a third-level item
+    // sits at six columns from the margin and is still a marker.
     let column = indent;
     let relative = dedent(unquoted, container);
-    const marker = MARKER.exec(unquoted);
+    let enclosing = container;
+    const marker = MARKER.exec(relative);
     if (marker !== null) {
       // Five or more spaces after a marker are content, not part of it.
       const gap = marker[3].length >= 5 ? 1 : marker[3].length;
-      column = indent + marker[2].length + gap;
+      column = container + marker[1].length + marker[2].length + gap;
       columns.push(column);
+      enclosing = column;
       relative = unquoted.slice(column);
       if (indentOf(relative) >= 4) return; // indented code on the marker line
     }
     const block = htmlBlockStart(relative, wasAfterBlank);
     if (block !== null) {
-      html = block.end !== null && block.end.test(relative) ? null : block;
+      if (block.end === null || !block.end.test(relative)) html = { ...block, container: enclosing };
       return;
     }
     const fence = fenceOf(relative);
     if (fence !== null) {
-      open = { ...fence, depth, container: marker !== null ? column : container, column, line: i + 1, body: [] };
+      open = { ...fence, depth, container: enclosing, column, line: i + 1, body: [] };
     }
   });
 

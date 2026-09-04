@@ -3147,6 +3147,43 @@ def test_files_and_exclude_are_one_scope(repo, stubs):
     assert "together they leave no file here" in got["disabled"]["gitleaks"][0]
 
 
+def test_a_scope_beyond_the_scans_reach_is_not_called_dead(repo, stubs):
+    """walk_repo stops below MAX_SCAN_DEPTH and after MAX_SCAN_FILES. A hook
+    scoped to `packages/app/src/generated/` in a monorepo matches nothing the
+    walk saw and everything it did not -- so a bounded listing claims nothing,
+    and only a complete one may call a scope dead."""
+    deep = repo / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "deep.txt").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '^a/b/c/d/'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_an_invalid_pattern_is_reported_whatever_the_scan_saw(repo, stubs):
+    """The pattern's validity does not depend on the listing, so a bounded walk
+    does not withhold that answer."""
+    deep = repo / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "deep.txt").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '('\n")
+    assert "not a valid pattern" in got["disabled"]["gitleaks"][0]
+
+
+def test_walk_repo_says_when_it_was_cut_short(repo, monkeypatch):
+    import precommit as P
+
+    assert P.walk_repo(str(repo)).complete is True
+    (repo / "a" / "b" / "c" / "d").mkdir(parents=True)
+    (repo / "a" / "b" / "c" / "d" / "deep.txt").write_text("x\n")
+    listing = P.walk_repo(str(repo))
+    assert listing.complete is False
+    assert "a/b/c/d/deep.txt" not in listing.paths
+    (repo / "a" / "b" / "c" / "d").rename(repo / "a" / "b" / "d")  # back within reach
+    assert P.walk_repo(str(repo)).complete is True
+    monkeypatch.setattr(P, "MAX_SCAN_FILES", 1)
+    assert P.walk_repo(str(repo)).complete is False
+
+
 def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
     """pre-commit stops loading a config whose `files:` will not compile, so the
     hook never runs -- the same answer, reached earlier and said plainly."""

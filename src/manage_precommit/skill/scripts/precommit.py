@@ -36,8 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 from urllib.parse import unquote, urlsplit
 
 import config as cfgmod
@@ -1001,19 +1000,37 @@ MAX_PROBE_BYTES = 200_000  # a probe is a look for one fence, not a file read
 MERMAID_FENCE = re.compile(r"^\s*(?:```+|~~~+)\s*mermaid\b", re.MULTILINE)
 
 
-def walk_repo(directory: str) -> list[str]:
+class Listing(NamedTuple):
+    """What walk_repo saw, and whether it saw everything.
+
+    `complete` is False when the depth or the count bound cut the walk short.
+    A recommendation input can be a sample; a verdict that a hook's scope admits
+    no file cannot, since a hook scoped to a directory deeper than the walk
+    reaches would read as dead in exactly the monorepo the bounds exist for.
+    SKIP_DIRS are not truncation: those trees are left out on purpose, and they
+    are the ones pre-commit's own tracked-file listing would mostly not carry.
+    """
+
+    paths: list[str]
+    complete: bool
+
+
+def walk_repo(directory: str) -> Listing:
     """Repo-relative paths, depth- and count-bounded, in a stable order."""
     found: list[str] = []
+    complete = True
     root_depth = directory.rstrip(os.sep).count(os.sep)
     for base, dirs, files in os.walk(directory):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         if base.count(os.sep) - root_depth >= MAX_SCAN_DEPTH:
+            if dirs:
+                complete = False
             dirs[:] = []
         for name in sorted(files):
             found.append(os.path.relpath(os.path.join(base, name), directory))
             if len(found) >= MAX_SCAN_FILES:
-                return found
-    return found
+                return Listing(found, False)
+    return Listing(found, complete)
 
 
 def prerequisites() -> dict[str, str]:
@@ -1044,7 +1061,7 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
     The `reason` is always a path that was actually seen, never a category. A
     recommendation the user cannot check is one they have to take on faith.
     """
-    paths = walk_repo(directory)
+    paths = walk_repo(directory).paths
     markers: list[str] = []
     trigger_paths: list[str] = []
     recs: list[Recommendation] = []
@@ -1145,7 +1162,7 @@ def parse_stages(raw: str) -> set[str]:
     return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
 
 
-def scope_admits_nothing(files: str, exclude: str, paths: Sequence[str]) -> str | None:
+def scope_admits_nothing(files: str, exclude: str, listing: Listing) -> str | None:
     """Why a hook's `files:`/`exclude:` scope lets no file through, or None.
 
     A scope is not a switch. Our own mermaid fragments carry
@@ -1161,10 +1178,11 @@ def scope_admits_nothing(files: str, exclude: str, paths: Sequence[str]) -> str 
     listing the scan walked, both halves at once, and the answer names the half
     that did it when one half alone did. A pattern that will not compile stops
     pre-commit loading the config at all, which is the same answer arrived at
-    earlier. Nothing is claimed when there are no paths to ask.
+    earlier. Nothing is claimed when there are no paths to ask -- nor when the
+    walk was cut short by its own bounds, because "nothing in the sample passes"
+    is not "nothing passes", and a hook scoped below MAX_SCAN_DEPTH in a
+    monorepo would otherwise be called dead by the one scan that cannot see it.
     """
-    if not paths:
-        return None
     compiled: dict[str, re.Pattern[str]] = {}
     for key, pattern in (("files", files), ("exclude", exclude)):
         if not pattern:
@@ -1173,8 +1191,9 @@ def scope_admits_nothing(files: str, exclude: str, paths: Sequence[str]) -> str 
             compiled[key] = re.compile(pattern)
         except re.error as exc:
             return f"{key}: {pattern} (not a valid pattern: {clean(str(exc))})"
-    if not compiled:
+    if not compiled or not listing.complete or not listing.paths:
         return None
+    paths = listing.paths
     wanted = compiled.get("files")
     dropped = compiled.get("exclude")
     if any(
@@ -1188,7 +1207,7 @@ def scope_admits_nothing(files: str, exclude: str, paths: Sequence[str]) -> str 
     return f"files: {files} with exclude: {exclude} (together they leave no file here)"
 
 
-def looks_disabled(hook: cfgmod.Hook, paths: Sequence[str]) -> str | None:
+def looks_disabled(hook: cfgmod.Hook, listing: Listing) -> str | None:
     """What would stop this hook running, or None.
 
     "Already present" was decided on the hook id alone, so an entry could carry
@@ -1207,10 +1226,10 @@ def looks_disabled(hook: cfgmod.Hook, paths: Sequence[str]) -> str | None:
     # excluded from.
     if settings.get("always_run", "").lower() in ("true", "yes", "on"):
         return None
-    return scope_admits_nothing(settings.get("files", ""), settings.get("exclude", ""), paths)
+    return scope_admits_nothing(settings.get("files", ""), settings.get("exclude", ""), listing)
 
 
-def disabled_hooks(cfg: cfgmod.Config, key: str, paths: Sequence[str]) -> list[str]:
+def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     """Present hooks for `key` carrying something that stops them running.
 
     For a catalog entry identified by hook id rather than repo URL -- the
@@ -1230,7 +1249,7 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, paths: Sequence[str]) -> list[s
         for hook in entry.hooks:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
-            why = looks_disabled(hook, paths)
+            why = looks_disabled(hook, listing)
             if why:
                 out.append(f"{clean(hook.id)} ({clean(why)})")
     return out
@@ -1382,14 +1401,14 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
 
 
 def plan(
-    cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool, paths: Sequence[str]
+    cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool, listing: Listing
 ) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict[str, str], dict[str, set[str]]]:
     """Work out every insertion, without touching the file.
 
     `pre_existing` says whether the config came from the user or from our own
     skeleton, which is the difference between "you already had an `exclude`, so
     .gitignore is not covered" and a note about a line we just wrote ourselves.
-    `paths` is the repository's file listing, for judging whether a present
+    `listing` is the repository's file listing, for judging whether a present
     entry's `files:`/`exclude:` scope lets anything through.
     """
     insertions: list[cfgmod.Insertion] = []
@@ -1466,7 +1485,7 @@ def plan(
         have_ids = cfg.hook_ids(entry.url)
         missing = [h.id for h in entry.hooks if h.id not in have_ids]
         if not missing:
-            disabled = disabled_hooks(cfg, key, paths)
+            disabled = disabled_hooks(cfg, key, listing)
             note = (
                 f" -- but {', '.join(disabled)}: present, and looks like it will NOT run on commit"
                 if disabled
@@ -1707,7 +1726,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
     planned, report, versions, intended = plan(
-        cfg, keys, pre_existing=existing is not None, paths=walk_repo(directory)
+        cfg, keys, pre_existing=existing is not None, listing=walk_repo(directory)
     )
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)
@@ -1921,8 +1940,8 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     # An entry that is present but switched off is not coverage. Reported
     # separately so the agent can say so rather than the user being told a
     # catalog entry is already handled.
-    paths = walk_repo(directory)
-    disabled = {k: disabled_hooks(cfg, k, paths) for k in previous if cfg} if cfg else {}
+    listing = walk_repo(directory)
+    disabled = {k: disabled_hooks(cfg, k, listing) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths = detect_markers(directory)
     recs = [r for r in recs if r["name"] not in previous]
