@@ -600,6 +600,10 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # the indicator, the same "pattern not read" as `files: |` on the key's line.
     indicator = C.scan("files:\n  |\n    ^docs/\nrepos: []\n")
     assert C.top_level_scalar(indicator, "files") == "|"
+    # A backslash ending a line inside a double-quoted value escapes the break:
+    # the two lines join with nothing between, and the backslash goes.
+    escaped = C.scan('files:\n  "^docs/\\\n   .*\\\\.md$"\nrepos: []\n')
+    assert C.top_level_scalar(escaped, "files") == "^docs/.*\\.md$"
     block = C.scan("default_stages:\n  - manual\nrepos: []\n")
     assert C.top_level_sequence(block, "default_stages") == "[manual]"
     assert C.top_level_scalar(cfg, "fail_fast") is None

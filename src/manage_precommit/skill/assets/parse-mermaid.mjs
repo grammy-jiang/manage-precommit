@@ -83,21 +83,21 @@ const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 // line. Kind 7 -- any other complete tag alone on its line -- is the one kind
 // that cannot interrupt a paragraph.
 const HTML_BLOCKS = [
-  [/^ {0,3}<(?:pre|script|style|textarea)(?=[ \t\f>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+  [/^ {0,3}<(?:pre|script|style|textarea)(?=[ \t\f\v>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
   [/^ {0,3}<!--/, /-->/],
   [/^ {0,3}<\?/, /\?>/],
   [/^ {0,3}<![A-Z]/, />/], // a declaration needs an uppercase letter; `<!doctype` is text
   [/^ {0,3}<!\[CDATA\[/, /\]\]>/],
   [
-    /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t\f>]|\/>|$)/i, // then whitespace, `>`, `/>` or the end of the line
+    /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t\f\v>]|\/>|$)/i, // then whitespace (as cmark's scanners have it), `>`, `/>` or the end of the line
     null,
   ],
 ];
-// Whitespace inside a tag, and after it, is ASCII -- space, tab and form feed
-// on one line -- not JavaScript's Unicode-wide class, which would let a U+00A0
+// Whitespace inside a tag, and after it, is ASCII -- space, tab, form feed and
+// vertical tab on one line -- not JavaScript's Unicode-wide class, which would let a U+00A0
 // turn prose into a tag.
 const HTML_TAG_LINE =
-  /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:[ \t\f]+[A-Za-z_:][\w.:-]*(?:[ \t\f]*=[ \t\f]*(?:"[^"]*"|'[^']*'|[^ \t\f"'=<>`]+))?)*[ \t\f]*\/?>|<\/[A-Za-z][A-Za-z0-9-]*[ \t\f]*>)[ \t\f]*$/;
+  /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:[ \t\f\v]+[A-Za-z_:][\w.:-]*(?:[ \t\f\v]*=[ \t\f\v]*(?:"[^"]*"|'[^']*'|[^ \t\f\v"'=<>`]+))?)*[ \t\f\v]*\/?>|<\/[A-Za-z][A-Za-z0-9-]*[ \t\f\v]*>)[ \t\f\v]*$/;
 
 function htmlBlockStart(text, interrupting) {
   for (const [opens, end] of HTML_BLOCKS) {

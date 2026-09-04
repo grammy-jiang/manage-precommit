@@ -875,3 +875,12 @@ def test_a_form_feed_is_tag_whitespace(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_vertical_tab_is_tag_whitespace_too(docs, env):
+    (docs / "doc.md").write_text(
+        "<div\v\n```mermaid\nBAD\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]

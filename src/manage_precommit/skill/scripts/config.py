@@ -752,8 +752,9 @@ def _continuation(lines: list[str], key_line: int) -> str:
     so the caller sees the same "pattern not read" it sees for `files: |`
     rather than a folded string that happens to compile.
 
-    Not modelled, and accepted: explicit indentation indicators, multi-line
-    quoted scalars with escapes across lines, anchors and aliases. The scope
+    A backslash ending a line inside a double-quoted value escapes the break,
+    so that line and the next join with nothing between. Not modelled, and
+    accepted: explicit indentation indicators, anchors and aliases. The scope
     verdict is the only consumer, and it claims nothing it cannot read.
     """
     parts: list[str] = []
@@ -778,9 +779,21 @@ def _continuation(lines: list[str], key_line: int) -> str:
             if cut:
                 text = text[: cut.start()].rstrip()
         if text:
-            parts.append(("\n" if pending_break else " ") + text if parts else text)
+            if parts and quoted and _ends_with_escape(parts[-1]):
+                # A trailing backslash in a double-quoted scalar escapes the
+                # line break: no fold at all, and the backslash goes.
+                parts[-1] = parts[-1][:-1]
+                parts.append(text)
+            else:
+                parts.append(("\n" if pending_break else " ") + text if parts else text)
             pending_break = False
     return "".join(parts)
+
+
+def _ends_with_escape(text: str) -> bool:
+    """Whether `text` ends in an unpaired backslash -- one that escapes what follows."""
+    trailing = len(text) - len(text.rstrip("\\"))
+    return trailing % 2 == 1
 
 
 def top_level_sequence(cfg: Config, key: str) -> str | None:

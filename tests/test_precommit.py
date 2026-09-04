@@ -4531,6 +4531,29 @@ def test_a_hook_id_declared_twice_is_covered_while_one_declaration_is_live(repo,
     assert got["disabled"]["hygiene"] == ["check-json (stages: [manual])"]
 
 
+def test_a_live_alternative_stands_in_only_where_it_reaches_the_fence(repo, stubs):
+    """A `mermaid` scoped to `^docs/` is live for `docs/a.md` and never sees the
+    `README.md` whose fence got `mermaid-parse` recommended. Live is not the
+    same as checking that file: the recommendation stands, with that file as
+    its reason. Widen the scope to every Markdown file and it is stood in for."""
+    (repo / "docs").mkdir()
+    (repo / "docs" / "a.md").write_text("# a\n")
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^docs/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]  # live: docs/a.md reaches it
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert offered.get("mermaid-parse") == "README.md"
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

@@ -1375,6 +1375,53 @@ def looks_disabled(
     return scope_admits_nothing([*top.filters, *own], listing, intended)
 
 
+def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool:
+    """Whether some live declaration of catalog entry `key` would run on `path`.
+
+    "Present and live" is not "checks the file the scan found": a mermaid hook
+    scoped to `^docs/` is live for `docs/a.md` and never sees the `README.md`
+    whose fence got the alternative recommended. So before a live alternative
+    is allowed to stand in for a recommendation, it has to admit the very file
+    the recommendation names. A filter that could not be read -- a block-scalar
+    indicator -- is taken to admit the file, since nothing is known against it.
+    """
+    meta = CATALOG[key]
+    url = meta.get("rev_repo") or "local"
+    wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
+    top = top_level(cfg)
+    intended = intended_targets(key)
+    consumes_files = bool(meta.get("pass_filenames", True))
+    for entry in cfg.repos:
+        if entry.url != url:
+            continue
+        for hook in entry.hooks:
+            if wanted_id is not None and hook.id != wanted_id:
+                continue
+            if looks_disabled(hook, listing, top, intended=intended, consumes_files=consumes_files):
+                continue
+            filters = [
+                *top.filters,
+                *(
+                    (k, hook.settings[k], excluding)
+                    for k, excluding in (("files", False), ("exclude", True))
+                    if k in hook.settings
+                ),
+            ]
+            if all(_admits(pattern, excluding, path) for _, pattern, excluding in filters):
+                return True
+    return False
+
+
+def _admits(pattern: str, excluding: bool, path: str) -> bool:
+    if BLOCK_SCALAR_RE.fullmatch(pattern):
+        return True  # not read, so not held against the file
+    try:
+        hit = bool(re.search(pattern, path))
+    except re.error:
+        return True  # pre-commit refuses the config; looks_disabled said so already
+    return hit != excluding
+
+
 def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     """Present hooks for `key` carrying something that stops them running.
 
@@ -2124,7 +2171,17 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     # one it IS the gap -- the alternative has its own hook id, so adding it is
     # the one repair this run can make where re-selecting the dead entry cannot.
     covering = set(previous) - set(disabled)
-    recs = [r for r in recs if not set(CATALOG[r["name"]].get("alternatives", ())) & covering]
+
+    def stood_in_for(rec: Recommendation) -> bool:
+        # A live alternative stands in only if it would run on the file the
+        # recommendation names -- `reason` is that path for every entry the
+        # scan recommends from a file it saw.
+        alternatives = set(CATALOG[rec["name"]].get("alternatives", ())) & covering
+        return (
+            any(reaches(cfg, alt, rec["reason"], listing) for alt in alternatives) if cfg else False
+        )
+
+    recs = [r for r in recs if not stood_in_for(r)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
         r["name"] for r in recs if r["name"] not in ALWAYS_ON
     ]
