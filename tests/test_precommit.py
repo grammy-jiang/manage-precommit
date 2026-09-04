@@ -6,6 +6,8 @@ import ast
 import hashlib
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -36,14 +38,15 @@ def test_recommend_names_the_file_that_triggered_each_entry(repo, stubs):
     assert got["always_on"] == ["hygiene", "yamllint"]
     by_name = {r["name"]: r["reason"] for r in got["recommended"]}
     assert by_name["markdownlint"].endswith(".md")
-    assert by_name["mermaid"] == "docs/arch.md"
+    assert by_name["mermaid-parse"] == "docs/arch.md"
+    assert "mermaid" not in by_name, "the renderer is asked for by name, never recommended"
     assert "gitleaks" in by_name
     assert got["config"] == "none"
 
 
 def test_recommend_skips_mermaid_without_a_fence(repo, stubs):
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
-    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+    assert not {"mermaid", "mermaid-parse"} & {r["name"] for r in got["recommended"]}
 
 
 def test_recommend_does_not_re_offer_what_the_config_already_has(
@@ -266,7 +269,7 @@ def test_detect_reports_what_was_written(repo, keys_file, facts_path, stubs):
 def test_catalog_lists_every_key(stubs):
     proc = run("precommit.py", "--catalog", stubs=stubs)
     keys = {line.split("\t")[0] for line in proc.stdout.splitlines() if line.strip()}
-    assert keys == {"hygiene", "yamllint", "markdownlint", "mermaid", "gitleaks"}
+    assert keys == {"hygiene", "yamllint", "markdownlint", "mermaid-parse", "mermaid", "gitleaks"}
 
 
 # -- verify ------------------------------------------------------------------
@@ -468,7 +471,7 @@ def test_a_symlinked_markdown_file_is_never_read(repo, stubs, tmp_path):
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     # The fence exists only inside the symlink's target, so recommending
     # mermaid would prove the target had been read.
-    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+    assert not {"mermaid", "mermaid-parse"} & {r["name"] for r in got["recommended"]}
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
@@ -2829,7 +2832,7 @@ def test_vendored_content_does_not_drive_the_recommendation(repo, stubs):
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     names = {r["name"] for r in got["recommended"]}
     assert "markdownlint" not in names
-    assert "mermaid" not in names
+    assert not {"mermaid", "mermaid-parse"} & set(names)
     assert got["detected"] == []
 
 
@@ -2838,7 +2841,7 @@ def test_a_top_level_markdown_file_still_drives_it(repo, stubs):
     (repo / "doc.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     names = {r["name"] for r in got["recommended"]}
-    assert {"markdownlint", "mermaid"} <= names
+    assert {"markdownlint", "mermaid-parse"} <= names
 
 
 def test_recommend_reports_bare_paths_alongside_the_prose(repo, stubs, facts_path):
@@ -3109,7 +3112,453 @@ def test_always_run_overrides_a_narrow_files_filter(repo, stubs):
     assert got["disabled"] == {}, got["disabled"]
 
 
+def test_a_files_scope_is_judged_against_the_repository_not_by_its_presence(repo, stubs):
+    """A `files:` is a scope, not a switch. This one matches the README the
+    fixture repo carries, so the hook runs -- and the mere presence of the key
+    used to read as "disabled", which told every repository that selected
+    `mermaid` (whose fragment scopes to Markdown) that its check was dead."""
+    got = _disabled_for(repo, stubs, "        files: '\\.md$'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_our_own_mermaid_hook_is_not_reported_as_disabled(repo, keys_file, facts_path, stubs):
+    """The regression as users met it: select `mermaid`, run the scan again,
+    and be told the hook you just installed will not run. Its `files:` scope
+    matches the Markdown that got it recommended in the first place."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["previous"] == ["mermaid"]
+    assert got["disabled"] == {}, got["disabled"]
+    # And, being live, it keeps its alternative from being offered beside it.
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
+def test_an_escaped_space_at_the_end_of_the_keys_line_is_content(repo, stubs):
+    """`files: "^README\\ ` over `[.]md$"` is the pattern `^README  [.]md$` --
+    the escaped space, then the folded break -- which matches no file here.
+    Trimmed with the line, the backslash read as escaping the break, the
+    pattern became `^README[.]md$`, and a hook that never runs on README.md
+    read as covering its fence."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        '        files: "^README\\ \n          [.]md$"\n'
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+
+
+def test_a_non_string_tag_on_a_filter_refuses_the_config(repo, stubs):
+    """`files: !!int 123` is a number to YAML, which pre-commit rejects where it
+    wants a regex, so the file runs no hook. Read as the text `123` it was a
+    live pattern -- one that reaches `123.md`."""
+    (repo / "123.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: !!int 123\n"
+    )
+    proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+    assert proc.returncode == 5, proc.stderr
+    got = out_json(proc)
+    assert got["reason"] == "config-refused"
+    assert got["line"] == 8
+
+
+def test_a_type_filter_is_judged_only_where_identify_would_agree(repo, stubs):
+    """pre-commit applies `types`, `types_or` and `exclude_types` on top of the
+    regex filters, by identify's tags -- which come from the extension, from
+    well-known names (a `README.md` is `plain-text` too), from the mode and
+    from the contents, a database this tool does not carry. So only a certain
+    verdict is given. Every Markdown file is `file`, `text` and `markdown`, and
+    never `binary`: `exclude_types: [text]` drops them all and `types:
+    [binary]` admits none -- dead. `types: [markdown]` admits them all -- live,
+    nothing to say. `types: [python]` or `exclude_types: [executable]` may or
+    may not admit a given file: not dead, and not shown to reach the fence
+    either, which is what the report says. gitleaks is for every file, so only
+    `file` is certain for it."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+
+    def verdict(extra: str) -> str:
+        (repo / ".pre-commit-config.yaml").write_text(hook + extra)
+        got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+        return got["disabled"].get("mermaid-parse", [""])[0]
+
+    assert "every file this entry is for is `text`" in verdict(
+        "        exclude_types:\n          - text\n"
+    )
+    assert "no file this entry is for can be `binary`" in verdict("        types: [binary]\n")
+    assert "types_or: [directory, socket]" in verdict("        types_or: [directory, socket]\n")
+    assert verdict("        types: [markdown]\n") == ""
+    assert verdict("        types_or: [text, python]\n") == ""
+    assert "whether it reaches doc.md is not shown" in verdict("        types: [python]\n")
+    assert "is not shown" in verdict("        exclude_types: [executable]\n")
+    got = _disabled_for(repo, stubs, "        types: [python]\n")
+    assert "gitleaks" not in got["disabled"], got["disabled"]
+    got = _disabled_for(repo, stubs, "        exclude_types: [file]\n")
+    assert "every file this entry is for is `file`" in got["disabled"]["gitleaks"][0]
+
+
+def test_a_typed_alternative_stands_in_only_where_identify_would_agree(
+    repo, keys_file, facts_path, stubs
+):
+    """A live `mermaid` with `types: [executable]` may or may not run on the
+    README the fence is in -- that is identify's call, on the file's mode -- so
+    it does not stand in, and `mermaid-parse` stays recommended. Typed
+    `[markdown]`, it certainly does, and stands in."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        types: [executable]\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        types: [markdown]\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
+def test_an_implicitly_typed_filter_refuses_the_config(repo, stubs):
+    """`files: null` is None to YAML, which pre-commit rejects where it wants a
+    regex, so the file runs no hook. Read as the text `null` it was a live
+    pattern -- one that reaches `null.md`."""
+    (repo / "null.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: null\n"
+    )
+    proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+    assert proc.returncode == 5, proc.stderr
+    got = out_json(proc)
+    assert got["reason"] == "config-refused"
+    assert got["line"] == 8
+
+
+def test_a_markdownlint_scope_is_judged_against_every_markdown_file(repo, stubs):
+    """The probe recorded the first Markdown file alone for markdownlint, so a
+    linter scoped to `^a/` -- live for `a/covered.md` -- read as reaching the
+    `z/uncovered.md` it never sees. Every Markdown file is recorded now, and
+    the first one the scope misses is named; widened to all of them, the entry
+    is simply present."""
+    (repo / "a").mkdir()
+    (repo / "z").mkdir()
+    (repo / "a" / "covered.md").write_text("# a\n")
+    (repo / "z" / "uncovered.md").write_text("# z\n")
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    hook = (
+        "repos:\n  - repo: https://github.com/DavidAnson/markdownlint-cli2\n    rev: v0.1.0\n"
+        "    hooks:\n      - id: markdownlint-cli2\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^a/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "markdownlint" in got["disabled"], got["disabled"]
+    assert "does not reach z/uncovered.md" in got["disabled"]["markdownlint"][0]
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "markdownlint" not in {r["name"] for r in got["recommended"]}
+
+
+def test_a_capped_probe_does_not_let_a_scoped_present_entry_pass_as_coverage(repo, stubs):
+    """201 Markdown files: fences under `a*` in the 200 the probe reads, one in
+    `z.md` past its cap, and a present `mermaid-parse` scoped to `^a`. Every
+    fence the probe saw is reached, so nothing was said -- and the fence in
+    `z.md` went unchecked. A file the entry is for that the probe did not read
+    and the scope is not certain to reach is now coverage not shown. Scoped to
+    every Markdown file, the entry is simply present."""
+    import precommit as P
+
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    for n in range(P.MAX_MERMAID_PROBES):
+        (repo / f"a{n:03d}.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^a'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    assert "whether it reaches z.md is not shown" in got["disabled"]["mermaid-parse"][0]
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_valueless_tag_is_the_empty_pattern(repo, stubs):
+    """`exclude: !!str` is YAML for `exclude: ''`, and the empty pattern matches
+    every path: pre-commit hands the hook nothing. Read as the text `!!str` -- a
+    pattern matching no file -- the hook was live, and stood as coverage."""
+    got = _disabled_for(repo, stubs, "        exclude: !!str\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "matches every" in got["disabled"]["gitleaks"][0]
+
+
+def test_an_exclude_that_leaves_files_through_is_not_a_switch(repo, stubs):
+    got = _disabled_for(repo, stubs, "        exclude: '^docs/'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_files_and_exclude_are_one_scope(repo, stubs):
+    """pre-commit runs a hook on a path that matches `files:` and does not
+    match `exclude:`. Judged apart, each half here lets something through and
+    the hook reads as live; together they let nothing through, and a Mermaid
+    hook in that state would have counted as covering its alternative."""
+    # A second tracked file, so that neither half alone is the culprit: `files`
+    # matches the README, `exclude` spares the notes, and only the pair leaves
+    # nothing.
+    (repo / "notes.txt").write_text("x\n")
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "notes.txt"], check=True)
+    got = _disabled_for(repo, stubs, "        files: '\\.md$'\n        exclude: '\\.md$'\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "together they leave no file here" in got["disabled"]["gitleaks"][0]
+
+
+def test_a_scope_beyond_the_scans_reach_is_not_called_dead(repo, stubs):
+    """walk_repo stops below MAX_SCAN_DEPTH and after MAX_SCAN_FILES, but the
+    scope verdict rests on git's own listing, which has no depth: a hook scoped
+    to `packages/app/src/generated/` in a monorepo is judged against the files
+    that are really there."""
+    deep = repo / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "deep.txt").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '^a/b/c/d/'\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_the_scope_is_judged_on_the_files_git_would_hand_pre_commit(repo, stubs):
+    """Tracked files, which `pre-commit run --all-files` iterates, plus the
+    untracked ones git does not ignore, which the next `git add` turns into
+    hook targets -- and which the scan itself just walked, so the file that got
+    an entry recommended is in the listing its alternative is judged against.
+    A tracked `vendor/` reaches a hook scoped to it however walk_repo prunes
+    that tree; an ignored file reaches nothing."""
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "lib.js").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '^vendor/'\n")
+    assert got["disabled"] == {}, got["disabled"]  # untracked, not ignored: a target
+    (repo / ".gitignore").write_text("*.txt\n")
+    (repo / "notes.txt").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '\\.txt$'\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]  # ignored: never a target
+    subprocess.run([REAL_GIT, "-C", str(repo), "add", "-f", "notes.txt"], check=True)
+    got = _disabled_for(repo, stubs, "        files: '\\.txt$'\n")
+    assert got["disabled"] == {}, got["disabled"]  # tracked despite the ignore rule
+
+
+def test_outside_a_work_tree_a_pruned_directory_makes_the_walk_incomplete(tmp_path, stubs):
+    """walk_repo leaves `vendor/` out on purpose for the recommendation scan,
+    and a plain directory has no tracked-file listing to fall back on -- so a
+    hook scoped to `^vendor/` there is judged from a listing that cannot see
+    its files. An incomplete listing claims nothing."""
+    plain = tmp_path / "plain"
+    (plain / "vendor").mkdir(parents=True)
+    (plain / "vendor" / "a.md").write_text("# a\n")
+    (plain / "README.md").write_text("# hi\n")
+    (plain / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '^vendor/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(plain), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_double_quoted_filter_is_read_as_yaml_reads_it(repo, stubs):
+    """`files: "\\\\.md$"` is `\\.md$` to YAML and to pre-commit; read as two
+    backslashes it was a regex for a literal backslash, matching nothing, and
+    a live hook was called dead."""
+    got = _disabled_for(repo, stubs, '        files: "\\\\.md$"\n')
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_outside_a_work_tree_the_bounded_walk_stands_in(tmp_path, stubs):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "README.md").write_text("# hi\n")
+    (plain / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.md$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(plain), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    (plain / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.txt$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(plain), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+@pytest.mark.parametrize(
+    "form", ["default_stages: [manual]\n", "default_stages:\n  - manual\n"], ids=["flow", "block"]
+)
+def test_default_stages_park_every_hook_that_sets_none_of_its_own(repo, stubs, form):
+    """pre-commit applies `default_stages` to a hook that omits `stages:`, so
+    `default_stages: [manual]` keeps an otherwise ordinary hook off the commit
+    path exactly as `stages: [manual]` on the hook would -- and the verdict
+    names the key that did it. A hook with its own `stages:` is unaffected."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        form + "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "default_stages: [manual]" in got["disabled"]["gitleaks"][0]
+    (repo / ".pre-commit-config.yaml").write_text(
+        form + "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        stages: [pre-commit]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_an_invalid_pattern_is_reported_whatever_the_scan_saw(repo, stubs):
+    """The pattern's validity does not depend on the listing, so a bounded walk
+    does not withhold that answer."""
+    deep = repo / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "deep.txt").write_text("x\n")
+    got = _disabled_for(repo, stubs, "        files: '('\n")
+    assert "not a valid pattern" in got["disabled"]["gitleaks"][0]
+
+
+def test_walk_repo_says_when_it_was_cut_short(repo, monkeypatch):
+    import precommit as P
+
+    assert P.walk_repo(str(repo)).complete is True
+    (repo / "a" / "b" / "c" / "d").mkdir(parents=True)
+    (repo / "a" / "b" / "c" / "d" / "deep.txt").write_text("x\n")
+    listing = P.walk_repo(str(repo))
+    assert listing.complete is False
+    assert "a/b/c/d/deep.txt" not in listing.paths
+    (repo / "a" / "b" / "c" / "d").rename(repo / "a" / "b" / "d")  # back within reach
+    assert P.walk_repo(str(repo)).complete is True
+    monkeypatch.setattr(P, "MAX_SCAN_FILES", 1)
+    assert P.walk_repo(str(repo)).complete is False
+    monkeypatch.undo()
+    assert P.walk_repo(str(repo)).complete is True  # .git is pruned, and is not a target
+    (repo / "node_modules").mkdir()
+    assert P.walk_repo(str(repo)).complete is False  # this one may hold tracked files
+
+
+def test_the_configs_own_files_filter_is_part_of_every_hooks_scope(repo, stubs):
+    """A config-wide `files: '\\.py$'` keeps every Markdown hook dead while each
+    looks live on its own line. The verdict names the filter that did it, by
+    where it lives."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "files: '\\.py$'\nrepos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "the config's files: \\.py$ (matches no file here)" in got["disabled"]["gitleaks"][0]
+
+
+@pytest.mark.parametrize(
+    "top",
+    ["files:\n  ^src/\n", "default_stages:\n  [manual]\n"],
+    ids=["continued-filter", "continued-flow-default_stages"],
+)
+def test_a_config_wide_setting_continued_onto_the_next_line_still_counts(repo, stubs, top):
+    """The same two settings written with their value on the following line --
+    valid YAML the scanner read as empty, so a config-wide filter vanished from
+    every scope and a stage default read as unset."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        top + "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
+def test_a_continued_block_scalar_filter_is_a_verdict_not_made(repo, stubs):
+    """`files:\n  |\n    ^docs/` reaches the scope check as `|`, the same way
+    `files: |` does, and is not judged; folded into `| ^docs/` it compiled to
+    an alternation that matched every path."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "files:\n  |\n    ^never/\nrepos:\n  - repo: https://github.com/gitleaks/gitleaks\n"
+        "    rev: v8.0.0\n    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_an_escaped_spelling_of_a_stage_is_that_stage(repo, stubs):
+    """`default_stages: ["pre\\u002dcommit"]` is the commit stage to YAML and
+    to pre-commit; read with the escape left in, every inheriting hook looked
+    parked."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        'default_stages: ["pre\\u002dcommit"]\nrepos:\n'
+        "  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_config_wide_filter_that_kills_mermaid_frees_its_alternative(
+    repo, keys_file, facts_path, stubs
+):
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    config = repo / ".pre-commit-config.yaml"
+    config.write_text("files: '\\.py$'\n" + config.read_text())
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["disabled"], got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+@pytest.mark.parametrize("key", ["files", "exclude"])
+def test_a_block_scalar_pattern_is_a_verdict_not_made(repo, stubs, key):
+    """`files: |` with the regex on the lines below is the usual way to write a
+    long `(?x)` pattern. The scanner reads the inline value only, so the filter
+    arrives as `|` -- which compiles to an alternation of two empty patterns
+    and matches everything. Judged, that called a `files: |` hook live whatever
+    it said and an `exclude: |` hook dead whatever it said; a pattern not read
+    is a pattern not judged."""
+    got = _disabled_for(repo, stubs, f"        {key}: |\n          ^never/\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_hook_filter_continued_onto_the_next_line_is_judged_as_written(repo, stubs):
+    """Inside a hook, `files:` over an indented pattern was stored as "" and
+    compiled to a match-everything filter: a hook scoped to a directory that
+    does not exist read as live, and one scoped to Markdown could have read as
+    dead through an `exclude:` written the same way."""
+    got = _disabled_for(repo, stubs, "        files:\n          ^never/\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    got = _disabled_for(repo, stubs, "        files:\n          \\.md$\n")
+    assert got["disabled"] == {}, got["disabled"]
+
+
+def test_a_pattern_pre_commit_would_refuse_reads_as_disabled(repo, stubs):
+    """pre-commit stops loading a config whose `files:` will not compile, so the
+    hook never runs -- the same answer, reached earlier and said plainly."""
+    got = _disabled_for(repo, stubs, "        files: '('\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "not a valid pattern" in got["disabled"]["gitleaks"][0]
+
+
 def test_a_narrow_files_filter_without_always_run_is_flagged(repo, stubs):
+    """`\\.txt$` matches nothing in a repository holding only a README, so the
+    scope lets no file through and the hook never fires here."""
     (repo / ".pre-commit-config.yaml").write_text(
         "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
         "    hooks:\n      - id: gitleaks\n        files: '\\.txt$'\n"
@@ -4075,3 +4524,552 @@ def test_the_rerun_list_is_worked_out_for_the_agent(repo, keys_file, facts_path,
     assert set(facts["files"]["written"]) <= set(got["rerun_files"])
     assert set(facts["scan"]["detected_paths"]) <= set(got["rerun_files"])
     assert facts["scan"]["detected_paths"], "no trigger detected; the test proves half of itself"
+
+
+# -- mermaid-parse: the browser-free sibling -----------------------------------
+
+
+def test_generate_pins_every_package_mermaid_parse_needs(repo, keys_file, facts_path, stubs):
+    """Two npm pins for one entry, each asked for by name, both recorded.
+
+    A bare version cannot say which of two packages it belongs to, so an entry
+    that pins several records `name@version` pairs; an entry that pins one keeps
+    the bare version the summary has always shown.
+    """
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    assert proc.returncode == 0, proc.stderr
+    text = (repo / ".pre-commit-config.yaml").read_text()
+    assert f'"mermaid@{NPM_VERSION}"' in text
+    assert f'"linkedom@{NPM_VERSION}"' in text
+    assert "__NPM" not in text
+    calls = stub_calls(stubs)
+    assert "npm view mermaid@latest" in calls
+    assert "npm view linkedom@latest" in calls
+    assert out_json(proc)["versions"]["mermaid-parse"] == (
+        f"mermaid@{NPM_VERSION} linkedom@{NPM_VERSION}"
+    )
+    assert json.loads(facts_path.read_text())["hooks"]["versions"]["mermaid-parse"] == (
+        f"mermaid@{NPM_VERSION} linkedom@{NPM_VERSION}"
+    )
+
+
+def test_mermaid_parse_writes_its_own_asset_and_only_that(repo, keys_file, facts_path, stubs):
+    generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    shipped = (SKILL / "assets" / "parse-mermaid.mjs").read_bytes()
+    assert (repo / "scripts" / "parse-mermaid.mjs").read_bytes() == shipped
+    assert not (repo / "scripts" / "lint-mermaid.mjs").exists()
+    facts = json.loads(facts_path.read_text())
+    assert set(facts["files"]["written"]) == {
+        ".pre-commit-config.yaml",
+        "scripts/parse-mermaid.mjs",
+    }
+
+
+def test_a_foreign_parse_mermaid_script_stops_the_write(repo, keys_file, facts_path, stubs):
+    """The same guard lint-mermaid.mjs has: the config would EXECUTE this file."""
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "parse-mermaid.mjs").write_text("// not ours\n")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    assert proc.returncode != 0
+    assert "NOT the file this skill ships" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+    assert (repo / "scripts" / "parse-mermaid.mjs").read_text() == "// not ours\n"
+
+
+def test_the_scan_recommends_the_check_that_needs_no_browser(repo, stubs):
+    """A pre-commit hook is a syntax check first. The renderer stays in the
+    catalog for whoever wants it, asked for by name."""
+    (repo / "doc.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    names = [r["name"] for r in got["recommended"]]
+    assert "mermaid-parse" in names
+    assert "mermaid" not in names
+    assert "mermaid-parse" in got["proposed"]
+    assert "mermaid fence (doc.md)" in got["detected"]
+
+
+@pytest.mark.parametrize(
+    "present,absent", [("mermaid", "mermaid-parse"), ("mermaid-parse", "mermaid")]
+)
+def test_neither_mermaid_entry_is_offered_beside_the_other(
+    repo, keys_file, facts_path, stubs, present, absent
+):
+    """They check the same fences. Offering the second beside a LIVE first
+    reads as a gap in coverage that does not exist -- in either direction."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, present)
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert present in got["previous"]
+    names = {r["name"] for r in got["recommended"]}
+    assert absent not in names
+    assert present not in names
+    # The fence itself is still reported: the scan saw it, whatever is installed.
+    assert "mermaid fence (doc.md)" in got["detected"]
+
+
+def test_a_disabled_alternative_does_not_hide_the_recommendation(repo, stubs):
+    """A `mermaid` kept on `stages: [manual]` -- the ordinary way to park a
+    check whose browser is too slow for every commit -- is exactly the config
+    that wants the browser-free one. The alternative has its own hook id, so it
+    is the one repair this run can make; suppressing it would leave the user
+    with no working Mermaid check and a report saying one is present."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        stages: [manual]\n"
+    )
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["previous"]
+    assert "mermaid" in got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+    assert "mermaid-parse" in got["proposed"]
+
+
+def test_a_dead_mermaid_parse_gets_the_renderer_offered_in_its_place(
+    repo, keys_file, facts_path, stubs
+):
+    """The mirror of the case above: the scan names `mermaid-parse`, it is
+    present but parked on `stages: [manual]`, and selecting it again would write
+    nothing. Its live alternative is offered instead, with the same reason."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    config = repo / ".pre-commit-config.yaml"
+    config.write_text(
+        config.read_text().replace(
+            "      - id: mermaid-parse\n", "      - id: mermaid-parse\n        stages: [manual]\n"
+        )
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert "mermaid-parse" not in offered
+    assert offered["mermaid"] == "doc.md"
+    assert "mermaid" in got["proposed"]
+
+
+def test_a_scope_is_judged_among_the_files_the_entry_is_for(repo, stubs):
+    """A mermaid hook behind `files: '\\.py$'` admits every Python file in a
+    mixed repository and read as live, while no Markdown file could reach it --
+    the diagram the scan found went unchecked, and the alternative that would
+    check it was withheld. Judged among the Markdown files, which is what the
+    entry is for, it is dead; a gitleaks hook behind the same filter is for
+    every file, and stays live."""
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '\\.py$'\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.py$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert set(got["disabled"]) == {"mermaid"}, got["disabled"]
+    assert "matches none of the files this entry is for" in got["disabled"]["mermaid"][0]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_always_run_is_not_coverage_for_a_hook_that_consumes_filenames(repo, stubs):
+    """pre-commit runs an `always_run` hook whatever its scope admits -- with
+    the files it admits, which may be none. Both mermaid scripts exit 0 on an
+    empty argv, so that is a run over nothing. gitleaks ignores its file list
+    (upstream sets `pass_filenames: false`) and is genuinely live."""
+    (repo / "doc.md").write_text("# hi\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^never/'\n        always_run: true\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook)
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["disabled"], got["disabled"]
+
+
+def test_pass_filenames_false_on_a_hook_that_reads_its_file_list_is_a_run_over_nothing(repo, stubs):
+    """What the program does is the catalog's knowledge: both mermaid scripts
+    read argv, so a hook that hands them none -- whatever its scope, and
+    whether or not it is `always_run` -- checks nothing. gitleaks never reads
+    the list, so the same setting on it changes nothing."""
+    (repo / "doc.md").write_text("# hi\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: '(?i)\\.(md|markdown)$'\n        pass_filenames: false\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        pass_filenames: false\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert set(got["disabled"]) == {"mermaid-parse"}, got["disabled"]
+    assert "pass_filenames: false" in got["disabled"]["mermaid-parse"][0]
+
+
+def test_an_explicitly_empty_exclude_is_a_pattern_that_matches_everything(repo, stubs):
+    """`exclude: ''` compiles to the empty regex, which matches every path, so
+    pre-commit hands the hook no files. Read by truthiness it was "unset", and a
+    hook it had emptied read as live. Both the hook's own and the config's."""
+    got = _disabled_for(repo, stubs, "        exclude: ''\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "exclude: '' (matches every file here)" in got["disabled"]["gitleaks"][0]
+    (repo / ".pre-commit-config.yaml").write_text(
+        "exclude: ''\nrepos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "the config's exclude: ''" in got["disabled"]["gitleaks"][0]
+
+
+def test_a_hook_id_declared_twice_is_covered_while_one_declaration_is_live(repo, stubs):
+    """Two `mermaid-lint` declarations, one parked on `stages: [manual]` and one
+    ordinary: the live one checks the diagrams, so the key is covered and the
+    alternative is not offered. A hygiene entry with only `check-json` parked
+    still reports that one, since no declaration of *that* id is live."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        + hook
+        + "        stages: [manual]\n"
+        + hook
+        + "  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n"
+        "    hooks:\n      - id: trailing-whitespace\n"
+        "      - id: check-json\n        stages: [manual]\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" not in got["disabled"], got["disabled"]
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+    assert got["disabled"]["hygiene"] == ["check-json (stages: [manual])"]
+
+
+def test_a_live_alternative_stands_in_only_where_it_reaches_the_fence(repo, stubs):
+    """A `mermaid` scoped to `^docs/` is live for `docs/a.md` and never sees the
+    `README.md` whose fence got `mermaid-parse` recommended. Live is not the
+    same as checking that file: the recommendation stands, with that file as
+    its reason. Widen the scope to every Markdown file and it is stood in for."""
+    (repo / "docs").mkdir()
+    (repo / "docs" / "a.md").write_text("# a\n")
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^docs/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]  # live: docs/a.md reaches it
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert offered.get("mermaid-parse") == "README.md"
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
+def test_an_unread_filter_on_the_alternative_is_no_evidence_it_covers_the_fence(repo, stubs):
+    """`files: |-` with the pattern below is a filter the scanner captured but
+    did not read. It is not held against the hook (not dead) and not counted for
+    it either (not covering), so the recommendation stands -- being told the
+    check is already there, by a hook whose scope nobody read, is the report
+    this feature exists to prevent."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: |-\n          ^docs/\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_coverage_is_judged_on_the_path_as_git_names_it(repo, stubs):
+    """`reason` is the trigger path cleaned for display, and `clean` strips
+    whitespace. A file named ` README.md` (leading space) holds the fence; a
+    `mermaid` scoped to `^README` reaches `README.md` and not that file, and
+    judged on the cleaned name it would have seemed to."""
+    (repo / " README.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^README'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]  # live: README.md reaches it
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_a_live_alternative_must_reach_every_fence_file_to_stand_in(repo, stubs):
+    """The probe records every Markdown file with a fence, not only the first
+    it meets. A renderer scoped to `^a/` covers `a/covered.md` and never sees
+    `z/uncovered.md`, so the recommendation stands; scoped to every Markdown
+    file, it is stood in for."""
+    (repo / "a").mkdir()
+    (repo / "z").mkdir()
+    (repo / "a" / "covered.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z" / "uncovered.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^a/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert offered.get("mermaid-parse") == "a/covered.md"  # the first file, as always
+    assert got["detected_paths"] == ["README.md", "a/covered.md"]  # unchanged: one trigger
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
+def test_a_capped_fence_probe_lets_no_alternative_stand_in(repo, stubs):
+    """The probe reads at most MAX_MERMAID_PROBES Markdown files. With more
+    than that, fences inside the sample all under `a/` and one past the cap
+    under `z/`, a renderer scoped to `^a/` covers everything the probe saw and
+    nothing it did not -- so a capped look proves nothing, and the
+    recommendation stands."""
+    import precommit as P
+
+    (repo / "a").mkdir()
+    (repo / "z").mkdir()
+    for n in range(P.MAX_MERMAID_PROBES):
+        (repo / "a" / f"f{n:03d}.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z" / "uncovered.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^a/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_a_present_entry_that_never_reaches_the_fence_file_is_reported(repo, stubs):
+    """`mermaid-parse` scoped to `^docs/` runs on `docs/a.md` and never sees
+    the `README.md` the fence is in. It is live, so it was "already there" and
+    nothing more; now it is reported beside the dead entries, and the live
+    alternative is offered in its place. Widened to every Markdown file, it is
+    simply present."""
+    (repo / "docs").mkdir()
+    (repo / "docs" / "a.md").write_text("# a\n")
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^docs/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    assert "does not reach README.md" in got["disabled"]["mermaid-parse"][0]
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert offered.get("mermaid") == "README.md"
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid" not in {r["name"] for r in got["recommended"]}
+
+
+def test_a_markdown_file_the_probe_could_not_read_makes_its_look_incomplete(repo, stubs):
+    """A fence under `a/` was seen; a Markdown file too large for the probe was
+    not, and may hold the fence a renderer scoped to `^a/` does not reach. An
+    incomplete look lets no alternative stand in."""
+    import precommit as P
+
+    (repo / "a").mkdir()
+    (repo / "a" / "covered.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z-large.md").write_text("x" * (P.MAX_PROBE_BYTES + 1) + "\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^a/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_a_walk_cut_short_by_its_bounds_taints_the_fence_probe(repo, stubs):
+    """A fence under `a/` was seen; a fence four directories deep was beyond
+    MAX_SCAN_DEPTH and not. The walk says it was cut short, so the probe's look
+    is not complete and a renderer scoped to `^a/` does not stand in. A pruned
+    `node_modules/` is policy, not a size cap, and does not taint it."""
+    import precommit as P
+
+    (repo / "a").mkdir()
+    (repo / "a" / "covered.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    deep = repo / "b" / "c" / "d" / "e"
+    deep.mkdir(parents=True)
+    (deep / "uncovered.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^a/'\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook)
+    assert P.walk_repo(str(repo)).bounded is True
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+    # Policy, not a bound: with the deep tree gone and a node_modules/ present,
+    # the walk is incomplete but not bounded, and the alternative stands in.
+    shutil.rmtree(repo / "b")
+    (repo / "node_modules").mkdir()
+    listing = P.walk_repo(str(repo))
+    assert listing.complete is False and listing.bounded is False
+    (repo / ".pre-commit-config.yaml").write_text(hook.replace("'^a/'", "'\\.md$'"))
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
+def test_an_observed_gap_is_reported_even_when_the_probe_was_capped(repo, stubs):
+    """A fence in `README.md` that a present `mermaid-parse` scoped to `^docs/`
+    never reaches is a gap the probe saw. More Markdown behind the cap does not
+    unsee it: completeness decides whether coverage may be CLAIMED, not whether
+    an observed gap is reported."""
+    import precommit as P
+
+    (repo / "docs").mkdir()
+    for n in range(P.MAX_MERMAID_PROBES):
+        (repo / "docs" / f"d{n:03d}.md").write_text("# d\n")
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: '^docs/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    assert "does not reach README.md" in got["disabled"]["mermaid-parse"][0]
+    assert "mermaid" in {r["name"] for r in got["recommended"]}
+
+
+def test_a_config_yaml_would_not_load_is_refused_not_judged(repo, stubs):
+    """`files: "\\.md$"` is a regex written as if the quotes were single; YAML
+    has no `\\.` escape and pre-commit stops at "found unknown escape
+    character", so the file runs no hook. The scan read it as the regex meant,
+    called the entry live, and let it stand in for the working alternative. It
+    is a refusal now, with the line, like every other shape YAML would not
+    load -- including a never-closed quote inside a flow item, which used to
+    pass the scan whole and escape as a traceback when the stages were read."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    head = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+    for tail in ('        files: "\\.md$"\n', '        stages: ["pre-commit]\n'):
+        (repo / ".pre-commit-config.yaml").write_text(head + tail)
+        proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+        assert proc.returncode == 5, proc.stderr
+        assert "Traceback" not in proc.stderr
+        got = out_json(proc)
+        assert got["reason"] == "config-refused"
+        assert got["line"] == 8
+
+
+def test_the_alternatives_point_at_each_other(stubs):
+    import precommit as P
+
+    for key, meta in P.CATALOG.items():
+        for other in meta.get("alternatives", ()):
+            assert key in P.CATALOG[other].get("alternatives", ()), (
+                f"{key} names {other} as an alternative, and {other} does not name it back"
+            )
+    assert P.CATALOG["mermaid-parse"]["alternatives"] == ("mermaid",)
+
+
+def test_both_mermaid_entries_can_share_one_config(repo, keys_file, facts_path, stubs):
+    """Alternatives, not exclusives: asked for by name, the second is inserted
+    as its own local block, and both are then present and both assets are on
+    disk."""
+    generate(repo, keys_file, facts_path, stubs, "mermaid")
+    proc = generate(repo, keys_file, facts_path, stubs, "mermaid-parse", force=True)
+    assert proc.returncode == 0, proc.stderr
+    got = out_json(run("precommit.py", "--dir", str(repo), "--detect", stubs=stubs))
+    assert {"mermaid", "mermaid-parse"} <= set(got["present"])
+    local_ids = {h for r in got["repos"] if r["repo"] == "local" for h in r["hooks"]}
+    assert {"mermaid-lint", "mermaid-parse"} <= local_ids
+    assert (repo / "scripts" / "lint-mermaid.mjs").exists()
+    assert (repo / "scripts" / "parse-mermaid.mjs").exists()
+
+
+def test_prerequisites_are_reported_per_npm_backed_entry(repo, stubs):
+    """SKILL.md reads `prerequisites.<key>` for whichever entry is offered, so
+    every entry that pins an npm package has a row -- and they share one answer,
+    because they share the two binaries."""
+    import precommit as P
+
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    npm_backed = {k for k, m in P.CATALOG.items() if m.get("npm")}
+    assert set(got["prerequisites"]) == npm_backed == {"mermaid", "mermaid-parse"}
+    assert len(set(got["prerequisites"].values())) == 1
+
+
+def test_an_unfilled_placeholder_in_any_spelling_stops_the_run(
+    repo, keys_file, facts_path, stubs, skill_copy
+):
+    """`__NPM__` was the only npm spelling the old check knew, and a fragment
+    pinning two packages carries two others. A token the catalog does not name
+    has to be caught by shape, before anything is written."""
+    fragment = skill_copy / "templates" / "mermaid-parse.yaml"
+    fragment.write_text(fragment.read_text().replace("__NPM_LINKEDOM__", "__NPM_LINKEDOM_2__"))
+    proc = generate(
+        repo, keys_file, facts_path, stubs, "mermaid-parse", scripts=skill_copy / "scripts"
+    )
+    assert proc.returncode != 0
+    assert "unfilled placeholder" in proc.stderr
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+@pytest.mark.parametrize("key", ["mermaid-parse", "mermaid"])
+def test_the_mermaid_hooks_take_uppercase_markdown_extensions_like_the_scan_does(key):
+    """detect_markers lowercases the name before it looks for `.md`, so a
+    `README.MD` gets the entry recommended. The hook's own `files:` has to
+    reach that same file, or the recommendation installs a check that never
+    sees the file that triggered it."""
+    import config as C
+    import precommit as P
+
+    text = (SKILL / "templates" / P.CATALOG[key]["fragment"]).read_text(encoding="utf-8")
+    for placeholder in P.CATALOG[key]["npm"]:
+        text = text.replace(placeholder, "0.0.0")
+    (hook,) = C.scan("repos:\n" + text).repos[0].hooks
+    pattern = re.compile(hook.settings["files"])
+    assert pattern.search("docs/README.MD")
+    assert pattern.search("notes.Markdown")
+    assert not pattern.search("script.mdx")
+
+
+def test_this_repository_runs_every_local_hook_it_ships(stubs):
+    """The config in this checkout is managed by this tool, and CI runs it.
+
+    Every local hook the catalog can write is in it, wired to a symlink into
+    the very asset it ships -- so the copy that runs here and the payload that
+    goes into other repositories cannot drift apart. A hook that is only ever
+    run in other people's repositories is one nobody here would see break.
+    """
+    import precommit as P
+
+    root = SKILL.parents[2]
+    config = (root / ".pre-commit-config.yaml").read_text()
+    for key, meta in P.CATALOG.items():
+        if not meta.get("local_hook_id"):
+            continue
+        assert f"- id: {meta['local_hook_id']}" in config, f"{key} is not dogfooded"
+        for src, rel in meta["assets"]:
+            link = root / rel
+            assert link.is_symlink(), f"{rel} is not a symlink"
+            assert link.resolve() == (SKILL / "assets" / src).resolve(), rel

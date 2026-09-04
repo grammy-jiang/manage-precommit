@@ -36,7 +36,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, NoReturn
+from collections.abc import Sequence
+from typing import Any, NamedTuple, NoReturn
 from urllib.parse import unquote, urlsplit
 
 import config as cfgmod
@@ -112,29 +113,64 @@ CATALOG: dict[str, dict[str, Any]] = {
         # not given a file it matches -- unlike hygiene's hooks, which match
         # anything and are legitimately quiet in a repo with none of that type.
         "file_scoped": True,
+        # identify's tags every file this entry is for carries -- a `.md` is
+        # `file`, `text` and `markdown` -- so a type filter no such file can
+        # pass is judged. See types_admit. `text` comes from identify's
+        # extension table, not from the bytes: a file whose extension names its
+        # encoding is not sniffed (`md` is not in EXTENSIONS_NEED_BINARY_CHECK),
+        # so a NUL byte in README.md leaves it `text`.
+        "target_tags": ("file", "text", "markdown"),
         "desc": "Markdown linter (config: .markdownlint.yaml)",
+    },
+    "mermaid-parse": {
+        "fragment": "mermaid-parse.yaml",
+        "rev_repo": None,
+        # Placeholder -> npm package, one live lookup each. Two pins for one
+        # entry: Mermaid's own parser is the check, and LinkeDOM is the DOM it
+        # needs to run outside a browser. The placeholders are distinct so a
+        # shared token can never fill a fragment with the wrong package's
+        # version.
+        "npm": {"__NPM_MERMAID__": "mermaid", "__NPM_LINKEDOM__": "linkedom"},
+        # No rev_repo, so presence is decided by hook id -- see `mermaid`.
+        "local_hook_id": "mermaid-parse",
+        "assets": [("parse-mermaid.mjs", "scripts/parse-mermaid.mjs")],
+        "executes_assets": True,
+        "file_scoped": True,
+        # The two mermaid entries check the same fences. The scan recommends
+        # this one, because it needs no browser; `mermaid` renders and catches
+        # what parsing alone cannot. A config carrying either is not offered
+        # the other (see cmd_recommend).
+        "alternatives": ("mermaid",),
+        "target_tags": ("file", "text", "markdown"),
+        "desc": "Mermaid syntax check with mermaid.parse(), no browser (local hook; needs node)",
     },
     "mermaid": {
         "fragment": "mermaid.yaml",
         "rev_repo": None,
-        "npm": "@mermaid-js/mermaid-cli",
-        # The one catalog entry with no rev_repo, so presence is decided by hook
-        # id. Named here rather than spelled out at each use: three separate
-        # literals meant renaming it in the template would leave present_keys
-        # re-offering mermaid forever and verify_written failing every
-        # successful write.
+        "npm": {"__NPM__": "@mermaid-js/mermaid-cli"},
+        # No rev_repo, so presence is decided by hook id. Named here rather than
+        # spelled out at each use: three separate literals meant renaming it in
+        # the template would leave present_keys re-offering mermaid forever and
+        # verify_written failing every successful write.
         "local_hook_id": "mermaid-lint",
         "assets": [("lint-mermaid.mjs", "scripts/lint-mermaid.mjs")],
         # The fragment hardcodes `entry: node scripts/lint-mermaid.mjs`, so this
         # asset is not data the hook reads -- it is the program the hook runs.
         "executes_assets": True,
         "file_scoped": True,
-        "desc": "Mermaid diagram validator (local hook; needs node + a browser)",
+        "alternatives": ("mermaid-parse",),
+        "target_tags": ("file", "text", "markdown"),
+        "desc": "Mermaid diagram validator, rendered (local hook; needs node + a browser)",
     },
     "gitleaks": {
         "fragment": "gitleaks.yaml",
         "rev_repo": "https://github.com/gitleaks/gitleaks",
         "assets": [],
+        # Upstream's hook definition sets `pass_filenames: false`: it scans the
+        # staged diff and never reads the file list. That is what makes
+        # `always_run: true` on it coverage, where on a hook that consumes
+        # filenames it is a run over none.
+        "pass_filenames": False,
         "desc": "secret scanner",
     },
 }
@@ -166,6 +202,11 @@ git = make_git(die)
 
 # -- versions ----------------------------------------------------------------
 VER_RE = re.compile(r"^v?\d+(?:\.\d+)*$")
+# Any `__NAME__` token a fragment may still carry after substitution. Checked by
+# shape rather than by listing `__REV__` and `__NPM__`: the mermaid-parse
+# fragment pins two packages under two names, and a literal check for the two
+# spellings it knew would have let a third through unfilled.
+PLACEHOLDER_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
 
 
 def version_key(tag: str) -> list[int]:
@@ -968,25 +1009,90 @@ SKIP_DIRS = frozenset(
     }
 )
 MAX_SCAN_DEPTH = 3
+# Version-control metadata: never a hook's target, so pruning it says nothing
+# about completeness. Every other SKIP_DIRS entry may hold tracked files.
+VCS_DIRS = frozenset({".git", ".hg", ".svn"})
 MAX_SCAN_FILES = 4000
 MAX_MERMAID_PROBES = 200
 MAX_PROBE_BYTES = 200_000  # a probe is a look for one fence, not a file read
 MERMAID_FENCE = re.compile(r"^\s*(?:```+|~~~+)\s*mermaid\b", re.MULTILINE)
 
 
-def walk_repo(directory: str) -> list[str]:
+class Listing(NamedTuple):
+    """Paths a scope is judged against, and whether they are all of them.
+
+    A recommendation input can be a sample; a verdict that a hook's scope admits
+    no file cannot. `hook_targets` therefore prefers git's own listing -- the
+    tracked files plus the untracked ones it does not ignore -- and falls back
+    to `walk_repo` outside a work tree, whose `complete` is False when its depth
+    or count bound cut the walk short, or when it pruned a directory that is
+    not version-control metadata: a plain directory holding `vendor/a.md`
+    beside a hook scoped to `^vendor/` is not one where that hook is dead.
+
+    `bounded` is the narrower fact: the walk was cut short by MAX_SCAN_DEPTH or
+    MAX_SCAN_FILES, so files that may be tracked went unseen for size alone.
+    The fence probe taints its own completeness on that only. SKIP_DIRS are the
+    scan's stated policy -- a fence in a pruned tree triggers no recommendation
+    in the first place -- while a size cap is a sample, and a sample stands in
+    for nothing.
+    """
+
+    paths: list[str]
+    complete: bool
+    bounded: bool = False
+
+
+# One regex search per path per filter is the cost of a scope verdict, and a
+# monorepo's tracked-file listing is the one input that could turn it into a
+# wait. Past this, nothing is claimed.
+MAX_SCOPE_PATHS = 20000
+
+
+def hook_targets(directory: str) -> Listing:
+    """The files pre-commit could be handed, and whether that is all of them.
+
+    `git ls-files --cached --others --exclude-standard`: the tracked files,
+    which is what `pre-commit run --all-files` iterates, plus the untracked
+    ones git does not ignore, which is what the next `git add` turns into
+    hook targets -- and what the scan itself just walked, so the `doc.md` that
+    got `mermaid-parse` recommended is in the listing its alternative is judged
+    against. It carries no depth bound, so a hook scoped four directories down
+    is judged against the files that are really there; it includes a tracked
+    `vendor/` that walk_repo skips on purpose, and leaves out the ignored
+    `node_modules/` that walk_repo skips for the same reason. Outside a work
+    tree the bounded walk stands in, with its own account of completeness.
+    Symlinks and submodule entries ride along; pre-commit lists them too.
+    """
+    if is_work_tree(git, directory):
+        rc, out, _ = git(
+            directory, "ls-files", "-z", "--cached", "--others", "--exclude-standard", strip=False
+        )
+        if rc == 0:
+            paths = [p for p in out.split("\0") if p]
+            return Listing(paths[:MAX_SCOPE_PATHS], len(paths) <= MAX_SCOPE_PATHS)
+    return walk_repo(directory)
+
+
+def walk_repo(directory: str) -> Listing:
     """Repo-relative paths, depth- and count-bounded, in a stable order."""
     found: list[str] = []
+    complete = True
+    bounded = False
     root_depth = directory.rstrip(os.sep).count(os.sep)
     for base, dirs, files in os.walk(directory):
+        if any(d in SKIP_DIRS and d not in VCS_DIRS for d in dirs):
+            complete = False  # left out on purpose, and may still hold hook targets
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         if base.count(os.sep) - root_depth >= MAX_SCAN_DEPTH:
+            if dirs:
+                complete = False
+                bounded = True
             dirs[:] = []
         for name in sorted(files):
             found.append(os.path.relpath(os.path.join(base, name), directory))
             if len(found) >= MAX_SCAN_FILES:
-                return found
-    return found
+                return Listing(found, False, True)
+    return Listing(found, complete, bounded)
 
 
 def prerequisites() -> dict[str, str]:
@@ -1001,21 +1107,45 @@ def prerequisites() -> dict[str, str]:
     two executables are on PATH. Whether the version pin can reach the registry
     is settled in Step 3 and nowhere else. SKILL.md branches on this string
     literally, so it is pinned by a test rather than by intent.
+
+    One row per entry that pins an npm package, keyed the way SKILL.md reads it
+    -- `prerequisites.<key>` for whichever entry is being offered -- rather than
+    one row named after the tool the entries share.
     """
     missing = sorted(tool for tool in ("npm", "node") if shutil.which(tool) is None)
-    return {"mermaid": "missing: " + ", ".join(missing) if missing else "binaries present"}
+    status = "missing: " + ", ".join(missing) if missing else "binaries present"
+    return {key: status for key, meta in CATALOG.items() if meta.get("npm")}
 
 
-def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], list[str]]:
+class Seen(NamedTuple):
+    """The files behind a recommendation, and whether the look at them was complete."""
+
+    paths: list[str]
+    complete: bool  # False when the probe's own cap cut the look short
+
+
+def detect_markers(
+    directory: str,
+) -> tuple[list[Recommendation], list[str], list[str], dict[str, Seen]]:
     """Which catalog entries the repo's contents call for, and the file that says so.
 
     The `reason` is always a path that was actually seen, never a category. A
     recommendation the user cannot check is one they have to take on faith.
     """
-    paths = walk_repo(directory)
+    walked = walk_repo(directory)
+    paths = walked.paths
     markers: list[str] = []
     trigger_paths: list[str] = []
     recs: list[Recommendation] = []
+    # The files behind each recommendation as git names them. `reason` is the
+    # first of them cleaned for display, and `clean` strips whitespace -- so a
+    # filename with a leading space would be tested against a name pre-commit
+    # never sees. Coverage is judged on this copy, and on every file in it: a
+    # renderer scoped to `^a/` covers `a/covered.md` and not `z/uncovered.md`,
+    # and both carry a fence. When the probe's cap cut the look short, the list
+    # is a sample, and `complete` says so -- a sample all inside `^a/` proves
+    # nothing about the file the cap left unread.
+    raw_paths: dict[str, Seen] = {}
 
     markdown = [p for p in paths if p.lower().endswith((".md", ".markdown"))]
     # The FIRST one that is a real regular file, not simply the first one. This
@@ -1026,11 +1156,22 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
     # probe below already refuses to READ through a symlink; naming one as the
     # target was the same threat with the guard missing.
     safe_markdown = [p for p in markdown if not os.path.islink(os.path.join(directory, p))]
+    # Complete only if every Markdown file was looked at: the walk not cut short
+    # by its size bounds, and the list not cut short by the probe's cap.
+    complete = not walked.bounded and len(markdown) <= MAX_MERMAID_PROBES
     if safe_markdown:
         recs.append({"name": "markdownlint", "reason": clean(safe_markdown[0])})
+        # Every Markdown file, for the scope judgement, not the first alone: a
+        # linter scoped to `^a/` reaches `a/covered.md` and never sees
+        # `z/uncovered.md`, and judged on the first it read as reaching all.
+        raw_paths["markdownlint"] = Seen(safe_markdown[:MAX_MERMAID_PROBES], complete)
         markers.append(f"markdown ({clean(safe_markdown[0])})")
         trigger_paths.append(safe_markdown[0])
     if markdown:
+        fenced: list[str] = []
+        # The fence probe's own account: complete as above, and no candidate
+        # skipped for being too large or unreadable.
+        fence_complete = complete
         for rel in markdown[:MAX_MERMAID_PROBES]:
             # Through the same guarded reader as everything else. walk_repo
             # lists symlinks (git tracks them as ordinary blobs), so a tracked
@@ -1038,22 +1179,36 @@ def detect_markers(directory: str) -> tuple[list[Recommendation], list[str], lis
             # during --recommend -- the first, unconfirmed step -- and a named
             # pipe at a .md path would block forever. SymlinkRefused,
             # NotARegularFile and TooLarge all subclass OSError, so an
-            # unreadable candidate is skipped exactly as before.
+            # unreadable candidate is skipped exactly as before -- and counted:
+            # a file this probe could not read may hold the fence a scoped
+            # hook does not reach, so the look is not complete.
             try:
                 raw = read_bytes_nofollow(os.path.join(directory, rel), MAX_PROBE_BYTES)
             except OSError:
+                fence_complete = False
                 continue
             text = raw.decode("utf-8", "replace")
-            if MERMAID_FENCE.search(text):
-                recs.append({"name": "mermaid", "reason": clean(rel)})
+            if not MERMAID_FENCE.search(text):
+                continue
+            # Every file with a fence, for the coverage judgement; the marker,
+            # the trigger path and the reason name the first, as they always
+            # have. The probe stays bounded by MAX_MERMAID_PROBES either way.
+            if not fenced:
+                # The syntax check, not the renderer: a pre-commit hook is a
+                # syntax check first, and this one needs no browser. `mermaid`
+                # stays in the catalog for render-level coverage, asked for by
+                # name; cmd_recommend offers neither while the other is present.
+                recs.append({"name": "mermaid-parse", "reason": clean(rel)})
                 markers.append(f"mermaid fence ({clean(rel)})")
                 trigger_paths.append(rel)
-                break
+            fenced.append(rel)
+        if fenced:
+            raw_paths["mermaid-parse"] = Seen(fenced, fence_complete)
 
     # Offered for every repo: a secret scan is not conditional on what the tree
     # happens to contain today.
     recs.append({"name": "gitleaks", "reason": "any repo -- secret scan"})
-    return recs, markers, trigger_paths
+    return recs, markers, trigger_paths, raw_paths
 
 
 # -- config helpers ----------------------------------------------------------
@@ -1104,42 +1259,328 @@ def parse_stages(raw: str) -> set[str]:
 
     Membership, not a substring test: "commit" is a substring of "commit-msg",
     so a hook restricted to commit-msg -- which never scans content on an
-    ordinary commit -- read as running on every one.
+    ordinary commit -- read as running on every one. Each item is read as the
+    scalar it is, so a quoted or escaped spelling of a stage is that stage.
     """
-    return {part.strip().strip("'\"") for part in raw.strip("[]").split(",") if part.strip()}
+    return set(cfgmod.flow_items(raw))
 
 
-def looks_disabled(hook: cfgmod.Hook) -> str | None:
+# One `files:`/`exclude:` filter a hook sits behind: where it is declared, the
+# pattern, and whether matching it drops a path rather than admits it.
+Filter = tuple[str, str, bool]
+
+# A YAML block-scalar indicator -- `|`, `>-`, `|+2` -- standing where a pattern
+# should be. The scanner reads a key's inline value only, so a filter written as
+# a block scalar (the usual way to write a long `(?x)` regex) arrives here as its
+# indicator alone, and `|` compiles to an alternation of two empty patterns that
+# matches everything.
+BLOCK_SCALAR_RE = re.compile(r"[|>][0-9+-]*")
+
+
+class TopLevel(NamedTuple):
+    """The config-wide settings every hook sits behind."""
+
+    filters: list[Filter]  # the config's own `files:` and `exclude:`
+    default_stages: str  # `default_stages:` in the flow shape, or "" when unset
+
+
+def top_level(cfg: cfgmod.Config) -> TopLevel:
+    """What the config applies to every hook that does not say otherwise.
+
+    The filters are named for where they live, so a verdict can say "the
+    config's exclude" rather than leave the reader looking for a key the hook
+    does not carry. `default_stages` is what pre-commit applies to a hook that
+    omits its own `stages:` -- a `default_stages: [manual]` parks every such
+    hook off the commit path exactly as `stages: [manual]` on each would.
+    """
+    filters: list[Filter] = []
+    for key, excluding in (("files", False), ("exclude", True)):
+        value = cfgmod.top_level_scalar(cfg, key)
+        # `is not None`, not truthiness: `exclude: ''` is a pattern, and the
+        # empty pattern matches every path -- pre-commit then hands ordinary
+        # hooks no files at all. Dropped as "unset", it read as no filter.
+        if value is not None:
+            filters.append((f"the config's {key}", value, excluding))
+    return TopLevel(filters, cfgmod.top_level_sequence(cfg, "default_stages") or "")
+
+
+def intended_targets(key: str) -> re.Pattern[str] | None:
+    """The files a catalog entry is FOR, as its own fragment scopes them.
+
+    A mermaid hook behind `files: '\\.py$'` admits every Python file in a mixed
+    repository and reads as live, while no Markdown file can reach it -- the
+    diagram the scan found is unchecked, and the alternative that would check
+    it is not offered. So a scope is judged among the files the entry exists
+    to check: the fragment's own `files:`, read off the template rather than
+    written down a second time. None for an entry that is for every file.
+    """
+    meta = CATALOG[key]
+    text = read_bytes_or_die(os.path.join(TEMPLATES, meta["fragment"]), die).decode("utf-8")
+    for placeholder in meta.get("npm", {}):
+        text = text.replace(placeholder, "0.0.0")
+    text = text.replace("__REV__", "v0.0.0")
+    try:
+        parsed = cfgmod.scan("repos:\n" + text)
+    except cfgmod.ConfigRefused as exc:  # pragma: no cover - our own templates
+        die(f"catalog fragment {meta['fragment']} is malformed: {exc}")
+    pattern = next((h.settings.get("files") for e in parsed.repos for h in e.hooks), None)
+    return re.compile(pattern) if pattern else None
+
+
+def scope_admits_nothing(
+    filters: Sequence[Filter], listing: Listing, intended: re.Pattern[str] | None = None
+) -> str | None:
+    """Why a hook's scope lets no file through, or None when it lets some.
+
+    A scope is not a switch. Our own mermaid fragments carry
+    `files: '(?i)\\.(md|markdown)$'` and are as live as a hook gets, yet the mere
+    presence of the key used to read as "will not run" -- so every repository
+    that selected `mermaid` was told on the next scan that its check was dead.
+    What makes a scope a switch is what it does to THIS repository's files, and
+    every filter a hook sits behind is one scope: pre-commit runs a hook on a
+    path that matches the config's `files:` and the hook's, and matches neither
+    `exclude:`, all by `re.search` on the repo-relative path. Judged apart,
+    `files: '\\.md$'` beside `exclude: '\\.md$'` read as live -- each half let
+    something through, and together they let nothing -- and a config-wide
+    `files: '\\.py$'` kept every Markdown hook dead while each looked live on
+    its own line. So the question is asked of the same bounded listing the scan
+    walked, all filters at once, and the answer names the one that did it when
+    one alone did. A pattern that will not compile stops pre-commit loading the
+    config at all, which is the same answer arrived at earlier. Nothing is
+    claimed when there are no paths to ask -- nor from a listing that is not
+    all of them, because "nothing in the sample passes" is not "nothing
+    passes"; see `hook_targets` for where the listing comes from.
+    """
+    compiled: list[tuple[str, str, bool, re.Pattern[str]]] = []
+    for label, pattern, excluding in filters:
+        if BLOCK_SCALAR_RE.fullmatch(pattern):
+            # The pattern is on the lines below the key, which the scanner does
+            # not read. Judging the indicator instead would call a `files: |`
+            # hook live whatever its pattern says and an `exclude: |` hook dead
+            # whatever its pattern says; a pattern not read is a verdict not made.
+            return None
+        try:
+            compiled.append((label, pattern, excluding, re.compile(pattern)))
+        except re.error as exc:
+            return f"{label}: {pattern} (not a valid pattern: {clean(str(exc))})"
+    if not compiled or not listing.complete:
+        return None
+    # Among the files the entry is for, when it is for some in particular: a
+    # Markdown check that admits only Python files is not live for anything it
+    # exists to check. No such files here means nothing to judge against.
+    paths = [p for p in listing.paths if intended is None or intended.search(p)]
+    if not paths:
+        return None
+    what = "file here" if intended is None else "of the files this entry is for"
+
+    def admitted(path: str) -> bool:
+        return all(bool(rx.search(path)) != excluding for _, _, excluding, rx in compiled)
+
+    if any(admitted(p) for p in paths):
+        return None
+    shown = {pattern: pattern or "''" for _, pattern, _, _ in compiled}
+    for label, pattern, excluding, rx in compiled:
+        hits = sum(1 for p in paths if rx.search(p))
+        if not excluding and hits == 0:
+            return (
+                f"{label}: {shown[pattern]} (matches no{'' if intended is None else 'ne'} {what})"
+            )
+        if excluding and hits == len(paths):
+            return f"{label}: {shown[pattern]} (matches every {what.removeprefix('of the ')})"
+    named = " with ".join(f"{label}: {shown[pattern]}" for label, pattern, _, _ in compiled)
+    return f"{named} (together they leave no{'' if intended is None else 'ne'} {what})"
+
+
+def _impossible_tags(certain: frozenset[str]) -> frozenset[str]:
+    """identify's tags no regular file carrying `certain` can carry as well.
+
+    A regular file is never a directory, a symlink or a socket, and a text file
+    is never `binary`. Everything else -- `executable`, `plain-text` (which
+    identify gives a README by its name), `python` -- may or may not be there,
+    and is not this tool's to say.
+    """
+    out = {"directory", "symlink", "socket"}
+    if "text" in certain:
+        out.add("binary")
+    return frozenset(out)
+
+
+def types_admit(settings: dict[str, str], certain: frozenset[str]) -> tuple[bool | None, str]:
+    """Whether the hook's type filters let a file carrying `certain` through.
+
+    (True, "") when they must, (False, why) when they cannot, (None, "") when
+    identify would have to be asked. pre-commit applies `types` (every listed
+    tag required), `types_or` (any) and `exclude_types` (any drops the file) on
+    top of the regex filters, by identify's tags -- and identify tags a file by
+    its extension, by well-known names (`README.md` is `plain-text` as well as
+    `markdown`), by its mode and by its contents: a database this tool does not
+    carry (no third-party runtime dependency). So a verdict rests only on tags
+    every such file certainly carries -- `file`, and for a Markdown file `text`
+    and `markdown` -- or on tags none can. `types: [python]` is neither:
+    nothing here says a file named `SConstruct.md` is not `python` too, so it
+    is not judged, and the caller says so rather than guessing.
+    """
+    impossible = _impossible_tags(certain)
+    verdict: bool | None = True
+    if "types" in settings:
+        listed = set(cfgmod.flow_items(settings["types"]))
+        clash = sorted(listed & impossible)
+        if clash:
+            return (
+                False,
+                f"types: {settings['types']} (no file this entry is for can be `{clash[0]}`)",
+            )
+        if not listed <= certain:
+            verdict = None
+    if "types_or" in settings:
+        listed = set(cfgmod.flow_items(settings["types_or"]))
+        if listed and not listed & certain:
+            if listed <= impossible:
+                shown = settings["types_or"]
+                return False, f"types_or: {shown} (no file this entry is for can be any of these)"
+            verdict = None
+    if "exclude_types" in settings:
+        listed = set(cfgmod.flow_items(settings["exclude_types"]))
+        hit = sorted(listed & certain)
+        if hit:
+            shown = settings["exclude_types"]
+            return False, f"exclude_types: {shown} (every file this entry is for is `{hit[0]}`)"
+        if listed - impossible:
+            verdict = None
+    return verdict, ""
+
+
+def looks_disabled(
+    hook: cfgmod.Hook,
+    listing: Listing,
+    top: TopLevel,
+    *,
+    intended: re.Pattern[str] | None = None,
+    consumes_files: bool = True,
+    tags: tuple[str, ...] | None = None,
+) -> str | None:
     """What would stop this hook running, or None.
 
     "Already present" was decided on the hook id alone, so an entry could carry
     the right id and never fire: `stages: [manual]` keeps it off the commit
-    path, and a hook-level `files:`/`exclude:` can match nothing. The tool then
-    counted the catalog entry as covered, stopped offering it, and the user was
-    told a secret scan was in force that was not.
+    path, and a hook-level `files:`/`exclude:` can let nothing through. The tool
+    then counted the catalog entry as covered, stopped offering it, and the user
+    was told a secret scan was in force that was not.
     """
     settings = hook.settings
-    stages = settings.get("stages", "")
+    stages, origin = settings.get("stages", ""), "stages"
+    if not stages and top.default_stages:
+        stages, origin = top.default_stages, "default_stages"
     if stages and not (parse_stages(stages) & RUNS_ON_COMMIT):
-        return f"stages: {stages}"
-    # always_run: true makes the hook fire whatever files: and exclude: say,
-    # which is exactly why config.py captures it. Reading stages first is
-    # deliberate -- always_run does not put a hook back on a stage it was
-    # excluded from.
-    if settings.get("always_run", "").lower() in ("true", "yes", "on"):
+        return f"{origin}: {stages}"
+    # Whether the PROGRAM reads its file list is the catalog's knowledge --
+    # both mermaid scripts do, and exit 0 on an empty argv; gitleaks scans the
+    # staged diff and never looks. Two consequences. `pass_filenames: false` on
+    # a hook whose program reads the list hands it none: a run over nothing,
+    # whatever the scope says. And `always_run: true` -- which makes the hook
+    # fire whatever files: and exclude: say, and is exactly why config.py
+    # captures it -- is coverage only for a program that ignores the list;
+    # for one that reads it, the scope still decides what it is handed.
+    # Reading stages first is deliberate: always_run does not put a hook back
+    # on a stage it was excluded from.
+    if consumes_files and settings.get("pass_filenames", "").lower() in ("false", "no", "off"):
+        return "pass_filenames: false (this hook reads its file list, and is handed none)"
+    if not consumes_files and settings.get("always_run", "").lower() in ("true", "yes", "on"):
         return None
-    if settings.get("exclude"):
-        return f"exclude: {settings['exclude']}"
-    if settings.get("files"):
-        return f"files: {settings['files']}"
-    return None
+    # A type filter is applied on top of the regexes; one no file this entry is
+    # for can pass switches the hook off for every such file, whatever `files:`
+    # admits. Only a certain verdict is a verdict (see types_admit); `file` is
+    # what every regular file carries, and all an entry for every file has.
+    admitted, why = types_admit(settings, frozenset(tags or ("file",)))
+    if admitted is False:
+        return why
+    own: list[Filter] = [
+        (key, settings[key], excluding)
+        for key, excluding in (("files", False), ("exclude", True))
+        if key in settings  # present, even as '': the empty pattern matches everything
+    ]
+    return scope_admits_nothing([*top.filters, *own], listing, intended)
 
 
-def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
+def reaches(cfg: cfgmod.Config, key: str, path: str, listing: Listing) -> bool | None:
+    """Whether some live declaration of catalog entry `key` runs on `path`.
+
+    True when one certainly does, False when none can, None when that cannot
+    be told: a filter the scanner did not read (a block-scalar indicator, a
+    pattern that will not compile), or a type filter only identify could judge
+    (see types_admit). "Present and live" is not "checks the file the scan
+    found": a mermaid hook scoped to `^docs/` is live for `docs/a.md` and never
+    sees the `README.md` whose fence got the alternative recommended. So before
+    a live alternative is allowed to stand in for a recommendation it has to
+    admit that very file for certain, and before a present entry is reported
+    as never reaching it, that has to be certain too. Being told the check is
+    already there, by a hook whose scope nobody read, is the false-coverage
+    report this whole feature exists to prevent; being told the scope shuts a
+    file out, by a pattern nobody read, would be its mirror.
+    """
+    meta = CATALOG[key]
+    url = meta.get("rev_repo") or "local"
+    wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
+    top = top_level(cfg)
+    intended = intended_targets(key)
+    consumes_files = bool(meta.get("pass_filenames", True))
+    unknown = False
+    for entry in cfg.repos:
+        if entry.url != url:
+            continue
+        for hook in entry.hooks:
+            if wanted_id is not None and hook.id != wanted_id:
+                continue
+            if looks_disabled(
+                hook,
+                listing,
+                top,
+                intended=intended,
+                consumes_files=consumes_files,
+                tags=meta.get("target_tags"),
+            ):
+                continue
+            filters = [
+                *top.filters,
+                *(
+                    (k, hook.settings[k], excluding)
+                    for k, excluding in (("files", False), ("exclude", True))
+                    if k in hook.settings
+                ),
+            ]
+            verdicts = [_admits(pattern, excluding, path) for _, pattern, excluding in filters]
+            if any(v is False for v in verdicts):
+                continue  # shut out by a pattern that was read
+            typed, _ = types_admit(hook.settings, frozenset(meta.get("target_tags", ("file",))))
+            if typed is False:
+                continue
+            if typed is True and all(v is True for v in verdicts):
+                return True
+            unknown = True
+    return None if unknown else False
+
+
+def _admits(pattern: str, excluding: bool, path: str) -> bool | None:
+    """Whether `pattern` lets `path` through; None when that cannot be read.
+
+    A block-scalar indicator was never read, and a pattern that will not
+    compile (which looks_disabled reports on its own) decides nothing here:
+    neither is evidence that the file gets through, nor that it does not.
+    """
+    if BLOCK_SCALAR_RE.fullmatch(pattern):
+        return None
+    try:
+        hit = bool(re.search(pattern, path))
+    except re.error:
+        return None
+    return hit != excluding
+
+
+def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     """Present hooks for `key` carrying something that stops them running.
 
-    For a catalog entry identified by hook id rather than repo URL -- mermaid is
-    the only one -- the id must be matched too. `repo: local` is a bucket
+    For a catalog entry identified by hook id rather than repo URL -- the
+    mermaid entries -- the id must be matched too. `repo: local` is a bucket
     anybody's hooks can sit in, so matching the URL alone attributed every
     disabled local hook in the file to mermaid. That is the mirror image of the
     false-coverage bug this function exists to catch: instead of calling a dead
@@ -1148,16 +1589,35 @@ def disabled_hooks(cfg: cfgmod.Config, key: str) -> list[str]:
     meta = CATALOG[key]
     url = meta.get("rev_repo") or "local"
     wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
-    out = []
+    top = top_level(cfg)
+    intended = intended_targets(key)
+    consumes_files = bool(meta.get("pass_filenames", True))
+    # Per hook id, every declaration's verdict. An id declared twice -- one
+    # parked on `stages: [manual]`, one ordinary -- is covered by the live one,
+    # and reporting the dead one would offer the alternative beside working
+    # coverage. Ids with no live declaration are reported, each dead one with
+    # its reason, so a hygiene entry with one hook parked still says which.
+    verdicts: dict[str, list[str | None]] = {}
     for entry in cfg.repos:
         if entry.url != url:
             continue
         for hook in entry.hooks:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
-            why = looks_disabled(hook)
-            if why:
-                out.append(f"{clean(hook.id)} ({clean(why)})")
+            why = looks_disabled(
+                hook,
+                listing,
+                top,
+                intended=intended,
+                consumes_files=consumes_files,
+                tags=meta.get("target_tags"),
+            )
+            verdicts.setdefault(hook.id, []).append(why)
+    out: list[str] = []
+    for hook_id, whys in verdicts.items():
+        if any(why is None for why in whys):
+            continue
+        out.extend(f"{clean(hook_id)} ({clean(why)})" for why in whys if why)
     return out
 
 
@@ -1187,7 +1647,7 @@ def present_keys(cfg: cfgmod.Config | None) -> list[str]:
 
 
 def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
-    """The catalog fragment's text, its parsed entry, and the version pinned.
+    """The catalog fragment's text, its parsed entry, and the version(s) pinned.
 
     The fragment is *text*, and stays text all the way into the file: the
     placeholders are substituted and the block is inserted verbatim, so the
@@ -1198,14 +1658,21 @@ def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
     meta = CATALOG[key]
     path = os.path.join(TEMPLATES, meta["fragment"])
     text = read_bytes_or_die(path, die).decode("utf-8")
-    version: str | None = None
+    pinned: list[str] = []
     if meta.get("rev_repo"):
         version = latest_tag(meta["rev_repo"])
         text = text.replace("__REV__", version)
-    if meta.get("npm"):
-        version = npm_latest(meta["npm"])
-        text = text.replace("__NPM__", version)
-    if "__REV__" in text or "__NPM__" in text:
+        pinned.append(version)
+    # Placeholder -> package, one live lookup each. An entry that pins several
+    # packages records them as `name@version` pairs, since a bare version would
+    # not say which package it belongs to; an entry that pins one keeps the bare
+    # version the summary has always shown.
+    npm: dict[str, str] = meta.get("npm", {})
+    for placeholder, package in npm.items():
+        version = npm_latest(package)
+        text = text.replace(placeholder, version)
+        pinned.append(version if len(npm) == 1 else f"{package}@{version}")
+    if PLACEHOLDER_RE.search(text):
         die(f"catalog fragment {meta['fragment']} still has an unfilled placeholder")
     try:
         parsed = cfgmod.scan("repos:\n" + text)
@@ -1213,7 +1680,7 @@ def load_fragment(key: str) -> tuple[str, cfgmod.RepoEntry, str | None]:
         die(f"catalog fragment {meta['fragment']} is malformed: {exc}")
     if len(parsed.repos) != 1:
         die(f"catalog fragment {meta['fragment']} must declare exactly one repo entry")
-    return text, parsed.repos[0], version
+    return text, parsed.repos[0], " ".join(pinned) or None
 
 
 def fragment_hook_blocks(text: str, entry: cfgmod.RepoEntry, wanted: set[str]) -> list[list[str]]:
@@ -1300,13 +1767,15 @@ def refuse_if_dirty(directory: str, paths: list[str]) -> None:
 
 
 def plan(
-    cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool
+    cfg: cfgmod.Config, keys: list[str], *, pre_existing: bool, listing: Listing
 ) -> tuple[list[cfgmod.Insertion], list[tuple[str, str]], dict[str, str], dict[str, set[str]]]:
     """Work out every insertion, without touching the file.
 
     `pre_existing` says whether the config came from the user or from our own
     skeleton, which is the difference between "you already had an `exclude`, so
     .gitignore is not covered" and a note about a line we just wrote ourselves.
+    `listing` is the repository's file listing, for judging whether a present
+    entry's `files:`/`exclude:` scope lets anything through.
     """
     insertions: list[cfgmod.Insertion] = []
     # Per key, the hook ids this run intends to put in the file. verify_written
@@ -1382,7 +1851,7 @@ def plan(
         have_ids = cfg.hook_ids(entry.url)
         missing = [h.id for h in entry.hooks if h.id not in have_ids]
         if not missing:
-            disabled = disabled_hooks(cfg, key)
+            disabled = disabled_hooks(cfg, key, listing)
             note = (
                 f" -- but {', '.join(disabled)}: present, and looks like it will NOT run on commit"
                 if disabled
@@ -1447,7 +1916,7 @@ def refuse_path_escaping_repo(directory: str, rel: str) -> str:
     """Resolve an asset destination, refusing anything that leaves the repo.
 
     This is the one write that does not go to a fixed filename in the repo root:
-    the mermaid asset lands at ``scripts/lint-mermaid.mjs``. `os.makedirs` and
+    the mermaid assets land under ``scripts/``. `os.makedirs` and
     `shutil.copyfile` both FOLLOW a symlink -- at the final component and at
     every intermediate one -- so a repo that ships a ``scripts`` symlink
     pointing anywhere writable turns this into an arbitrary file write.
@@ -1568,8 +2037,8 @@ def verify_written(
     for key in keys:
         meta = CATALOG[key]
         url = meta.get("rev_repo")
-        # mermaid is the one entry with no rev_repo: it lives under `repo:
-        # local`, so its ids come from the local bucket rather than a URL.
+        # The mermaid entries have no rev_repo: they live under `repo: local`,
+        # so their ids come from the local bucket rather than a URL.
         present = (after.hook_ids(url) if url in urls else set()) if url else after.local_hook_ids()
         missing = sorted(expected_ids.get(key, set()) - present)
         if missing:
@@ -1622,7 +2091,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     baseline, rewrote_empty = normalise_empty_repos(cfg, list(cfg.lines))
     # Once: plan() fetches every pinned version over the network.
-    planned, report, versions, intended = plan(cfg, keys, pre_existing=existing is not None)
+    planned, report, versions, intended = plan(
+        cfg, keys, pre_existing=existing is not None, listing=hook_targets(directory)
+    )
     insertions = merge_same_position(planned)
     result = cfgmod.apply_insertions(baseline, insertions)
     try:
@@ -1835,10 +2306,101 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     # An entry that is present but switched off is not coverage. Reported
     # separately so the agent can say so rather than the user being told a
     # catalog entry is already handled.
-    disabled = {k: disabled_hooks(cfg, k) for k in previous if cfg} if cfg else {}
+    listing = hook_targets(directory)
+    disabled = {k: disabled_hooks(cfg, k, listing) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
-    recs, markers, trigger_paths = detect_markers(directory)
-    recs = [r for r in recs if r["name"] not in previous]
+    recs, markers, trigger_paths, raw_paths = detect_markers(directory)
+    # A present entry the scan named, live, and yet not reaching the file it
+    # was named for: a `mermaid-parse` scoped to `^docs/` runs on `docs/a.md`
+    # and never sees the `README.md` whose fence the probe found. Selecting it
+    # again writes nothing -- same hook id -- so this is reported beside the
+    # dead entries, where SKILL.md already tells the agent to say the coverage
+    # is not what it appears to be, and where the live alternative is offered
+    # in its place. A capped probe still counts here: what it did see, it saw,
+    # and a fence the entry does not reach is a gap whether or not there are
+    # more files behind the cap. Completeness matters for CLAIMING coverage
+    # (see stood_in_for), not for reporting a gap already observed.
+    if cfg:
+        for key, seen in raw_paths.items():
+            if key not in previous or key in disabled:
+                continue
+            verdicts = {p: reaches(cfg, key, p, listing) for p in seen.paths}
+            unreached = [p for p, v in verdicts.items() if v is False]
+            unshown = [p for p, v in verdicts.items() if v is None]
+            hook_id = CATALOG[key].get("local_hook_id", key)
+            if unreached:
+                disabled[key] = [
+                    f"{clean(hook_id)} (scope does not reach {clean(unreached[0])}, "
+                    "where the scan found what this entry checks)"
+                ]
+            elif unshown:
+                # Not a verdict either way: a filter this tool did not read -- a
+                # block-scalar pattern, a type filter only identify could judge
+                # -- stands between the hook and the file. The coverage is not
+                # shown rather than absent, and SKILL.md words it that way.
+                disabled[key] = [
+                    f"{clean(hook_id)} (scope carries a filter this tool does not read; "
+                    f"whether it reaches {clean(unshown[0])} is not shown)"
+                ]
+            elif not seen.complete:
+                # The probe did not read every file this entry is for (its cap,
+                # or a walk cut short), and one it did not read may hold what
+                # the entry checks. A file the entry is for that its scope is
+                # not certain to reach is then coverage not shown -- a fence in
+                # `z.md` past the cap, behind a `files: ^a`, went unmentioned
+                # while every fence the probe did see was reached.
+                intended = intended_targets(key)
+                unread = next(
+                    (
+                        p
+                        for p in listing.paths
+                        if p not in verdicts
+                        and (intended is None or intended.search(p))
+                        and reaches(cfg, key, p, listing) is not True
+                    ),
+                    None,
+                )
+                if unread is not None:
+                    disabled[key] = [
+                        f"{clean(hook_id)} (the scan did not read every file this entry is "
+                        f"for; whether it reaches {clean(unread)} is not shown)"
+                    ]
+    # An entry the scan named that is present but switched off cannot be
+    # repaired by selecting it again -- same hook id, nothing written -- and
+    # the fence that got it named is still there. Its live alternative is
+    # offered in its place: `mermaid` for a dead `mermaid-parse`, the mirror
+    # of the filter below, which keeps `mermaid-parse` on offer beside a dead
+    # `mermaid`.
+    substitutes: list[Recommendation] = []
+    for r in recs:
+        if r["name"] not in disabled:
+            continue
+        for alt in CATALOG[r["name"]].get("alternatives", ()):
+            if alt not in previous:
+                substitutes.append({"name": alt, "reason": r["reason"]})
+                if r["name"] in raw_paths:
+                    raw_paths[alt] = raw_paths[r["name"]]
+    recs = [r for r in recs if r["name"] not in previous] + substitutes
+    # Nor an entry whose alternative is already there AND live: the two mermaid
+    # entries check the same fences, and offering the second beside a working
+    # first reads as a gap in coverage that does not exist. Beside a disabled
+    # one it IS the gap -- the alternative has its own hook id, so adding it is
+    # the one repair this run can make where re-selecting the dead entry cannot.
+    covering = set(previous) - set(disabled)
+
+    def stood_in_for(rec: Recommendation) -> bool:
+        # A live alternative stands in only if it would run on the file the
+        # recommendation names -- judged on the path as git names it, since
+        # `reason` is that path cleaned for display.
+        alternatives = set(CATALOG[rec["name"]].get("alternatives", ())) & covering
+        seen = raw_paths.get(rec["name"], Seen([rec["reason"]], True))
+        if not cfg or not seen.complete:
+            return False  # a capped look is a sample, and a sample stands in for nothing
+        return any(
+            all(reaches(cfg, alt, p, listing) is True for p in seen.paths) for alt in alternatives
+        )
+
+    recs = [r for r in recs if not stood_in_for(r)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
         r["name"] for r in recs if r["name"] not in ALWAYS_ON
     ]
@@ -2097,8 +2659,8 @@ def npm_cache_dir() -> str | None:
 def npm_cache_env(cfg: cfgmod.Config | None, scratch: str) -> dict[str, str] | None:
     """An environment giving `pre-commit` a usable npm cache, or None to inherit.
 
-    The mermaid entry is a `language: node` hook with `additional_dependencies`,
-    so `pre-commit` builds its environment by running `npm install` -- and
+    The mermaid entries are `language: node` hooks with `additional_dependencies`,
+    so `pre-commit` builds their environments by running `npm install` -- and
     pre-commit sets `npm_config_prefix` and unsets `npm_config_userconfig`, but
     never touches the cache. An unwritable cache path (`/root/.npm` in a sandbox
     with no writable HOME) therefore kills the hook install exactly the way it

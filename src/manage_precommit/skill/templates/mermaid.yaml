@@ -8,6 +8,6 @@
       description: Validate fenced mermaid code blocks with mermaid-cli
       entry: node scripts/lint-mermaid.mjs
       language: node
-      files: '\.(md|markdown)$'
+      files: '(?i)\.(md|markdown)$'
       additional_dependencies:
         - "@mermaid-js/mermaid-cli@__NPM__"

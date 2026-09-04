@@ -65,8 +65,37 @@ _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 
 # Hook-level keys that can stop a hook running in the ordinary flow. `stages`
 # can exclude pre-commit; `files`/`exclude` can match nothing; `always_run` is
-# recorded because its absence matters when `files` is restrictive.
-HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run")
+# recorded because its absence matters when `files` is restrictive, and
+# `pass_filenames` because `always_run` is coverage only for a hook that does
+# not consume the (possibly empty) file list it is handed.
+HOOK_GATING_KEYS = (
+    "stages",
+    "files",
+    "exclude",
+    "always_run",
+    "pass_filenames",
+    "types",
+    "types_or",
+    "exclude_types",
+)
+# The gating keys whose value pre-commit wants as text -- a regex. A plain
+# scalar YAML would read as anything else (`files: null`, `files: 123`) is
+# refused for these, since the file would not load; see _scalar.
+TEXT_GATING_KEYS = ("files", "exclude")
+# ... and the ones it wants as a list. `stages: pre-commit` or `types: text` is
+# a scalar where pre-commit's schema wants an array, and the file would not
+# load; read as a one-item list it judged a hook in a config that runs none.
+LIST_GATING_KEYS = ("stages", "types", "types_or", "exclude_types", "default_stages")
+# ... and the ones it wants as a boolean. Only a plain YAML boolean spelling
+# will do: `pass_filenames: "true"` is a string and `always_run: maybe` a word,
+# and pre-commit rejects both, so the file would not load.
+BOOL_GATING_KEYS = ("always_run", "pass_filenames")
+_YAML_BOOL = re.compile(
+    r"yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
+)
+# The top-level keys that gate every hook the same way, and whose values the
+# scan reads once so a refusal lands at scan time with its line.
+TOP_LEVEL_GATING_KEYS = ("files", "exclude", "default_stages")
 
 
 # Schemes a `repo:` may use. Everything else -- notably git's transport-helper
@@ -247,29 +276,243 @@ def _split_key(text: str) -> tuple[str, str] | None:
             # The trailing comment is not part of the value. Without this,
             # `repos: # note` yields "# note" rather than "", and the
             # block-sequence check below refuses a perfectly ordinary file.
-            return text[:i].strip(), _code_only(rest).strip()
+            # The value keeps a U+00A0 at its ends: YAML's white space is space
+            # and tab, and anything else there is content.
+            return text[:i].strip(), _inline_value(_code_only(rest))
         i += 1
     return None
 
 
-def _scalar(raw: str) -> str:
-    """The value of a scalar: quotes removed, trailing comment dropped."""
-    raw = raw.strip()
-    if not raw:
-        return ""
-    if raw[0] in "\"'":
+# The escapes YAML resolves inside a double-quoted scalar. `\\` is the one
+# that matters here: `files: "\\.md$"` is the regex `\.md$` to YAML and to
+# pre-commit, and reading the two backslashes as written compiled a regex for
+# a literal backslash instead -- calling a live hook dead. Single quotes have
+# no escapes at all, so they are left exactly as written. An escape outside
+# this table -- `files: "\.md$"`, a regex written as if the quotes were single
+# -- refuses the config: pre-commit's own loader stops at it ("found unknown
+# escape character"), so the file runs no hook, and reading it as the pattern
+# its author meant called a hook live in a config that loads nothing.
+_DQ_ESCAPES = {
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "\t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+_DQ_ESCAPE_RE = re.compile(r"\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)")
+
+
+def _unescape_double_quoted(inner: str) -> str:
+    def one(match: re.Match[str]) -> str:
+        code = match.group(1)
+        if code[0] in "xuU" and len(code) > 1:
+            try:
+                return chr(int(code[1:], 16))
+            except ValueError:  # `\U` past the last code point there is
+                raise ConfigRefused(
+                    f"a double-quoted value uses \\U{code[1:]}, which is past the last "
+                    "Unicode code point"
+                ) from None
+        if code in _DQ_ESCAPES:
+            return _DQ_ESCAPES[code]
+        # Not an escape YAML defines. It was left as written here, and that
+        # was a guess that read right: `"\.md$"` compiled as the regex meant,
+        # for a config pre-commit refuses to load at all.
+        raise ConfigRefused(
+            f"a double-quoted value has a backslash before {code!r}, which is not an "
+            "escape YAML defines"
+        )
+
+    return _DQ_ESCAPE_RE.sub(one, inner)
+
+
+def flow_items(raw: str, *, text: bool = False) -> list[str]:
+    """The items of a `[a, "b"]` flow sequence, each read as the scalar it is.
+
+    `parse_stages` used to strip quotes and nothing else, so a stage written as
+    `"pre\\u002dcommit"` -- valid YAML for `pre-commit` -- read as a stage no
+    hook runs on. Items are split on commas outside quotes; a comma inside a
+    quoted item stays. `text` is passed on to _scalar: every gating list is a
+    list of strings, and `[pre-commit, 123]` is one pre-commit rejects.
+    """
+    body = raw.strip(" \t")
+    if body.startswith("[") and body.endswith("]"):
+        body = body[1:-1]
+    items: list[str] = []
+    i = start = 0
+    while i < len(body):
+        ch = body[i]
+        if ch in "\"'":
+            end = _quote_end(body, i)
+            i = len(body) if end == -1 else end
+            continue
+        if ch == ",":
+            items.append(body[start:i])
+            start = i + 1
+        i += 1
+    items.append(body[start:])
+    # An empty entry is legal only where a trailing comma leaves one -- `[a, ]`
+    # -- and `[]` is the empty sequence. `[a,,b]` and `[, a]` stop YAML's
+    # loader, and dropped here they read as the shorter, valid list. Between
+    # items a line break -- even a blank line, which _continuation folds to a
+    # newline inside a scalar -- is white space, so it is trimmed with the rest.
+    if any(not item.strip(" \t\n") for item in items[:-1]):
+        raise ConfigRefused("an empty entry inside a flow sequence, which YAML does not allow")
+    out: list[str] = []
+    for item in items:
+        bare = item.strip(" \t\n")
+        if not bare:
+            continue
+        if bare[0] not in "\"'" and any(ch in bare for ch in "[]{}"):
+            # A flow indicator inside a plain flow item -- `[markdown, foo[bar]`
+            # -- stops YAML's loader; split on commas alone it read as the
+            # tags `markdown` and `foo[bar`.
+            raise ConfigRefused(
+                f"`{bare}` holds a flow indicator inside a plain item, which YAML does not allow"
+            )
+        if bare[0] in "|>":
+            # A block-scalar indicator has no place in a flow sequence --
+            # `[markdown, |]` stops the loader -- and was read as the tag `|`.
+            raise ConfigRefused(
+                f"`{bare}` starts with a block indicator inside a flow sequence, which YAML "
+                "does not allow"
+            )
+        out.append(_scalar(bare, text=text))
+    return out
+
+
+def _scalar(raw: str, *, text: bool = False, tags: tuple[str, ...] = ("!str",)) -> str:
+    """The value of a scalar: quotes removed, escapes resolved, comment dropped.
+
+    Only spaces and tabs are trimmed: YAML's white space is those two, and a
+    U+00A0 at either end of a plain scalar is content -- a regex ending in one
+    is the regex pre-commit compiles, matching nothing a keyboard produces.
+
+    `text` says the caller needs a string -- a `files:` pattern, a `repo:`, a
+    `rev:`, an `id:` -- and refuses a PLAIN scalar YAML resolves to anything
+    else: `null`, `~` or nothing at all, `true`, `123`, `1.5`, a date, `<<`,
+    or a flow collection. pre-commit rejects a non-string there, so the file
+    does not load; read as the text `null`, the value was a live pattern, one
+    reaching `null.md`. Quoted, or tagged `!!str`, the same characters are
+    text and are read as written.
+
+    `tags` are the tags the value may carry: `!!str` everywhere, `!!bool` where
+    a boolean is wanted. Any other -- `!!int 123`, `!!null`, a local `!name`
+    pre-commit's loader does not know -- refuses: the file does not load, and
+    reading `123` as a pattern would judge a hook in a config that runs no
+    hook, and call it live for `123.md`.
+    """
+    tag, raw = _split_tag(raw.strip(" \t"))
+    tagged = tag is not None
+    if tagged and tag not in tags:
+        allowed = " or ".join(f"`!{t}`" for t in tags)
+        raise ConfigRefused(
+            f"a value carries the tag `!{tag}`; only {allowed} is read here, since that is "
+            "what pre-commit wants and its loader takes nothing else"
+        )
+    if raw[:1] in ('"', "'"):
         end = _quote_end(raw, 0)
         if end == -1:
             # Malformed, and the value can only be guessed at from here. The
             # module's rule is that a refusal beats a wrong answer.
             raise ConfigRefused("a quoted value on this line is never closed")
         inner = raw[1 : end - 1]
-        return inner.replace("''", "'") if raw[0] == "'" else inner
-    # Unquoted: a " #" starts a comment, a bare "#" inside a word does not.
-    cut = raw.find(" #")
-    if cut != -1:
-        raw = raw[:cut]
-    return raw.strip()
+        # Only white space, or a comment after white space, may follow the
+        # closing quote: `"^README[.]md$" junk` stops YAML's loader, and read
+        # as the quoted part alone it was a live pattern in a config that
+        # does not load.
+        tail = raw[end:]
+        if tail.strip(" \t") and not re.match(r"[ \t]+#", tail):
+            raise ConfigRefused(
+                f"`{tail.strip(' ')}` follows a quoted value, which YAML does not allow"
+            )
+        return inner.replace("''", "'") if raw[0] == "'" else _unescape_double_quoted(inner)
+    # Unquoted: a `#` after a space or a tab starts a comment; a bare `#`
+    # inside a word does not, and neither does one inside a quoted item of a
+    # flow sequence -- `[commit, "x #y"]` was being cut inside its quotes.
+    raw = _code_only(raw).strip(" \t")
+    # YAML's indicator characters cannot start a plain scalar, and its loader
+    # stops at one ("found character '@' that cannot start any token"), so the
+    # file does not load. Returned as the regex `@README`, it matched
+    # `@README.md`, and a hook read as live in a config that runs none. Anchors,
+    # aliases and tags are handled elsewhere; a flow collection and a block
+    # indicator mean what they mean and are read by their own rules.
+    if _CANNOT_START_PLAIN.match(raw):
+        raise ConfigRefused(f"`{raw}` cannot start a plain value in YAML; quote it")
+    if raw[:1] in ("[", "{") and (text or (tagged and tag != "!seq")):
+        # A plain scalar cannot start with either, so this is a flow
+        # collection -- or `[.]md$`, which YAML does not parse at all -- and no
+        # use where text is wanted. A tag other than `!!seq` makes it no use
+        # anywhere: `!!str [pre-commit]` is a string tag on a sequence node,
+        # which the loader rejects, for `stages:` as much as for `files:`.
+        what = "where pre-commit wants text" if text else f"and `!{tag}` is no tag for one"
+        raise ConfigRefused(f"`{raw}` is a collection to YAML, {what}")
+    if tag == "!seq" and raw[:1] != "[":
+        raise ConfigRefused(f"`!!seq` tags `{raw}`, which is no sequence")
+    if text and not tagged:
+        if re.search(r":[ \t]|:$", raw):
+            # `: ` inside a plain scalar is a mapping to YAML -- `[markdown,
+            # file: text]` holds one as its second item, and `files: a: b` is
+            # "mapping values are not allowed here" -- and a mapping where
+            # pre-commit wants text is a file that does not load.
+            raise ConfigRefused(
+                f"`{raw}` is a mapping to YAML, where pre-commit wants text; quote it"
+            )
+        if _IMPLICIT_NON_STRING.fullmatch(raw):
+            raise ConfigRefused(
+                "an empty value is null to YAML, and pre-commit wants text here; '' is the "
+                "empty pattern"
+                if not raw
+                else f"`{raw}` is not text to YAML, and pre-commit wants text here; quote it"
+            )
+    # A plain scalar cannot start with `[`, so this is a flow sequence. It is
+    # returned as written -- flow_items reads it on demand -- but its items are
+    # read once here, so that one YAML would refuse (a quote never closed, an
+    # escape it does not define) refuses the config at scan time, with a line,
+    # rather than escaping from whoever asks for the stages later.
+    if raw.startswith("[") and raw.endswith("]"):
+        flow_items(raw, text=True)
+    return raw
+
+
+# `@` and the backquote are reserved; `%` starts a directive; `,`, `]` and `}`
+# are flow indicators; `-`, `?` and `:` are block indicators when white space
+# (or nothing) follows. None may begin a plain scalar.
+_CANNOT_START_PLAIN = re.compile(r"^(?:[@`%,\]}]|[-?:](?:[ \t]|$))")
+
+
+# What YAML reads a PLAIN scalar as when nothing says otherwise, as PyYAML's
+# resolver -- the one under pre-commit's loader -- spells it: null (including
+# no value at all), the YAML 1.1 booleans, integers in every base, floats,
+# timestamps, and the merge and value keys. Anything else is text.
+_IMPLICIT_NON_STRING = re.compile(
+    r"""^(?:
+        ~|null|Null|NULL|                                        # null, or nothing at all
+        |yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF
+        |[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+
+        |[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+
+        |[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?
+        |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)
+        |[0-9]{4}-[0-9]{2}-[0-9]{2}
+        |[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?
+            (?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?
+        |<<|=
+    )$""",
+    re.X,
+)
 
 
 def _code_only(line: str) -> str:
@@ -289,9 +532,10 @@ def _code_only(line: str) -> str:
                 return line  # unterminated: _split_key refuses it properly
             i = end
             continue
-        if ch == "#" and (i == 0 or line[i - 1].isspace()):
-            # YAML opens a comment only at an unquoted # preceded by whitespace
-            # (or at the start of the line). Cutting at any # truncated ordinary
+        if ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            # YAML opens a comment only at an unquoted # preceded by white space
+            # -- a space or a tab, not a U+00A0, which is content -- or at the
+            # start of the line. Cutting at any # truncated ordinary
             # values -- `id: check-todo#123`, `exclude: vendor/.*#generated$` --
             # silently, which is the outcome this module says is worse than a
             # refusal. _scalar had the rule right; _code_only ran first and
@@ -379,6 +623,15 @@ def scan(text: str) -> Config:
             raise ConfigRefused(f"config defines the top-level key {key!r} twice", i + 1)
         top_keys[key] = i
         if key != "repos":
+            if key in TOP_LEVEL_GATING_KEYS:
+                # Read once now, for the refusal only. A filter or stage default
+                # YAML would not load used to come back as "not set" when asked
+                # for later, and every hook was then judged as if the config had
+                # never written it.
+                try:
+                    _top_value(lines, i, value, key)
+                except ConfigRefused as exc:
+                    raise _located(exc, i + 1) from None
             i = _skip_block(lines, i + 1)
             continue
 
@@ -522,7 +775,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
     key, value = parsed
     if key == "repo":
         _refuse_multiline_scalar(lines, start, key_indent, value, "repo")
-        entry.url = _scalar(value)
+        entry.url = _scalar(value, text=True)
         refuse_unsafe_repo(entry.url, start + 1)
     elif key in ("rev", "hooks"):
         raise ConfigRefused("a repo entry lists `repo:` after another key; unsupported", start + 1)
@@ -556,7 +809,7 @@ def _scan_repo_entry(lines: list[str], start: int, item_indent: int) -> tuple[in
             in_hooks = key == "hooks"
             if key == "rev":
                 _refuse_multiline_scalar(lines, i, key_indent, value, "rev")
-                entry.rev = _scalar(value)
+                entry.rev = _scalar(value, text=True)
             elif key == "repo":
                 raise ConfigRefused("a repo entry defines `repo:` twice", i + 1)
             elif in_hooks:
@@ -601,17 +854,22 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
     whole feature exists to prevent, reintroduced by the indentation style.
     A sibling key at the same column still ends the sequence: it fails the
     `- ` test below.
+
+    An item may continue onto lines indented past its dash -- `- "pre-\\`
+    over `commit"` -- and is folded with them the way any value is.
     """
     items = []
     seq_indent: int | None = None
-    for j in range(key_line + 1, len(lines)):
+    j = key_line + 1
+    while j < len(lines):
         line = lines[j]
         if _is_blank_or_comment(line):
+            j += 1
             continue
         indent = _indent_of(line)
         if indent < key_indent:
             break
-        body = line.strip()
+        body = line.lstrip(" \t")
         if not body.startswith("- "):
             break
         if seq_indent is None:
@@ -620,8 +878,40 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
             # Ragged items are not one sequence. Refusing to guess is this
             # scanner's whole posture.
             break
-        items.append(_scalar(body[2:]))
+        item = _scalar(
+            _continuation(lines, j, _inline_value(body[2:]), indent, item=True), text=True
+        )
+        items.append(_flow_item(item))
+        j += 1
+        # The item's continuation lines, already folded in above.
+        while j < len(lines) and (
+            not lines[j].strip(" \t")
+            or (_indent_of(lines[j]) > indent and not lines[j].strip().startswith("- "))
+        ):
+            j += 1
     return "[" + ", ".join(items) + "]" if items else ""
+
+
+def _flow_item(value: str) -> str:
+    """`value` spelled as one item of a flow sequence, so flow_items reads it back whole.
+
+    A block item may hold what would split or open a flow one -- a comma, a
+    bracket, a brace, a quote, a `#`, white space or a line break at an end --
+    and joined bare, `- "file,text,markdown"` came back as three tags, and
+    `- "file\\n"` (the tag `file` plus a newline, one pre-commit rejects) came
+    back trimmed to the tag it is not. Quoted here with YAML's own escapes, it
+    comes back as the one item it is.
+    """
+    if not value or value != value.strip(" \t\n\r") or any(ch in value for ch in ",[]{}\"'#\n\r\t"):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        return '"' + escaped + '"'
+    return value
 
 
 def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hook]:
@@ -633,7 +923,7 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
     if parsed is None or parsed[0] != "id":
         raise ConfigRefused("a hook item does not start with `id:`", start + 1)
     _refuse_multiline_scalar(lines, start, item_indent + 2, parsed[1], "id")
-    hook = Hook(id=_scalar(parsed[1]), start=start, end=start)
+    hook = Hook(id=_scalar(parsed[1], text=True), start=start, end=start)
     key_indent = item_indent + 2
     i = start + 1
     while i < len(lines):
@@ -644,20 +934,109 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
         if _indent_of(line) <= item_indent:
             break
         if _indent_of(line) == key_indent:
-            entry = _split_key(line.strip())
-            if entry and entry[0] in HOOK_GATING_KEYS:
-                value = _scalar(entry[1])
-                if not value:
-                    # `stages:` followed by an indented block sequence is the
-                    # everyday way to write this, and reading only the inline
-                    # scalar left it as "" -- which every caller then treats as
-                    # "not set". A hook confined to the manual stage was
-                    # reported as active coverage.
-                    value = _block_sequence(lines, i, key_indent)
-                hook.settings[entry[0]] = value
+            try:
+                # lstrip, not strip: _split_key decides what trailing white
+                # space is, and an escaped space at the end of a quoted line
+                # is content it keeps.
+                entry = _split_key(line.lstrip(" \t"))
+                if entry and entry[0] in HOOK_GATING_KEYS:
+                    hook.settings[entry[0]] = _gating_value(
+                        lines, i, entry[1], key_indent, entry[0]
+                    )
+            except ConfigRefused as exc:
+                raise _located(exc, i + 1) from None
         hook.end = i
         i += 1
     return i, hook
+
+
+def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int, key: str) -> str:
+    """The value of a hook's gating key, in whichever shape the file used.
+
+    `files:` and `exclude:` want text (TEXT_GATING_KEYS): a block sequence
+    under one of those is a list where pre-commit wants a regex, and refused
+    the way _scalar refuses a flow one.
+    """
+    text = key in TEXT_GATING_KEYS
+    tags = ("!str", "!bool") if key in BOOL_GATING_KEYS else ("!str",)
+    if key in LIST_GATING_KEYS:
+        tags = ("!str", "!seq")
+        # `!!seq` alone on the key's line, over a block sequence: the tag says
+        # what the list below is, and the list is read as it would be untagged.
+        if _split_tag(inline) == ("!seq", "") and (
+            block := _block_sequence(lines, key_line, key_indent)
+        ):
+            return block
+    if inline:
+        # The key's own value, folded with any lines that continue it; an
+        # indicator such as `|-` comes back untouched.
+        raw = _continuation(lines, key_line, inline, key_indent)
+        return _listed(key, raw, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
+    # `stages:` followed by a block sequence -- indented, or at the key's own
+    # column -- is the everyday way to write this, and reading only the inline
+    # scalar left it as "", which every caller treats as "not set": a hook
+    # confined to the manual stage was reported as active coverage. Failing
+    # that, a value on the following line(s) -- `files:` over an indented
+    # `^docs/` -- reads the way a top-level one does, rather than as "" and
+    # then as a pattern matching every path.
+    block = _block_sequence(lines, key_line, key_indent)
+    if block:
+        if text or key in BOOL_GATING_KEYS:
+            wanted = "text" if text else "a boolean"
+            raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants {wanted}")
+        return block
+    raw = _continuation(lines, key_line, "", key_indent)
+    return _listed(key, raw, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
+
+
+def _boolean(key: str, raw: str, value: str) -> str:
+    """`value`, once it is the boolean a BOOL_GATING_KEYS key has to hold.
+
+    `raw` is the value as written and `value` the scalar read from it. Untagged,
+    only a plain YAML boolean spelling is one: quoted, `"true"` is a string,
+    `!!str true` the same, `maybe` a word, and nothing at all is null --
+    pre-commit's schema rejects each, and the file does not load. Read as its
+    spelling, the value was then compared as though it were the boolean it is
+    not. Under a `!!bool` tag the spelling may be quoted -- the tag overrides
+    the quotes' type, and `!!bool "true"` is True to YAML -- so the scalar as
+    read is what has to spell a boolean.
+    """
+    if key not in BOOL_GATING_KEYS:
+        return value
+    tag, bare = _split_tag(_code_only(raw).strip(" \t"))
+    spelled = value if tag == "!bool" else bare.strip(" \t")
+    if tag not in (None, "!bool") or not _YAML_BOOL.fullmatch(spelled):
+        what = "nothing" if not value else f"`{value}`"
+        raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a boolean")
+    return value
+
+
+def _listed(key: str, raw: str, value: str) -> str:
+    """`value`, once it is the list a LIST_GATING_KEYS key has to hold.
+
+    A block sequence never comes through here (it is already a list); this is
+    the inline or continued form, which is a list only as `[...]` -- judged on
+    `raw`, the value as written, behind any tag. `types: "[file, text]"` is
+    one string to YAML however much it looks like a list, and `stages:
+    pre-commit`, `types: text`, or nothing at all are no list either: shapes
+    pre-commit's schema rejects, and the file does not load.
+    """
+    if key not in LIST_GATING_KEYS:
+        return value
+    written = _split_tag(_code_only(raw).strip(" \t"))[1].strip(" \t")
+    if not (written.startswith("[") and written.endswith("]")):
+        what = "nothing" if not value else "a scalar"
+        raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a list")
+    return value
+
+
+def _located(exc: ConfigRefused, line_no: int) -> ConfigRefused:
+    """The same refusal, pointing at `line_no` when it points nowhere yet.
+
+    _scalar and _continuation refuse without a line -- they read a value, not
+    a file -- and the caller that knows the line adds it.
+    """
+    return exc if exc.line_no else ConfigRefused(exc.reason, line_no)
 
 
 def _next_content(lines: list[str], start: int) -> int | None:
@@ -691,6 +1070,216 @@ def reindent(block: str, spaces: int) -> str:
     return "\n".join(out)
 
 
+# A YAML block-scalar indicator: `|`, `>`, with optional chomping and
+# indentation indicators in either order.
+_BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
+# A YAML tag in front of a value -- `!!str`, `!!int`, or a local `!name` -- and
+# the white space after it, or the end of the text. A plain scalar cannot start
+# with `!`, so a leading one is always a tag; _untag decides what to do with it.
+_TAG_RE = re.compile(r"^!([^ \t]*)(?:[ \t]+|$)")
+
+
+def _split_tag(text: str) -> tuple[str | None, str]:
+    """The leading tag -- `!str` for `!!str`, `name` for a local `!name` -- and the rest.
+
+    (None, text) when there is no tag. A tag says what the value is, not what
+    it says: `!!str` says text, `!!bool` a boolean. Which tags a value may
+    carry is the caller's to decide (see _scalar); this only takes it off, so
+    the value behind it can be read -- `exclude: !!str` with nothing after the
+    tag being the empty string, the pattern that matches every path.
+    """
+    match = _TAG_RE.match(text)
+    if match is None:
+        return None, text
+    return match.group(1), text[match.end() :]
+
+
+def _inline_value(text: str) -> str:
+    """A value as its own line carries it, the white space around it trimmed.
+
+    Except one character: an escaped space or tab at the end of a double-quoted
+    scalar that runs on to the next line is content -- `"^README\\ ` over
+    `[.]md$"` is `^README  [.]md$` to YAML, the escaped space and then the
+    folded break. Trimmed away with the rest, the lone backslash read as
+    escaping the break instead, and the two lines joined with nothing between:
+    a pattern that matched README.md, from a filter that never will.
+    """
+    lstripped = text.lstrip(" \t")
+    kept = lstripped.rstrip(" \t")
+    if len(kept) < len(lstripped) and _open_quote(kept) == '"' and _ends_with_escape(kept):
+        kept += lstripped[len(kept)]
+    return kept
+
+
+def _open_quote(text: str) -> str | None:
+    """The quote character a scalar in `text` has opened and not closed, or None.
+
+    Only a quote that starts a scalar counts -- at the front of the value, or
+    after a `[` or `,` inside a flow sequence -- so the apostrophe in a plain
+    `don't` opens nothing.
+    """
+    # A tag in front -- `!!str "x` -- is not part of the scalar it decorates.
+    tag = _TAG_RE.match(text)
+    start = i = tag.end() if tag else 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'" and (i == start or text[start:i].rstrip(" \t")[-1:] in ("[", ",")):
+            end = _quote_end(text, i)
+            if end == -1:
+                return ch
+            i = end
+            continue
+        i += 1
+    return None
+
+
+def _continuation(
+    lines: list[str], key_line: int, inline: str = "", key_indent: int = 0, *, item: bool = False
+) -> str:
+    """The value of a key, folded with the lines that continue it.
+
+    `inline` is what the key's own line carries; the continued lines -- those
+    indented past `key_indent` -- fold onto it: `files: ^docs/` over an indented
+    `a\\.md$` is `^docs/ a\\.md$` to YAML. A block-scalar indicator on the key's
+    line is returned untouched, so `files: |-` stays the "pattern not read" it
+    is rather than folding its lines into something that compiles.
+
+    YAML lets a value start on the next line -- `files:\n  ^src/`, or
+    `default_stages:\n  [manual]` -- and this reader follows YAML's basic rules
+    for the continued lines of a plain or flow scalar: they fold with single
+    spaces, a blank line between them folds to a newline, and outside a quoted
+    scalar a comment ends at its own line (` #`, or a tab before `#`). Inside a
+    double-quoted scalar -- the whole value, or one item of a flow sequence --
+    trailing white space folds away unless escaped, and a backslash ending a
+    line escapes the break, so that line and the next join with nothing
+    between. In single quotes a backslash is a character like any other. A
+    block-scalar indicator standing alone on the first continued line --
+    `files:\n  |\n    ^docs/` -- is returned as the indicator, the same
+    "pattern not read" as `files: |`. A line at or short of `key_indent` is the
+    next key and ends the value.
+
+    `item` is set for a block-sequence item, whose value ends at a deeper `- `
+    line as well: that is another item, ragged or nested, not more of this one.
+
+    Not modelled, and accepted: explicit indentation indicators, anchors and
+    aliases. The scope verdict is the only consumer, and it claims nothing it
+    cannot read.
+    """
+    # A tag in front of the value -- `!!str |-` -- decorates it without changing
+    # it: the indicator is looked for behind it, and the tag stays on what is
+    # returned, because _scalar has to see it. `!!str null` is the text `null`,
+    # and `!!str` with nothing after it the empty string; untagged, both would
+    # be refused there as the null they are to YAML without the tag.
+    if _split_tag(inline)[1] and _BLOCK_INDICATOR.fullmatch(_split_tag(inline)[1]):
+        return inline
+    value = inline
+    pending_break = False  # a blank line since the last part: folds to a newline
+    ended_by_comment = False  # a comment line after a plain scalar started: the scalar is over
+    for j in range(key_line + 1, len(lines)):
+        line = lines[j]
+        # Blank and comment lines by YAML's own white space -- space and tab --
+        # so a line holding only a U+00A0 is the content it is.
+        if not line.strip(" \t"):
+            pending_break = bool(value)
+            continue
+        quote = _open_quote(value)
+        if quote is None and line.strip(" \t").startswith("#"):
+            # Before a value has started, or between the items of a flow
+            # collection, a comment line is nothing. Once a PLAIN scalar has
+            # started, a comment line ends it -- and another line of content
+            # after that is not YAML, which the next content line reports.
+            if value and value[:1] not in ("[", "{"):
+                ended_by_comment = True
+            continue
+        if _indent_of(line) <= key_indent:
+            break
+        text = line.lstrip(" \t")  # trailing white space is decided below
+        if item and text.startswith("- "):
+            break
+        if ended_by_comment:
+            # `files: README` over an indented `# why` over `.*md$`: YAML stops
+            # at the third line, and read on it folded to `README .*md$`, a
+            # pattern in a config that does not load.
+            raise ConfigRefused(
+                "a comment line ended this value, and more of it follows; YAML does not allow that"
+            )
+        if not value and _BLOCK_INDICATOR.fullmatch(_split_tag(text)[1].rstrip(" \t")):
+            return text.rstrip(" \t")
+        if quote is None:
+            # Outside a quoted scalar a comment ends at this line; _code_only
+            # leaves a `#` inside quotes alone.
+            text = _code_only(text)
+            if not text.strip(" \t"):
+                continue
+        # Inside double quotes -- open before this line, or opened on it and
+        # still open at its end -- trailing white space folds away unless it is
+        # escaped: `\ ` is a literal space and stays.
+        joined = (value + " " if value else "") + text
+        if quote == '"' or _open_quote(joined) == '"':
+            kept = text.rstrip(" \t")
+            if _ends_with_escape(kept) and len(kept) < len(text):
+                kept += text[len(kept)]
+            text = kept
+        else:
+            text = text.rstrip(" \t")
+        if not value:
+            value = text
+        elif quote == '"' and _ends_with_escape(value):
+            value = value[:-1] + text  # an escaped break: no fold, and the backslash goes
+        else:
+            value += ("\n" if pending_break else " ") + text
+        pending_break = False
+    return value
+
+
+def _ends_with_escape(text: str) -> bool:
+    """Whether `text` ends in an unpaired backslash -- one that escapes what follows."""
+    trailing = len(text) - len(text.rstrip("\\"))
+    return trailing % 2 == 1
+
+
+def _top_value(lines: list[str], key_line: int, inline: str, key: str) -> tuple[bool, str]:
+    """A top-level key's value, and whether it is a block sequence.
+
+    A block sequence under the key comes back in the flow shape; anything else
+    is the scalar, folded with the lines that continue it, or a block-scalar
+    indicator left as it is. `scan` reads every key in TOP_LEVEL_GATING_KEYS
+    through this once, so a value YAML would refuse -- a quote never closed, an
+    escape it does not define -- refuses the config there, with its line,
+    before anything is judged by it; the public readers below therefore never
+    meet one for those keys.
+    """
+    text = key in TEXT_GATING_KEYS
+    tags = ("!str", "!seq") if key in LIST_GATING_KEYS else ("!str",)
+    if key in LIST_GATING_KEYS and _split_tag(inline) == ("!seq", ""):
+        block = _block_sequence(lines, key_line, 0)
+        if block:
+            return True, block
+    continued = _continuation(lines, key_line, inline)
+    if not inline and continued.startswith("- "):
+        if text:
+            raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
+        return True, _block_sequence(lines, key_line, 0)
+    return False, _listed(key, continued, _scalar(continued, text=text, tags=tags))
+
+
+def top_level_sequence(cfg: Config, key: str) -> str | None:
+    """A top-level `<key>:` sequence as "[a, b]", whichever form the file used.
+
+    None when the key is absent. `default_stages:` is the one that matters:
+    written as a block sequence, `top_level_scalar` read it as "" and every
+    caller treats "" as unset -- the same blindness `_block_sequence` exists to
+    cure for a hook's own `stages:`, one level up. A flow sequence continued
+    onto the next line is read too, folded the way YAML folds it.
+    """
+    if key not in cfg.top_keys:
+        return None
+    line = cfg.top_keys[key]
+    parsed = _split_key(cfg.lines[line])
+    _, value = _top_value(cfg.lines, line, parsed[1] if parsed else "", key)
+    return value or None
+
+
 def top_level_scalar(cfg: Config, key: str) -> str | None:
     """The value of a top-level `<key>:` scalar, or None when the file has none.
 
@@ -699,11 +1288,18 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
     module's underscore names means the public surface is insufficient for its
     own consumer, and it pins two unrelated functions in another file to the
     private return shape of this one.
+
+    A value continued onto the following line(s) -- `files:\n  ^src/` -- is read
+    and folded with spaces, as YAML folds a plain scalar. Reading only the key's
+    own line returned "" for it, and a config-wide filter written that way was
+    silently dropped from every hook's scope.
     """
     if key not in cfg.top_keys:
         return None
-    parsed = _split_key(cfg.lines[cfg.top_keys[key]])
-    return _scalar(parsed[1]) if parsed else None
+    line = cfg.top_keys[key]
+    parsed = _split_key(cfg.lines[line])
+    sequence, value = _top_value(cfg.lines, line, parsed[1] if parsed else "", key)
+    return "" if sequence else value  # a sequence where a scalar was asked for: nothing to read
 
 
 def hook_delta(entry: RepoEntry) -> int | None:

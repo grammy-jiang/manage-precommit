@@ -11,10 +11,10 @@
 | `src/manage_precommit/skill/SKILL.md` | the procedure the agent follows, Steps 0–6 |
 | `src/manage_precommit/skill/scripts/` | the tools SKILL.md drives; all the work is here |
 | `src/manage_precommit/skill/templates/` | one catalog fragment per hook set |
-| `src/manage_precommit/skill/assets/` | files copied into the target repo (`lint-mermaid.mjs`, the two linter configs) |
+| `src/manage_precommit/skill/assets/` | files copied into the target repo (`lint-mermaid.mjs`, `parse-mermaid.mjs`, the two linter configs) |
 | `src/manage_precommit/skill/references/` | loaded on demand: `push-safety.md`, `example-output.md` |
 | `tests/` | the suite, plus `check_coverage.py` (the per-file floor) |
-| `scripts/lint-mermaid.mjs` | symlink into `skill/assets/`, so this repo runs its own mermaid hook |
+| `scripts/*.mjs` | symlinks into `skill/assets/`, so this repo runs its own mermaid hooks |
 
 The five scripts, in dependency order:
 

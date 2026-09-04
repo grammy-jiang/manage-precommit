@@ -1,0 +1,14 @@
+# Mermaid syntax check -- local hook running the bundled scripts/parse-mermaid.mjs.
+# mermaid.parse() under a LinkeDOM shim: no browser, so a diagram that only fails
+# when it is rendered gets through. The `mermaid` entry renders, and catches that.
+- repo: local
+  hooks:
+    - id: mermaid-parse
+      name: mermaid-parse
+      description: Check that fenced mermaid code blocks parse (syntax only, no browser)
+      entry: node scripts/parse-mermaid.mjs
+      language: node
+      files: '(?i)\.(md|markdown)$'
+      additional_dependencies:
+        - "mermaid@__NPM_MERMAID__"
+        - "linkedom@__NPM_LINKEDOM__"

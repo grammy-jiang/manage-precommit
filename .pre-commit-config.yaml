@@ -29,10 +29,24 @@ repos:
         description: Validate fenced mermaid code blocks with mermaid-cli
         entry: node scripts/lint-mermaid.mjs
         language: node
-        files: '\.(md|markdown)$'
+        files: '(?i)\.(md|markdown)$'
         additional_dependencies:
           - "@mermaid-js/mermaid-cli@11.16.0"
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:
       - id: gitleaks
+  # Mermaid syntax check -- local hook running the bundled scripts/parse-mermaid.mjs.
+  # mermaid.parse() under a LinkeDOM shim: no browser, so a diagram that only fails
+  # when it is rendered gets through. The `mermaid` entry renders, and catches that.
+  - repo: local
+    hooks:
+      - id: mermaid-parse
+        name: mermaid-parse
+        description: Check that fenced mermaid code blocks parse (syntax only, no browser)
+        entry: node scripts/parse-mermaid.mjs
+        language: node
+        files: '(?i)\.(md|markdown)$'
+        additional_dependencies:
+          - "mermaid@11.17.2"
+          - "linkedom@0.18.13"

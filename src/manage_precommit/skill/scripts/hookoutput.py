@@ -25,7 +25,7 @@ def skipped_hooks(output: str) -> list[str]:
 
     is_vacuous() is all-or-nothing: one hook with something to do flips it off.
     But hygiene's hooks match any file, so they alone turn a run green while
-    markdownlint and mermaid -- filtered to `\.(md|markdown)$`, and added
+    markdownlint and mermaid -- filtered to `(?i)\.(md|markdown)$`, and added
     precisely because a .md was detected -- are still checking nothing. That is
     a partial vacuity the whole-output verdict cannot express.
     """
