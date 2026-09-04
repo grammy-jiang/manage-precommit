@@ -712,6 +712,15 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     tagged = C.scan("files: !!str '^README[.]md$'\nexclude: !!str ^vendor/\nrepos: []\n")
     assert C.top_level_scalar(tagged, "files") == "^README[.]md$"
     assert C.top_level_scalar(tagged, "exclude") == "^vendor/"
+    # A tag with nothing after it is the empty string -- `exclude: ''`, the
+    # pattern that matches every path -- not the text `!!str`, which matches
+    # none. The value may also follow on the next line.
+    valueless = C.scan("exclude: !!str\nrepos: []\n")
+    assert C.top_level_scalar(valueless, "exclude") == ""
+    below = C.scan("exclude: !!str\n  ^vendor/\nrepos: []\n")
+    assert C.top_level_scalar(below, "exclude") == "^vendor/"
+    hook = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        exclude: !!str\n")
+    assert hook.repos[0].hooks[0].settings["exclude"] == ""
     # A tag in front of a block-scalar indicator leaves it the indicator.
     tagged_block = C.scan("files: !!str |-\n  ^docs/\nrepos: []\n")
     assert C.top_level_scalar(tagged_block, "files") == "|-"

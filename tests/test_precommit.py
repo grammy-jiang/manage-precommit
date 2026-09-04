@@ -3134,6 +3134,15 @@ def test_our_own_mermaid_hook_is_not_reported_as_disabled(repo, keys_file, facts
     assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
+def test_a_valueless_tag_is_the_empty_pattern(repo, stubs):
+    """`exclude: !!str` is YAML for `exclude: ''`, and the empty pattern matches
+    every path: pre-commit hands the hook nothing. Read as the text `!!str` -- a
+    pattern matching no file -- the hook was live, and stood as coverage."""
+    got = _disabled_for(repo, stubs, "        exclude: !!str\n")
+    assert "gitleaks" in got["disabled"], got["disabled"]
+    assert "matches every" in got["disabled"]["gitleaks"][0]
+
+
 def test_an_exclude_that_leaves_files_through_is_not_a_switch(repo, stubs):
     got = _disabled_for(repo, stubs, "        exclude: '^docs/'\n")
     assert got["disabled"] == {}, got["disabled"]

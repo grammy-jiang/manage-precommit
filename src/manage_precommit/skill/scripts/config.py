@@ -356,6 +356,8 @@ def _scalar(raw: str) -> str:
     # it says; a plain scalar cannot start with `!`, so a leading one is
     # always a tag, and it comes off before the value is read.
     raw = _TAG_RE.sub("", raw)
+    if not raw:
+        return ""  # a tag with no value after it: the empty string, as YAML reads it
     if raw[0] in "\"'":
         end = _quote_end(raw, 0)
         if end == -1:
@@ -847,9 +849,12 @@ def reindent(block: str, spaces: int) -> str:
 # indentation indicators in either order.
 _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
 # A YAML tag in front of a value -- `!!str`, or a local `!name` -- and the white
-# space after it. A plain scalar cannot start with `!`, so a leading one is
-# always a tag.
-_TAG_RE = re.compile(r"^![^ \t]*[ \t]+")
+# space after it, or the end of the text: `exclude: !!str` with nothing after
+# the tag is the empty string to YAML, and the empty pattern matches every path.
+# Read as the text `!!str`, it was a pattern matching no file, and a hook
+# pre-commit hands nothing stood as live coverage. A plain scalar cannot start
+# with `!`, so a leading one is always a tag.
+_TAG_RE = re.compile(r"^![^ \t]*(?:[ \t]+|$)")
 
 
 def _open_quote(text: str) -> str | None:
