@@ -4653,6 +4653,30 @@ def test_a_live_alternative_must_reach_every_fence_file_to_stand_in(repo, stubs)
     assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
+def test_a_capped_fence_probe_lets_no_alternative_stand_in(repo, stubs):
+    """The probe reads at most MAX_MERMAID_PROBES Markdown files. With more
+    than that, fences inside the sample all under `a/` and one past the cap
+    under `z/`, a renderer scoped to `^a/` covers everything the probe saw and
+    nothing it did not -- so a capped look proves nothing, and the
+    recommendation stands."""
+    import precommit as P
+
+    (repo / "a").mkdir()
+    (repo / "z").mkdir()
+    for n in range(P.MAX_MERMAID_PROBES):
+        (repo / "a" / f"f{n:03d}.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z" / "uncovered.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^a/'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

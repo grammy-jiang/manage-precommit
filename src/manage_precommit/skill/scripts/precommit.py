@@ -1098,9 +1098,16 @@ def prerequisites() -> dict[str, str]:
     return {key: status for key, meta in CATALOG.items() if meta.get("npm")}
 
 
+class Seen(NamedTuple):
+    """The files behind a recommendation, and whether the look at them was complete."""
+
+    paths: list[str]
+    complete: bool  # False when the probe's own cap cut the look short
+
+
 def detect_markers(
     directory: str,
-) -> tuple[list[Recommendation], list[str], list[str], dict[str, list[str]]]:
+) -> tuple[list[Recommendation], list[str], list[str], dict[str, Seen]]:
     """Which catalog entries the repo's contents call for, and the file that says so.
 
     The `reason` is always a path that was actually seen, never a category. A
@@ -1115,8 +1122,10 @@ def detect_markers(
     # filename with a leading space would be tested against a name pre-commit
     # never sees. Coverage is judged on this copy, and on every file in it: a
     # renderer scoped to `^a/` covers `a/covered.md` and not `z/uncovered.md`,
-    # and both carry a fence.
-    raw_paths: dict[str, list[str]] = {}
+    # and both carry a fence. When the probe's cap cut the look short, the list
+    # is a sample, and `complete` says so -- a sample all inside `^a/` proves
+    # nothing about the file the cap left unread.
+    raw_paths: dict[str, Seen] = {}
 
     markdown = [p for p in paths if p.lower().endswith((".md", ".markdown"))]
     # The FIRST one that is a real regular file, not simply the first one. This
@@ -1129,7 +1138,7 @@ def detect_markers(
     safe_markdown = [p for p in markdown if not os.path.islink(os.path.join(directory, p))]
     if safe_markdown:
         recs.append({"name": "markdownlint", "reason": clean(safe_markdown[0])})
-        raw_paths["markdownlint"] = [safe_markdown[0]]
+        raw_paths["markdownlint"] = Seen([safe_markdown[0]], True)
         markers.append(f"markdown ({clean(safe_markdown[0])})")
         trigger_paths.append(safe_markdown[0])
     if markdown:
@@ -1151,7 +1160,9 @@ def detect_markers(
             # Every file with a fence, for the coverage judgement; the marker,
             # the trigger path and the reason name the first, as they always
             # have. The probe stays bounded by MAX_MERMAID_PROBES either way.
-            fenced = raw_paths.setdefault("mermaid-parse", [])
+            fenced = raw_paths.setdefault(
+                "mermaid-parse", Seen([], len(markdown) <= MAX_MERMAID_PROBES)
+            ).paths
             if not fenced:
                 # The syntax check, not the renderer: a pre-commit hook is a
                 # syntax check first, and this one needs no browser. `mermaid`
@@ -2200,10 +2211,10 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         # recommendation names -- judged on the path as git names it, since
         # `reason` is that path cleaned for display.
         alternatives = set(CATALOG[rec["name"]].get("alternatives", ())) & covering
-        paths = raw_paths.get(rec["name"], [rec["reason"]])
-        if not cfg:
-            return False
-        return any(all(reaches(cfg, alt, p, listing) for p in paths) for alt in alternatives)
+        seen = raw_paths.get(rec["name"], Seen([rec["reason"]], True))
+        if not cfg or not seen.complete:
+            return False  # a capped look is a sample, and a sample stands in for nothing
+        return any(all(reaches(cfg, alt, p, listing) for p in seen.paths) for alt in alternatives)
 
     recs = [r for r in recs if not stood_in_for(r)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [
