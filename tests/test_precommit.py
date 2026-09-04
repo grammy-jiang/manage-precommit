@@ -3274,6 +3274,34 @@ def test_a_markdownlint_scope_is_judged_against_every_markdown_file(repo, stubs)
     assert "markdownlint" not in {r["name"] for r in got["recommended"]}
 
 
+def test_a_capped_probe_does_not_let_a_scoped_present_entry_pass_as_coverage(repo, stubs):
+    """201 Markdown files: fences under `a*` in the 200 the probe reads, one in
+    `z.md` past its cap, and a present `mermaid-parse` scoped to `^a`. Every
+    fence the probe saw is reached, so nothing was said -- and the fence in
+    `z.md` went unchecked. A file the entry is for that the probe did not read
+    and the scope is not certain to reach is now coverage not shown. Scoped to
+    every Markdown file, the entry is simply present."""
+    import precommit as P
+
+    for existing in repo.glob("*.md"):
+        existing.unlink()
+    for n in range(P.MAX_MERMAID_PROBES):
+        (repo / f"a{n:03d}.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^a'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    assert "whether it reaches z.md is not shown" in got["disabled"]["mermaid-parse"][0]
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_a_valueless_tag_is_the_empty_pattern(repo, stubs):
     """`exclude: !!str` is YAML for `exclude: ''`, and the empty pattern matches
     every path: pre-commit hands the hook nothing. Read as the text `!!str` -- a

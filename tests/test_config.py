@@ -613,6 +613,10 @@ def test_a_plain_value_yaml_would_not_read_as_text_refuses_the_config():
             C.scan(head + f"        files: {value}\n")
     with pytest.raises(C.ConfigRefused, match=r"not text.*line 1"):
         C.scan("exclude: 123\nrepos: []\n")
+    # A tag only settles what a SCALAR is: `!!str [README]` is a string tag on
+    # a sequence node, which the loader rejects.
+    with pytest.raises(C.ConfigRefused, match=r"is a collection.*line 5"):
+        C.scan(head + "        files: !!str [README]\n")
     with pytest.raises(C.ConfigRefused, match=r"holds a list.*line 5"):
         C.scan(head + "        files:\n          - a\n")
     with pytest.raises(C.ConfigRefused, match=r"holds a list.*line 1"):

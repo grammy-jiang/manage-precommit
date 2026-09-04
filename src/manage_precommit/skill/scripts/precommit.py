@@ -2339,6 +2339,29 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
                     f"{clean(hook_id)} (scope carries a filter this tool does not read; "
                     f"whether it reaches {clean(unshown[0])} is not shown)"
                 ]
+            elif not seen.complete:
+                # The probe did not read every file this entry is for (its cap,
+                # or a walk cut short), and one it did not read may hold what
+                # the entry checks. A file the entry is for that its scope is
+                # not certain to reach is then coverage not shown -- a fence in
+                # `z.md` past the cap, behind a `files: ^a`, went unmentioned
+                # while every fence the probe did see was reached.
+                intended = intended_targets(key)
+                unread = next(
+                    (
+                        p
+                        for p in listing.paths
+                        if p not in verdicts
+                        and (intended is None or intended.search(p))
+                        and reaches(cfg, key, p, listing) is not True
+                    ),
+                    None,
+                )
+                if unread is not None:
+                    disabled[key] = [
+                        f"{clean(hook_id)} (the scan did not read every file this entry is "
+                        f"for; whether it reaches {clean(unread)} is not shown)"
+                    ]
     # An entry the scan named that is present but switched off cannot be
     # repaired by selecting it again -- same hook id, nothing written -- and
     # the fence that got it named is still there. Its live alternative is
