@@ -332,31 +332,32 @@ def _unescape_double_quoted(inner: str) -> str:
     return _DQ_ESCAPE_RE.sub(one, inner)
 
 
-def flow_items(raw: str) -> list[str]:
+def flow_items(raw: str, *, text: bool = False) -> list[str]:
     """The items of a `[a, "b"]` flow sequence, each read as the scalar it is.
 
     `parse_stages` used to strip quotes and nothing else, so a stage written as
     `"pre\\u002dcommit"` -- valid YAML for `pre-commit` -- read as a stage no
     hook runs on. Items are split on commas outside quotes; a comma inside a
-    quoted item stays.
+    quoted item stays. `text` is passed on to _scalar: every gating list is a
+    list of strings, and `[pre-commit, 123]` is one pre-commit rejects.
     """
-    text = raw.strip(" \t")
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
+    body = raw.strip(" \t")
+    if body.startswith("[") and body.endswith("]"):
+        body = body[1:-1]
     items: list[str] = []
     i = start = 0
-    while i < len(text):
-        ch = text[i]
+    while i < len(body):
+        ch = body[i]
         if ch in "\"'":
-            end = _quote_end(text, i)
-            i = len(text) if end == -1 else end
+            end = _quote_end(body, i)
+            i = len(body) if end == -1 else end
             continue
         if ch == ",":
-            items.append(text[start:i])
+            items.append(body[start:i])
             start = i + 1
         i += 1
-    items.append(text[start:])
-    return [_scalar(item) for item in items if item.strip(" \t")]
+    items.append(body[start:])
+    return [_scalar(item, text=text) for item in items if item.strip(" \t")]
 
 
 def _scalar(raw: str, *, text: bool = False) -> str:
@@ -390,6 +391,14 @@ def _scalar(raw: str, *, text: bool = False) -> str:
     # inside a word does not, and neither does one inside a quoted item of a
     # flow sequence -- `[commit, "x #y"]` was being cut inside its quotes.
     raw = _code_only(raw).strip(" \t")
+    # YAML's indicator characters cannot start a plain scalar, and its loader
+    # stops at one ("found character '@' that cannot start any token"), so the
+    # file does not load. Returned as the regex `@README`, it matched
+    # `@README.md`, and a hook read as live in a config that runs none. Anchors,
+    # aliases and tags are handled elsewhere; a flow collection and a block
+    # indicator mean what they mean and are read by their own rules.
+    if _CANNOT_START_PLAIN.match(raw):
+        raise ConfigRefused(f"`{raw}` cannot start a plain value in YAML; quote it")
     if text and not tagged:
         if raw[:1] in ("[", "{"):
             # A plain scalar cannot start with either, so this is a flow
@@ -408,8 +417,14 @@ def _scalar(raw: str, *, text: bool = False) -> str:
     # escape it does not define) refuses the config at scan time, with a line,
     # rather than escaping from whoever asks for the stages later.
     if raw.startswith("[") and raw.endswith("]"):
-        flow_items(raw)
+        flow_items(raw, text=True)
     return raw
+
+
+# `@` and the backquote are reserved; `%` starts a directive; `,`, `]` and `}`
+# are flow indicators; `-`, `?` and `:` are block indicators when white space
+# (or nothing) follows. None may begin a plain scalar.
+_CANNOT_START_PLAIN = re.compile(r"^(?:[@`%,\]}]|[-?:](?:[ \t]|$))")
 
 
 # What YAML reads a PLAIN scalar as when nothing says otherwise, as PyYAML's
@@ -796,7 +811,9 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
             # Ragged items are not one sequence. Refusing to guess is this
             # scanner's whole posture.
             break
-        items.append(_scalar(_continuation(lines, j, _inline_value(body[2:]), indent, item=True)))
+        items.append(
+            _scalar(_continuation(lines, j, _inline_value(body[2:]), indent, item=True), text=True)
+        )
         j += 1
         # The item's continuation lines, already folded in above.
         while j < len(lines) and (

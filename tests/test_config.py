@@ -661,6 +661,28 @@ def test_a_scalar_where_pre_commit_wants_a_list_refuses_the_config():
     assert cfg.repos[0].hooks[0].settings == {"stages": "[manual]", "types": "[text]"}
 
 
+def test_a_plain_value_yaml_cannot_start_refuses_the_config():
+    """`@`, a backquote and `%` cannot start a plain scalar, nor can a flow
+    indicator or a `-`, `?` or `:` followed by white space: the loader stops
+    ("cannot start any token") and the file does not load. Returned as the
+    regex `@README`, it matched `@README.md` and a hook read as live in a
+    config that runs none. Quoted, the same characters are text. An item of a
+    gating list is text too: `123` is a number pre-commit rejects where it
+    wants a stage name, and `~` is null."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    for value in ("@README", "`x`", "%x", ",x", "]x", "}x", "- x", "? x", ": x", "-"):
+        with pytest.raises(C.ConfigRefused, match=r"cannot start.*line 5"):
+            C.scan(head + f"        files: {value}\n")
+    cfg = C.scan(head + "        files: '@README'\n        stages: [manual, '- x']\n")
+    assert cfg.repos[0].hooks[0].settings["files"] == "@README"
+    assert C.flow_items(cfg.repos[0].hooks[0].settings["stages"]) == ["manual", "- x"]
+    for value in ("[pre-commit, 123]", "[manual, ~]", "[@x]"):
+        with pytest.raises(C.ConfigRefused, match="line 5"):
+            C.scan(head + f"        stages: {value}\n")
+    with pytest.raises(C.ConfigRefused, match=r"not text.*line 1"):
+        C.scan("default_stages:\n  - manual\n  - 123\nrepos: []\n")
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""
