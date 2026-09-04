@@ -694,6 +694,20 @@ def test_a_lazy_continuation_line_keeps_the_list_item_and_its_paragraph(docs, en
     assert proc.returncode == 0, proc.stderr
 
 
+def test_character_references_in_the_info_string_are_decoded(docs, env):
+    """CommonMark resolves character references in an info string, so a fence
+    written ```mer&#109;aid -- or with the hex form -- is a Mermaid fence to
+    every renderer, and was skipped here on its raw spelling. A reference that
+    does not spell the word leaves it another language."""
+    (docs / "doc.md").write_text(
+        "```mer&#109;aid\nflowchart TD\n```\n\n```MER&#x6D;AID\nflowchart LR\n```\n"
+        "\n```mermaid&#33;\nnot mermaid\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD", "flowchart LR"]
+
+
 def test_an_empty_item_cannot_interrupt_a_paragraph_either(docs, env):
     (docs / "doc.md").write_text("Some prose\n-\n  ```mermaid\n  flowchart TD\n  ```\n")
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))

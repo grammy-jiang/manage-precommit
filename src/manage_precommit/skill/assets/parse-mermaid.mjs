@@ -153,15 +153,30 @@ function unquote(text, col) {
   return { rest, consumed };
 }
 
+// CommonMark resolves character references in an info string, so a fence
+// written ```mer&#109;aid is a Mermaid fence to every renderer. Numeric
+// references (decimal, up to 7 digits; hex, up to 6) are decoded here, with an
+// invalid code point becoming U+FFFD as the spec says. Named references are not:
+// none of HTML's named entities decodes to an ASCII letter, so none can spell
+// or unspell the word this hook looks for, and the table is not worth carrying.
+function decodeReferences(text) {
+  return text.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));/g, (whole, hex, dec) => {
+    const point = hex !== undefined ? parseInt(hex, 16) : parseInt(dec, 10);
+    const valid = point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff);
+    return String.fromCodePoint(valid ? point : 0xfffd);
+  });
+}
+
 function fenceOf(text) {
   const m = FENCE.exec(text);
   if (m === null) return null;
   const [, indent, run, info] = m;
   if (run[0] === "`" && info.includes("`")) return null;
+  const word = info.replace(/^[ \t]+|[ \t]+$/g, "").split(/[ \t]+/)[0] ?? "";
   return {
     char: run[0],
     length: run.length,
-    lang: (info.replace(/^[ \t]+|[ \t]+$/g, "").split(/[ \t]+/)[0] ?? "").toLowerCase(),
+    lang: decodeReferences(word).toLowerCase(),
     indent: indent.length,
   };
 }

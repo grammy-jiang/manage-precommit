@@ -445,14 +445,16 @@ def _scalar(raw: str, *, text: bool = False, tags: tuple[str, ...] = ("!str",)) 
     # indicator mean what they mean and are read by their own rules.
     if _CANNOT_START_PLAIN.match(raw):
         raise ConfigRefused(f"`{raw}` cannot start a plain value in YAML; quote it")
-    if raw[:1] in ("[", "{") and (text or tagged):
+    if raw[:1] in ("[", "{") and (text or (tagged and tag != "!seq")):
         # A plain scalar cannot start with either, so this is a flow
         # collection -- or `[.]md$`, which YAML does not parse at all -- and no
-        # use where text is wanted. A tag makes it no use anywhere: `!!str
-        # [pre-commit]` is a string tag on a sequence node, which the loader
-        # rejects, for `stages:` as much as for `files:`.
+        # use where text is wanted. A tag other than `!!seq` makes it no use
+        # anywhere: `!!str [pre-commit]` is a string tag on a sequence node,
+        # which the loader rejects, for `stages:` as much as for `files:`.
         what = "where pre-commit wants text" if text else f"and `!{tag}` is no tag for one"
         raise ConfigRefused(f"`{raw}` is a collection to YAML, {what}")
+    if tag == "!seq" and raw[:1] != "[":
+        raise ConfigRefused(f"`!!seq` tags `{raw}`, which is no sequence")
     if text and not tagged:
         if re.search(r":[ \t]|:$", raw):
             # `: ` inside a plain scalar is a mapping to YAML -- `[markdown,
@@ -941,6 +943,14 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
     """
     text = key in TEXT_GATING_KEYS
     tags = ("!str", "!bool") if key in BOOL_GATING_KEYS else ("!str",)
+    if key in LIST_GATING_KEYS:
+        tags = ("!str", "!seq")
+        # `!!seq` alone on the key's line, over a block sequence: the tag says
+        # what the list below is, and the list is read as it would be untagged.
+        if _split_tag(inline) == ("!seq", "") and (
+            block := _block_sequence(lines, key_line, key_indent)
+        ):
+            return block
     if inline:
         # The key's own value, folded with any lines that continue it; an
         # indicator such as `|-` comes back untouched.
@@ -1205,12 +1215,17 @@ def _top_value(lines: list[str], key_line: int, inline: str, key: str) -> tuple[
     meet one for those keys.
     """
     text = key in TEXT_GATING_KEYS
+    tags = ("!str", "!seq") if key in LIST_GATING_KEYS else ("!str",)
+    if key in LIST_GATING_KEYS and _split_tag(inline) == ("!seq", ""):
+        block = _block_sequence(lines, key_line, 0)
+        if block:
+            return True, block
     continued = _continuation(lines, key_line, inline)
     if not inline and continued.startswith("- "):
         if text:
             raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
         return True, _block_sequence(lines, key_line, 0)
-    return False, _listed(key, _scalar(continued, text=text))
+    return False, _listed(key, _scalar(continued, text=text, tags=tags))
 
 
 def top_level_sequence(cfg: Config, key: str) -> str | None:

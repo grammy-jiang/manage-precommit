@@ -622,6 +622,18 @@ def test_a_plain_value_yaml_would_not_read_as_text_refuses_the_config():
             C.scan(head + f"        {line}\n")
     with pytest.raises(C.ConfigRefused, match=r"is a collection.*line 1"):
         C.scan("default_stages: !!str [manual]\nrepos: []\n")
+    # `!!seq` IS the tag for a sequence, flow or block, on a list key; it is no
+    # tag for a scalar, and no tag for a text key's value.
+    cfg = C.scan(head + "        stages: !!seq [manual]\n        types: !!seq\n          - text\n")
+    assert cfg.repos[0].hooks[0].settings == {"stages": "[manual]", "types": "[text]"}
+    top = C.scan("default_stages: !!seq [manual]\nrepos: []\n")
+    assert C.top_level_sequence(top, "default_stages") == "[manual]"
+    top = C.scan("default_stages: !!seq\n  - manual\nrepos: []\n")
+    assert C.top_level_sequence(top, "default_stages") == "[manual]"
+    with pytest.raises(C.ConfigRefused, match=r"no sequence.*line 5"):
+        C.scan(head + "        stages: !!seq manual\n")
+    with pytest.raises(C.ConfigRefused, match=r"tag `!!seq`.*line 5"):
+        C.scan(head + "        files: !!seq [a]\n")
     with pytest.raises(C.ConfigRefused, match=r"holds a list.*line 5"):
         C.scan(head + "        files:\n          - a\n")
     with pytest.raises(C.ConfigRefused, match=r"holds a list.*line 1"):
