@@ -559,3 +559,39 @@ def test_an_html_block_inside_a_quote_ends_with_the_quote(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+# -- review round 3: a fence ends with its list item ---------------------------
+
+
+def test_a_closer_indented_short_of_the_list_item_does_not_close_the_fence(docs, env):
+    """An unindented ``` under `- item` is outside the item, so the item ends
+    and the nested fence with it -- unclosed. The stray ``` then opens a new
+    fence at the top level, which is what GitHub renders too: a diagram that
+    ran to the end of the item, and a code block after it. Reported as the
+    missing closing fence it is, rather than as a diagram that parsed."""
+    (docs / "doc.md").write_text("- item\n\n  ```mermaid\n  flowchart TD\n    A --> B\n```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert "✖ doc.md:3" in proc.stderr
+    assert "never closed" in proc.stderr
+    assert not env.loaded()
+
+
+def test_an_under_indented_content_line_ends_the_list_item_and_the_fence(docs, env):
+    (docs / "doc.md").write_text(
+        "- item\n\n  ```mermaid\n  flowchart TD\nA --> B\n  ```\n\n```mermaid\nflowchart TD\n  C --> D\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert "✖ doc.md:3" in proc.stderr
+    # The stray `  ``` ` opened a fence of its own, with no language, which
+    # swallowed the second diagram: nothing after line 3 is a mermaid block.
+    assert env.parsed() == []
+
+
+def test_a_blank_line_inside_a_list_item_fence_is_content_not_an_exit(docs, env):
+    (docs / "doc.md").write_text("- item\n\n  ```mermaid\n  flowchart TD\n\n    A --> B\n  ```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n\n  A --> B"]

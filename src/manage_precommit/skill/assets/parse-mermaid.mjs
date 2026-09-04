@@ -161,7 +161,12 @@ function mermaidBlocks(text) {
     const raw = expandTabs(rawLine);
     if (open !== null) {
       const { text: inner, depth } = unquote(raw, open.depth);
-      if (depth === open.depth) {
+      // Still inside the containers the fence was opened under: as many quote
+      // markers, and -- unless blank -- indented at least to the list item's
+      // content column. Lazy continuation does not reach into a code block.
+      const inside =
+        depth === open.depth && (inner.trim() === "" || indentOf(inner) >= open.container);
+      if (inside) {
         // The closing fence is judged against the container, the content
         // against the opening fence: an opener indented two columns permits a
         // closer at three, not at five.
@@ -172,8 +177,11 @@ function mermaidBlocks(text) {
         }
         return;
       }
-      // Fewer markers than the fence was opened under: its block quote has
-      // ended, and the fence with it, unclosed. The line is then read afresh.
+      // Fewer quote markers than the fence was opened under, or indented short
+      // of the list item it lives in: the container has ended, and the fence
+      // with it, unclosed -- an unindented ``` under `- item` opens a new fence
+      // at the top level rather than closing the nested one, which is what
+      // GitHub renders too. The line is then read afresh.
       open.body = null;
       leave();
     }
