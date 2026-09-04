@@ -3134,6 +3134,41 @@ def test_our_own_mermaid_hook_is_not_reported_as_disabled(repo, keys_file, facts
     assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
 
 
+def test_an_escaped_space_at_the_end_of_the_keys_line_is_content(repo, stubs):
+    """`files: "^README\\ ` over `[.]md$"` is the pattern `^README  [.]md$` --
+    the escaped space, then the folded break -- which matches no file here.
+    Trimmed with the line, the backslash read as escaping the break, the
+    pattern became `^README[.]md$`, and a hook that never runs on README.md
+    read as covering its fence."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        '        files: "^README\\ \n          [.]md$"\n'
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+
+
+def test_a_non_string_tag_on_a_filter_refuses_the_config(repo, stubs):
+    """`files: !!int 123` is a number to YAML, which pre-commit rejects where it
+    wants a regex, so the file runs no hook. Read as the text `123` it was a
+    live pattern -- one that reaches `123.md`."""
+    (repo / "123.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: !!int 123\n"
+    )
+    proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+    assert proc.returncode == 5, proc.stderr
+    got = out_json(proc)
+    assert got["reason"] == "config-refused"
+    assert got["line"] == 8
+
+
 def test_a_valueless_tag_is_the_empty_pattern(repo, stubs):
     """`exclude: !!str` is YAML for `exclude: ''`, and the empty pattern matches
     every path: pre-commit hands the hook nothing. Read as the text `!!str` -- a

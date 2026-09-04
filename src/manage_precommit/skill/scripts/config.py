@@ -254,7 +254,7 @@ def _split_key(text: str) -> tuple[str, str] | None:
             # block-sequence check below refuses a perfectly ordinary file.
             # The value keeps a U+00A0 at its ends: YAML's white space is space
             # and tab, and anything else there is content.
-            return text[:i].strip(), _code_only(rest).strip(" \t")
+            return text[:i].strip(), _inline_value(_code_only(rest))
         i += 1
     return None
 
@@ -352,10 +352,8 @@ def _scalar(raw: str) -> str:
     raw = raw.strip(" \t")
     if not raw:
         return ""
-    # A tag -- `!!str`, or a local `!name` -- says what the value is, not what
-    # it says; a plain scalar cannot start with `!`, so a leading one is
-    # always a tag, and it comes off before the value is read.
-    raw = _TAG_RE.sub("", raw)
+    # A tag says what the value is: `!!str` comes off, anything else refuses.
+    raw = _untag(raw)
     if not raw:
         return ""  # a tag with no value after it: the empty string, as YAML reads it
     if raw[0] in "\"'":
@@ -734,7 +732,7 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
         indent = _indent_of(line)
         if indent < key_indent:
             break
-        body = line.strip()
+        body = line.lstrip(" \t")
         if not body.startswith("- "):
             break
         if seq_indent is None:
@@ -743,7 +741,7 @@ def _block_sequence(lines: list[str], key_line: int, key_indent: int) -> str:
             # Ragged items are not one sequence. Refusing to guess is this
             # scanner's whole posture.
             break
-        items.append(_scalar(_continuation(lines, j, body[2:].strip(" \t"), indent, item=True)))
+        items.append(_scalar(_continuation(lines, j, _inline_value(body[2:]), indent, item=True)))
         j += 1
         # The item's continuation lines, already folded in above.
         while j < len(lines) and (
@@ -775,11 +773,12 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
             break
         if _indent_of(line) == key_indent:
             try:
-                entry = _split_key(line.strip())
+                # lstrip, not strip: _split_key decides what trailing white
+                # space is, and an escaped space at the end of a quoted line
+                # is content it keeps.
+                entry = _split_key(line.lstrip(" \t"))
                 if entry and entry[0] in HOOK_GATING_KEYS:
-                    hook.settings[entry[0]] = _gating_value(
-                        lines, i, entry[1].strip(" \t"), key_indent
-                    )
+                    hook.settings[entry[0]] = _gating_value(lines, i, entry[1], key_indent)
             except ConfigRefused as exc:
                 raise _located(exc, i + 1) from None
         hook.end = i
@@ -848,13 +847,52 @@ def reindent(block: str, spaces: int) -> str:
 # A YAML block-scalar indicator: `|`, `>`, with optional chomping and
 # indentation indicators in either order.
 _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
-# A YAML tag in front of a value -- `!!str`, or a local `!name` -- and the white
-# space after it, or the end of the text: `exclude: !!str` with nothing after
-# the tag is the empty string to YAML, and the empty pattern matches every path.
-# Read as the text `!!str`, it was a pattern matching no file, and a hook
-# pre-commit hands nothing stood as live coverage. A plain scalar cannot start
-# with `!`, so a leading one is always a tag.
-_TAG_RE = re.compile(r"^![^ \t]*(?:[ \t]+|$)")
+# A YAML tag in front of a value -- `!!str`, `!!int`, or a local `!name` -- and
+# the white space after it, or the end of the text. A plain scalar cannot start
+# with `!`, so a leading one is always a tag; _untag decides what to do with it.
+_TAG_RE = re.compile(r"^!([^ \t]*)(?:[ \t]+|$)")
+
+
+def _untag(text: str) -> str:
+    """`text` without a leading `!!str` tag; any other tag refuses the config.
+
+    A tag says what the value is. `!!str` says text, which is all this scanner
+    reads, so it comes off and what follows is read as written -- `exclude:
+    !!str` with nothing after it being the empty string, the pattern that
+    matches every path; read as the text `!!str` it was a pattern matching no
+    file, and a hook pre-commit hands nothing stood as live coverage. Anything
+    else is not text: `!!int 123` is a number and `!!null` is nothing, and
+    pre-commit rejects either where it wants a regex; a local `!name` is one
+    its loader does not know at all. The file does not load, so reading `123`
+    as a pattern here would judge a hook in a config that runs no hook -- and
+    call it live for `123.md`.
+    """
+    match = _TAG_RE.match(text)
+    if match is None:
+        return text
+    if match.group(1) != "!str":
+        raise ConfigRefused(
+            f"a value carries the tag `!{match.group(1)}`; only `!!str` is read here, "
+            "since pre-commit wants text and its loader takes nothing else"
+        )
+    return text[match.end() :]
+
+
+def _inline_value(text: str) -> str:
+    """A value as its own line carries it, the white space around it trimmed.
+
+    Except one character: an escaped space or tab at the end of a double-quoted
+    scalar that runs on to the next line is content -- `"^README\\ ` over
+    `[.]md$"` is `^README  [.]md$` to YAML, the escaped space and then the
+    folded break. Trimmed away with the rest, the lone backslash read as
+    escaping the break instead, and the two lines joined with nothing between:
+    a pattern that matched README.md, from a filter that never will.
+    """
+    lstripped = text.lstrip(" \t")
+    kept = lstripped.rstrip(" \t")
+    if len(kept) < len(lstripped) and _open_quote(kept) == '"' and _ends_with_escape(kept):
+        kept += lstripped[len(kept)]
+    return kept
 
 
 def _open_quote(text: str) -> str | None:
@@ -912,7 +950,7 @@ def _continuation(
     # A tag in front of the value -- `!!str |-` -- decorates it without changing
     # it, and comes off before the indicator is looked for; _scalar takes it
     # off a plain value the same way.
-    inline = _TAG_RE.sub("", inline)
+    inline = _untag(inline)
     if inline and _BLOCK_INDICATOR.fullmatch(inline):
         return inline
     value = inline
@@ -933,7 +971,7 @@ def _continuation(
         if item and text.startswith("- "):
             break
         if not value:
-            text = _TAG_RE.sub("", text)
+            text = _untag(text)
             if _BLOCK_INDICATOR.fullmatch(text.rstrip(" \t")):
                 return text.rstrip(" \t")
         if quote is None:
@@ -999,7 +1037,7 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    _, value = _top_value(cfg.lines, line, parsed[1].strip(" \t") if parsed else "")
+    _, value = _top_value(cfg.lines, line, parsed[1] if parsed else "")
     return value or None
 
 
@@ -1021,7 +1059,7 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    sequence, value = _top_value(cfg.lines, line, parsed[1].strip(" \t") if parsed else "")
+    sequence, value = _top_value(cfg.lines, line, parsed[1] if parsed else "")
     return "" if sequence else value  # a sequence where a scalar was asked for: nothing to read
 
 

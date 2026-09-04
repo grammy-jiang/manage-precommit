@@ -690,6 +690,18 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     # break still folds to a space: two spaces, as YAML has it.
     escaped_space = C.scan('files:\n  "^README\\ \n   [.]md$"\nrepos: []\n')
     assert C.top_level_scalar(escaped_space, "files") == "^README  [.]md$"
+    # The same escape at the end of the KEY's line, where the value starts.
+    # Trimmed with the line's white space, the lone backslash read as escaping
+    # the break, and the two lines joined with nothing between.
+    on_key = C.scan('files: "^README\\ \n  [.]md$"\nrepos: []\n')
+    assert C.top_level_scalar(on_key, "files") == "^README  [.]md$"
+    in_hook = C.scan(
+        "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+        '        files: "^README\\ \n          [.]md$"\n'
+    )
+    assert in_hook.repos[0].hooks[0].settings["files"] == "^README  [.]md$"
+    as_item = C.scan('default_stages:\n  - "pre-\\ \n    commit"\nrepos: []\n')
+    assert C.top_level_sequence(as_item, "default_stages") == "[pre-  commit]"
     # A tab before `#` opens a comment in a block item too.
     tab_item = C.scan("default_stages:\n  - pre-commit\t# ordinary\nrepos: []\n")
     assert C.top_level_sequence(tab_item, "default_stages") == "[pre-commit]"
@@ -721,6 +733,13 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     assert C.top_level_scalar(below, "exclude") == "^vendor/"
     hook = C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        exclude: !!str\n")
     assert hook.repos[0].hooks[0].settings["exclude"] == ""
+    # Only `!!str` is text. `!!int 123` is a number pre-commit rejects where it
+    # wants a regex, and a local tag is one its loader does not know: neither
+    # file loads, and neither value is read here as a pattern.
+    with pytest.raises(C.ConfigRefused, match=r"tag `!!int`.*line 5"):
+        C.scan("repos:\n  - repo: local\n    hooks:\n      - id: a\n        files: !!int 123\n")
+    with pytest.raises(C.ConfigRefused, match=r"tag `!mine`.*line 1"):
+        C.scan("exclude: !mine ^vendor/\nrepos: []\n")
     # A tag in front of a block-scalar indicator leaves it the indicator.
     tagged_block = C.scan("files: !!str |-\n  ^docs/\nrepos: []\n")
     assert C.top_level_scalar(tagged_block, "files") == "|-"
