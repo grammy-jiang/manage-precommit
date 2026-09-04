@@ -626,3 +626,73 @@ def test_an_html_block_ends_with_the_list_item_it_started_in(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD\n  A --> B", "flowchart TD\n  C --> D"]
+
+
+# -- review round 5: what may interrupt a paragraph, tabs and empty items -----------
+
+
+def test_a_tab_after_a_list_marker_puts_the_content_at_the_next_tab_stop(docs, env):
+    (docs / "doc.md").write_text("-\t```mermaid\n\tflowchart TD\n\t  A --> B\n\t```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_an_empty_list_item_still_encloses_the_fence_under_it(docs, env):
+    """`-` alone is an item whose content starts two columns in, so the fence
+    under it is inside the item -- and an unindented closer is outside it,
+    which is the missing closing fence it always was."""
+    (docs / "doc.md").write_text(
+        "-\n  ```mermaid\n  flowchart TD\n  ```\n\n-\n  ```mermaid\n  flowchart TD\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 1
+    assert env.parsed() == ["flowchart TD"]
+    assert "✖ doc.md:7" in proc.stderr
+    assert "never closed" in proc.stderr
+
+
+def test_only_a_one_may_start_an_ordered_list_under_prose(docs, env):
+    """`2. ` directly under a paragraph is prose, so the fence-looking text
+    after it is prose too; `1. ` interrupts the paragraph and opens an item,
+    and after a blank line any number will do."""
+    (docs / "doc.md").write_text(
+        # No closer after BAD on purpose: a bare ``` there would open a code
+        # block of its own and swallow the next lines, as CommonMark says.
+        "Some prose\n2. ```mermaid\nBAD\n\n"
+        "More prose\n1. ```mermaid\n   flowchart TD\n   ```\n\n"
+        "2. ```mermaid\n   pie\n   ```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD", "pie"]
+
+
+def test_an_empty_item_cannot_interrupt_a_paragraph_either(docs, env):
+    (docs / "doc.md").write_text("Some prose\n-\n  ```mermaid\n  flowchart TD\n  ```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    # `-` under prose is prose; the two-column fence after it is then a fence at
+    # the top level, closed by the two-column closer -- a diagram either way.
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD"]
+
+
+def test_a_lone_tag_after_a_heading_opens_an_html_block(docs, env):
+    """A heading leaves no paragraph open, so a complete tag right under it
+    starts a kind-7 HTML block without a blank line -- and the fence under
+    that is raw HTML until the block ends."""
+    (docs / "doc.md").write_text(
+        '# Title\n<img src="x.png">\n```mermaid\nBAD\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n'
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]
+
+
+def test_a_thematic_break_ends_a_paragraph_and_is_not_a_list(docs, env):
+    (docs / "doc.md").write_text(
+        "Prose\n* * *\n<b>\n```mermaid\nBAD\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"
+    )
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]

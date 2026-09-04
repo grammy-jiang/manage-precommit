@@ -49,9 +49,10 @@ if (files.length === 0) process.exit(0);
 //   line indented four or more columns past that is an indented code block, not
 //   a fence. So `    ```mermaid` at the top level is a literal example and
 //   stays text, while the same line under `1.` is the diagram it looks like. A
-//   fence may also open on the marker line itself (`- ```mermaid`). Lazy
-//   paragraph continuation is not modelled: a list is taken to end at the
-//   first non-blank line indented short of its content column.
+//   fence may also open on the marker line itself (`- ```mermaid`), and an
+//   empty item still opens an item. Lazy paragraph continuation is not
+//   modelled: a list is taken to end at the first non-blank line indented
+//   short of its content column.
 // - Raw HTML blocks. Markdown is suspended inside one, so a ```mermaid there is
 //   text -- most often a diagram commented out with `<!-- -->`, which is
 //   exactly the one that is broken. See HTML_BLOCKS.
@@ -61,14 +62,18 @@ if (files.length === 0) process.exit(0);
 const FENCE = /^( *)(`{3,}|~{3,})(.*)$/;
 const CLOSING = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const QUOTE = /^ {0,3}> ?/;
-const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])( +)(?=\S)/;
+// A list marker with content after it, or a bare one ending the line: an empty
+// item is an item too, and the indented fence under it is inside it.
+const MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(?=\S)|[ \t]*$)/;
+// The two leaf blocks that end a paragraph without opening one. A thematic
+// break is tried before a list marker, since `* * *` would read as either.
+const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+const THEMATIC = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
 
 // CommonMark's seven kinds of HTML block, by what ends them: the first five end
 // at a marker, which may sit on the opening line; the last two end at a blank
-// line. Kind 7 -- any other complete tag alone on its line -- cannot interrupt
-// a paragraph, and paragraphs are not tracked here, so it is honoured only
-// where no paragraph can be in progress: after a blank line, or at the start
-// of the document or container.
+// line. Kind 7 -- any other complete tag alone on its line -- is the one kind
+// that cannot interrupt a paragraph.
 const HTML_BLOCKS = [
   [/^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
   [/^ {0,3}<!--/, /-->/],
@@ -83,16 +88,25 @@ const HTML_BLOCKS = [
 const HTML_TAG_LINE =
   /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
 
-function htmlBlockStart(text, afterBlank) {
+function htmlBlockStart(text, mayInterrupt) {
   for (const [opens, end] of HTML_BLOCKS) {
     if (opens.test(text)) return { end };
   }
-  return afterBlank && HTML_TAG_LINE.test(text) ? { end: null } : null;
+  return !mayInterrupt && HTML_TAG_LINE.test(text) ? { end: null } : null;
 }
 
-// Leading tabs count as four columns; nothing here needs real tab stops.
+// Leading tabs count as four columns; nothing here needs real tab stops there.
 function expandTabs(line) {
   return line.replace(/^[ \t]*/, (ws) => ws.replace(/\t/g, "    "));
+}
+
+// Columns a run of spaces and tabs spans when it starts at `col`, a tab
+// reaching the next stop of four -- which is how `-\tfoo` puts its content at
+// column four and not at two.
+function widthOf(ws, col) {
+  let width = 0;
+  for (const ch of ws) width += ch === "\t" ? 4 - ((col + width) % 4) : 1;
+  return width;
 }
 
 function indentOf(text) {
@@ -141,6 +155,12 @@ function dedent(text, width) {
 // CommonMark closes an unclosed fence at the end of its container, which for a
 // diagram means "everything to the end" -- a missing closing fence, not a
 // diagram anybody meant. Reported rather than parsed.
+//
+// Paragraphs are tracked only as far as one question needs: whether the line
+// being read would have to INTERRUPT one to start a block. An empty list item,
+// an ordered item not numbered 1, and a kind-7 HTML tag cannot; everything else
+// here can. Not modelled, and accepted: lazy paragraph continuation, link
+// reference definitions, and tab stops inside content.
 function mermaidBlocks(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const blocks = [];
@@ -148,13 +168,14 @@ function mermaidBlocks(text) {
   let html = null; // the raw HTML block being skipped: what ends it, and the list item it is in
   let columns = []; // content columns of the list items enclosing this line
   let quoted = 0; // the quote depth those columns were measured at
-  let afterBlank = true; // whether a paragraph could be in progress
+  let paragraph = false; // whether a paragraph may be open at this line
 
   const leave = () => {
     if (open.lang === "mermaid") {
       blocks.push({ line: open.line, body: open.body === null ? null : open.body.join("\n") });
     }
     open = null;
+    paragraph = false;
   };
 
   lines.forEach((rawLine, i) => {
@@ -191,7 +212,7 @@ function mermaidBlocks(text) {
       columns = [];
       html = null;
       quoted = depth;
-      afterBlank = true;
+      paragraph = false;
     }
     const blank = unquoted.trim() === "";
     if (html !== null) {
@@ -201,47 +222,66 @@ function mermaidBlocks(text) {
         html = null;
       } else {
         if (html.end === null ? blank : html.end.test(unquoted)) html = null;
-        afterBlank = blank;
+        paragraph = false;
         return;
       }
     }
     if (blank) {
-      afterBlank = true; // blank lines leave lists as they are
+      paragraph = false; // blank lines leave lists as they are, and end a paragraph
       return;
     }
 
     const indent = indentOf(unquoted);
     while (columns.length > 0 && indent < columns[columns.length - 1]) columns.pop();
     const container = columns.length > 0 ? columns[columns.length - 1] : 0;
-    const wasAfterBlank = afterBlank;
-    afterBlank = false;
-    if (indent - container >= 4) return; // an indented code block, whatever it contains
+    // Indented code if no paragraph is open, a lazy continuation line if one
+    // is: neither opens anything, and neither changes which of the two it was.
+    if (indent - container >= 4) return;
 
     // The line relative to its container: its own indentation (at most three
     // columns) and the text, with any list marker it opens taken off first. A
     // marker is read relative to the enclosing item too, so a third-level item
     // sits at six columns from the margin and is still a marker.
+    const interrupting = paragraph;
+    paragraph = true; // an ordinary line of text, unless something below says otherwise
     let column = indent;
     let relative = dedent(unquoted, container);
     let enclosing = container;
+    if (HEADING.test(relative) || THEMATIC.test(relative)) {
+      paragraph = false;
+      return;
+    }
     const marker = MARKER.exec(relative);
     if (marker !== null) {
-      // Five or more spaces after a marker are content, not part of it.
-      const gap = marker[3].length >= 5 ? 1 : marker[3].length;
-      column = container + marker[1].length + marker[2].length + gap;
+      const bare = marker[3] === undefined;
+      const ordered = /^\d/.test(marker[2]);
+      // Only an item with content may interrupt a paragraph, and an ordered
+      // one only when it starts at 1; otherwise `2. ` under prose is prose.
+      if (interrupting && (bare || (ordered && parseInt(marker[2], 10) !== 1))) return;
+      const markerEnd = container + marker[1].length + marker[2].length;
+      const spanned = bare ? 1 : widthOf(marker[3], markerEnd);
+      // Five or more columns after a marker are content, not part of it.
+      const gap = spanned >= 5 ? 1 : spanned;
+      column = markerEnd + gap;
       columns.push(column);
       enclosing = column;
-      relative = unquoted.slice(column);
-      if (indentOf(relative) >= 4) return; // indented code on the marker line
+      if (bare) {
+        paragraph = false; // an empty item opens no paragraph
+        return;
+      }
+      if (spanned - gap >= 4) return; // indented code on the marker line
+      relative = " ".repeat(spanned - gap) + relative.slice(marker[0].length);
     }
-    const block = htmlBlockStart(relative, wasAfterBlank);
+    const block = htmlBlockStart(relative, interrupting);
     if (block !== null) {
       if (block.end === null || !block.end.test(relative)) html = { ...block, container: enclosing };
+      paragraph = false;
       return;
     }
     const fence = fenceOf(relative);
     if (fence !== null) {
       open = { ...fence, depth, container: enclosing, column, line: i + 1, body: [] };
+      paragraph = false;
     }
   });
 
