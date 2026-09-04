@@ -709,9 +709,15 @@ def test_a_non_boolean_where_pre_commit_wants_one_refuses_the_config():
         C.scan(head + "        always_run:\n          - true\n")
     with pytest.raises(C.ConfigRefused, match=r"holds a list, where pre-commit wants a boolean"):
         C.scan(head + "        always_run:\n          - x\n")
-    for spelling in ("true", "False", "yes", "NO", "on", "Off"):
+    for spelling in ("true", "False", "yes", "NO", "on", "Off", "!!bool true"):
         cfg = C.scan(head + f"        always_run: {spelling}\n        pass_filenames: {spelling}\n")
-        assert cfg.repos[0].hooks[0].settings["always_run"] == spelling
+        assert cfg.repos[0].hooks[0].settings["always_run"] == spelling.removeprefix("!!bool ")
+    # `!!bool` is the one tag a boolean may carry, and it does not make a word
+    # a boolean; a text key does not take it.
+    with pytest.raises(C.ConfigRefused, match=r"wants a boolean.*line 5"):
+        C.scan(head + "        always_run: !!bool maybe\n")
+    with pytest.raises(C.ConfigRefused, match=r"tag `!!bool`.*line 5"):
+        C.scan(head + "        files: !!bool true\n")
 
 
 def test_a_block_list_item_reads_back_whole():

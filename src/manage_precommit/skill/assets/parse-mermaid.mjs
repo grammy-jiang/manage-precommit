@@ -171,6 +171,20 @@ function closes(text, open) {
   return m !== null && m[1][0] === open.char && m[1].length >= open.length;
 }
 
+// Whether `text`, met where a paragraph is open, starts a block of its own
+// rather than continuing that paragraph: everything that may interrupt one,
+// plus a setext underline, which cannot be a lazy continuation line either.
+function startsBlock(text) {
+  if (indentOf(text) >= 4) return false;
+  if (QUOTE.test(text) || fenceOf(text) !== null) return true;
+  if (HEADING.test(text) || THEMATIC.test(text) || SETEXT.test(text)) return true;
+  if (htmlBlockStart(text, true) !== null) return true;
+  const marker = MARKER.exec(text);
+  if (marker === null) return false;
+  const bare = marker[3] === undefined;
+  return !bare && !(/^\d/.test(marker[2]) && parseInt(marker[2], 10) !== 1);
+}
+
 function dedent(text, width) {
   let n = 0;
   while (n < width && text[n] === " ") n++;
@@ -225,13 +239,28 @@ function mermaidBlocks(text) {
         text = q.rest;
         offset += q.consumed;
       } else if (!isBlank(text)) {
-        // Lazy continuation does not reach into a code block, and is not
-        // modelled elsewhere either: short of the content column, the item ends.
+        // Short of the content column, the item ends -- unless the line turns
+        // out to be a lazy continuation, judged below.
         if (indentOf(text) < container.column) break;
         text = text.slice(container.column);
         offset += container.column;
       }
       kept++;
+    }
+    if (
+      kept < containers.length &&
+      open === null &&
+      html === null &&
+      paragraph &&
+      !isBlank(text) &&
+      !startsBlock(text)
+    ) {
+      // A lazy continuation line: short of its container, but a paragraph is
+      // open and this line would only continue it -- `2. ` under prose is prose
+      // inside a list item as much as outside one. Every container stays open,
+      // the paragraph goes on, and nothing on such a line opens a fence. A code
+      // block never continues lazily (`open` is null here), nor does raw HTML.
+      return;
     }
     closeBeyond(kept);
 

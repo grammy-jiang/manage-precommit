@@ -387,7 +387,7 @@ def flow_items(raw: str, *, text: bool = False) -> list[str]:
     return out
 
 
-def _scalar(raw: str, *, text: bool = False) -> str:
+def _scalar(raw: str, *, text: bool = False, tags: tuple[str, ...] = ("!str",)) -> str:
     """The value of a scalar: quotes removed, escapes resolved, comment dropped.
 
     Only spaces and tabs are trimmed: YAML's white space is those two, and a
@@ -401,11 +401,21 @@ def _scalar(raw: str, *, text: bool = False) -> str:
     does not load; read as the text `null`, the value was a live pattern, one
     reaching `null.md`. Quoted, or tagged `!!str`, the same characters are
     text and are read as written.
+
+    `tags` are the tags the value may carry: `!!str` everywhere, `!!bool` where
+    a boolean is wanted. Any other -- `!!int 123`, `!!null`, a local `!name`
+    pre-commit's loader does not know -- refuses: the file does not load, and
+    reading `123` as a pattern would judge a hook in a config that runs no
+    hook, and call it live for `123.md`.
     """
-    raw = raw.strip(" \t")
-    tagged = raw.startswith("!")
-    # A tag says what the value is: `!!str` comes off, anything else refuses.
-    raw = _untag(raw)
+    tag, raw = _split_tag(raw.strip(" \t"))
+    tagged = tag is not None
+    if tagged and tag not in tags:
+        allowed = " or ".join(f"`!{t}`" for t in tags)
+        raise ConfigRefused(
+            f"a value carries the tag `!{tag}`; only {allowed} is read here, since that is "
+            "what pre-commit wants and its loader takes nothing else"
+        )
     if raw[:1] in ('"', "'"):
         end = _quote_end(raw, 0)
         if end == -1:
@@ -928,11 +938,12 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
     the way _scalar refuses a flow one.
     """
     text = key in TEXT_GATING_KEYS
+    tags = ("!str", "!bool") if key in BOOL_GATING_KEYS else ("!str",)
     if inline:
         # The key's own value, folded with any lines that continue it; an
         # indicator such as `|-` comes back untouched.
         raw = _continuation(lines, key_line, inline, key_indent)
-        return _listed(key, _boolean(key, raw, _scalar(raw, text=text)))
+        return _listed(key, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
     # `stages:` followed by a block sequence -- indented, or at the key's own
     # column -- is the everyday way to write this, and reading only the inline
     # scalar left it as "", which every caller treats as "not set": a hook
@@ -947,19 +958,23 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
             raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants {wanted}")
         return block
     raw = _continuation(lines, key_line, "", key_indent)
-    return _listed(key, _boolean(key, raw, _scalar(raw, text=text)))
+    return _listed(key, _boolean(key, raw, _scalar(raw, text=text, tags=tags)))
 
 
 def _boolean(key: str, raw: str, value: str) -> str:
     """`value`, once it is the boolean a BOOL_GATING_KEYS key has to hold.
 
     `raw` is the value as written and `value` the scalar read from it. Only a
-    plain YAML boolean spelling is one: quoted, `"true"` is a string, `!!str
-    true` the same, `maybe` a word, and nothing at all is null -- pre-commit's
-    schema rejects each, and the file does not load. Read as its spelling, the
-    value was then compared as though it were the boolean it is not.
+    plain YAML boolean spelling is one, with or without a `!!bool` tag: quoted,
+    `"true"` is a string, `!!str true` the same, `maybe` a word, and nothing at
+    all is null -- pre-commit's schema rejects each, and the file does not
+    load. Read as its spelling, the value was then compared as though it were
+    the boolean it is not.
     """
-    if key in BOOL_GATING_KEYS and not _YAML_BOOL.fullmatch(_code_only(raw).strip(" \t")):
+    if key not in BOOL_GATING_KEYS:
+        return value
+    tag, bare = _split_tag(_code_only(raw).strip(" \t"))
+    if (tag not in (None, "!bool")) or not _YAML_BOOL.fullmatch(bare.strip(" \t")):
         what = "nothing" if not value else f"`{value}`"
         raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a boolean")
     return value
@@ -1028,29 +1043,19 @@ _BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$")
 _TAG_RE = re.compile(r"^!([^ \t]*)(?:[ \t]+|$)")
 
 
-def _untag(text: str) -> str:
-    """`text` without a leading `!!str` tag; any other tag refuses the config.
+def _split_tag(text: str) -> tuple[str | None, str]:
+    """The leading tag -- `!str` for `!!str`, `name` for a local `!name` -- and the rest.
 
-    A tag says what the value is. `!!str` says text, which is all this scanner
-    reads, so it comes off and what follows is read as written -- `exclude:
-    !!str` with nothing after it being the empty string, the pattern that
-    matches every path; read as the text `!!str` it was a pattern matching no
-    file, and a hook pre-commit hands nothing stood as live coverage. Anything
-    else is not text: `!!int 123` is a number and `!!null` is nothing, and
-    pre-commit rejects either where it wants a regex; a local `!name` is one
-    its loader does not know at all. The file does not load, so reading `123`
-    as a pattern here would judge a hook in a config that runs no hook -- and
-    call it live for `123.md`.
+    (None, text) when there is no tag. A tag says what the value is, not what
+    it says: `!!str` says text, `!!bool` a boolean. Which tags a value may
+    carry is the caller's to decide (see _scalar); this only takes it off, so
+    the value behind it can be read -- `exclude: !!str` with nothing after the
+    tag being the empty string, the pattern that matches every path.
     """
     match = _TAG_RE.match(text)
     if match is None:
-        return text
-    if match.group(1) != "!str":
-        raise ConfigRefused(
-            f"a value carries the tag `!{match.group(1)}`; only `!!str` is read here, "
-            "since pre-commit wants text and its loader takes nothing else"
-        )
-    return text[match.end() :]
+        return None, text
+    return match.group(1), text[match.end() :]
 
 
 def _inline_value(text: str) -> str:
@@ -1129,7 +1134,7 @@ def _continuation(
     # returned, because _scalar has to see it. `!!str null` is the text `null`,
     # and `!!str` with nothing after it the empty string; untagged, both would
     # be refused there as the null they are to YAML without the tag.
-    if _untag(inline) and _BLOCK_INDICATOR.fullmatch(_untag(inline)):
+    if _split_tag(inline)[1] and _BLOCK_INDICATOR.fullmatch(_split_tag(inline)[1]):
         return inline
     value = inline
     pending_break = False  # a blank line since the last part: folds to a newline
@@ -1148,7 +1153,7 @@ def _continuation(
         text = line.lstrip(" \t")  # trailing white space is decided below
         if item and text.startswith("- "):
             break
-        if not value and _BLOCK_INDICATOR.fullmatch(_untag(text).rstrip(" \t")):
+        if not value and _BLOCK_INDICATOR.fullmatch(_split_tag(text)[1].rstrip(" \t")):
             return text.rstrip(" \t")
         if quote is None:
             # Outside a quoted scalar a comment ends at this line; _code_only

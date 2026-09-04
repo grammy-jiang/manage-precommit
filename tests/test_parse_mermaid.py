@@ -668,6 +668,32 @@ def test_only_a_one_may_start_an_ordered_list_under_prose(docs, env):
     assert env.parsed() == ["flowchart TD", "pie"]
 
 
+def test_a_lazy_continuation_line_keeps_the_list_item_and_its_paragraph(docs, env):
+    """`- paragraph` then `2. ```mermaid` at the outer indentation: an ordered
+    item starting at 2 cannot interrupt a paragraph, so the line is a lazy
+    continuation of the item's paragraph -- prose -- and the fence it seems to
+    open is text, as is the `BAD` under it. Closing the item first and
+    reparsing the line as a new item made it an unclosed fence. Under a blank
+    line the same line IS a new item, and its fence a diagram; and a bullet
+    may interrupt, so `- ```mermaid` under prose opens an item and a fence."""
+    (docs / "doc.md").write_text("- paragraph\n2. ```mermaid\nBAD\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == []
+    (docs / "doc.md").write_text("- paragraph\n\n2. ```mermaid\n   flowchart TD\n   ```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD"]
+    (docs / "doc.md").write_text("- paragraph\n- ```mermaid\n  flowchart LR\n  ```\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD", "flowchart LR"]
+    # And inside a block quote the same way: `> para` then a lazy `2. ` line.
+    (docs / "doc.md").write_text("> paragraph\n2. ```mermaid\nBAD\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_an_empty_item_cannot_interrupt_a_paragraph_either(docs, env):
     (docs / "doc.md").write_text("Some prose\n-\n  ```mermaid\n  flowchart TD\n  ```\n")
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
