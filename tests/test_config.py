@@ -832,7 +832,7 @@ def test_flow_items_are_trimmed_of_line_breaks_and_refuse_a_bracket_inside_a_pla
         "pre-commit",
     ]
     head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
-    for value in ("[markdown, foo[bar]", "[a, b]c]", "[a, {b}]"):
+    for value in ("[markdown, foo[bar]", "[a, b]c]", "[a, {b}]", "[markdown, |]", "[>-, a]"):
         with pytest.raises(C.ConfigRefused, match="line 5"):
             C.scan(head + f"        types_or: {value}\n")
     cfg = C.scan(head + "        types_or: [markdown, 'foo[bar']\n")

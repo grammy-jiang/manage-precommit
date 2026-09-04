@@ -156,15 +156,20 @@ function unquote(text, col) {
 // CommonMark resolves character references in an info string, so a fence
 // written ```mer&#109;aid is a Mermaid fence to every renderer. Numeric
 // references (decimal, up to 7 digits; hex, up to 6) are decoded here, with an
-// invalid code point becoming U+FFFD as the spec says. Named references are not:
-// none of HTML's named entities decodes to an ASCII letter, so none can spell
-// or unspell the word this hook looks for, and the table is not worth carrying.
+// invalid code point becoming U+FFFD as the spec says. Of the named references,
+// only the two that decode to ASCII white space are: `&Tab;` and `&NewLine;`
+// end the first word, as `mermaid&Tab;title=x` shows. No other named entity
+// decodes to an ASCII letter or to ASCII white space, so no other can spell,
+// unspell or end the word this hook looks for, and the table is not carried.
+const NAMED_SPACE = { Tab: "\t", NewLine: "\n" };
 function decodeReferences(text) {
-  return text.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));/g, (whole, hex, dec) => {
-    const point = hex !== undefined ? parseInt(hex, 16) : parseInt(dec, 10);
-    const valid = point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff);
-    return String.fromCodePoint(valid ? point : 0xfffd);
-  });
+  return text
+    .replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));/g, (whole, hex, dec) => {
+      const point = hex !== undefined ? parseInt(hex, 16) : parseInt(dec, 10);
+      const valid = point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff);
+      return String.fromCodePoint(valid ? point : 0xfffd);
+    })
+    .replace(/&(Tab|NewLine);/g, (whole, name) => NAMED_SPACE[name]);
 }
 
 function fenceOf(text) {
@@ -175,11 +180,13 @@ function fenceOf(text) {
   // The whole info string is decoded before its first word is taken, as
   // CommonMark has it: `mermaid&#9;title=x` is `mermaid`, a tab, and a title.
   // The backtick rule above is judged on the spelling, as the spec judges it.
-  const decoded = decodeReferences(info).replace(/^[ \t]+|[ \t]+$/g, "");
+  // The first word ends at ASCII white space, as cmark's does -- which a
+  // decoded reference may have put there.
+  const decoded = decodeReferences(info).replace(/^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g, "");
   return {
     char: run[0],
     length: run.length,
-    lang: (decoded.split(/[ \t]+/)[0] ?? "").toLowerCase(),
+    lang: (decoded.split(/[ \t\n\r\f\v]+/)[0] ?? "").toLowerCase(),
     indent: indent.length,
   };
 }

@@ -383,6 +383,13 @@ def flow_items(raw: str, *, text: bool = False) -> list[str]:
             raise ConfigRefused(
                 f"`{bare}` holds a flow indicator inside a plain item, which YAML does not allow"
             )
+        if bare[0] in "|>":
+            # A block-scalar indicator has no place in a flow sequence --
+            # `[markdown, |]` stops the loader -- and was read as the tag `|`.
+            raise ConfigRefused(
+                f"`{bare}` starts with a block indicator inside a flow sequence, which YAML "
+                "does not allow"
+            )
         out.append(_scalar(bare, text=text))
     return out
 

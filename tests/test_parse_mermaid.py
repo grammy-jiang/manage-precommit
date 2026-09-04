@@ -702,12 +702,23 @@ def test_character_references_in_the_info_string_are_decoded(docs, env):
     (docs / "doc.md").write_text(
         "```mer&#109;aid\nflowchart TD\n```\n\n```MER&#x6D;AID\nflowchart LR\n```\n"
         "\n```mermaid&#33;\nnot mermaid\n```\n"
-        # Decoded before the first word is taken: `&#9;` is a tab, and ends it.
+        # Decoded before the first word is taken: `&#9;` is a tab, and ends it,
+        # as do the two named references that decode to ASCII white space.
         "\n```mermaid&#9;title=x\nflowchart RL\n```\n"
+        "\n```mermaid&Tab;title=x\nflowchart BT\n```\n"
+        "\n```mermaid&NewLine;title=x\nflowchart TB\n```\n"
+        # `&nbsp;` is U+00A0, not ASCII white space: the word runs on.
+        "\n```mermaid&nbsp;x\nnot mermaid\n```\n"
     )
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
-    assert env.parsed() == ["flowchart TD", "flowchart LR", "flowchart RL"]
+    assert env.parsed() == [
+        "flowchart TD",
+        "flowchart LR",
+        "flowchart RL",
+        "flowchart BT",
+        "flowchart TB",
+    ]
 
 
 def test_an_empty_item_cannot_interrupt_a_paragraph_either(docs, env):
