@@ -1362,20 +1362,20 @@ def looks_disabled(
         stages, origin = top.default_stages, "default_stages"
     if stages and not (parse_stages(stages) & RUNS_ON_COMMIT):
         return f"{origin}: {stages}"
-    # always_run: true makes the hook fire whatever files: and exclude: say,
-    # which is exactly why config.py captures it. Reading stages first is
-    # deliberate -- always_run does not put a hook back on a stage it was
-    # excluded from. And firing is not coverage for a hook that consumes its
-    # filenames: pre-commit runs it with the files the scope admits, which may
-    # be none, and both mermaid scripts exit 0 on an empty argv. Only a hook
-    # that ignores the file list -- gitleaks, which scans the staged diff -- is
-    # made live by it; `pass_filenames` on the hook itself overrides what the
-    # catalog knows about the upstream definition.
-    if settings.get("always_run", "").lower() in ("true", "yes", "on"):
-        explicit = settings.get("pass_filenames", "").lower()
-        consumes = explicit in ("true", "yes", "on") if explicit else consumes_files
-        if not consumes:
-            return None
+    # Whether the PROGRAM reads its file list is the catalog's knowledge --
+    # both mermaid scripts do, and exit 0 on an empty argv; gitleaks scans the
+    # staged diff and never looks. Two consequences. `pass_filenames: false` on
+    # a hook whose program reads the list hands it none: a run over nothing,
+    # whatever the scope says. And `always_run: true` -- which makes the hook
+    # fire whatever files: and exclude: say, and is exactly why config.py
+    # captures it -- is coverage only for a program that ignores the list;
+    # for one that reads it, the scope still decides what it is handed.
+    # Reading stages first is deliberate: always_run does not put a hook back
+    # on a stage it was excluded from.
+    if consumes_files and settings.get("pass_filenames", "").lower() in ("false", "no", "off"):
+        return "pass_filenames: false (this hook reads its file list, and is handed none)"
+    if not consumes_files and settings.get("always_run", "").lower() in ("true", "yes", "on"):
+        return None
     own: list[Filter] = [
         (key, settings[key], excluding)
         for key, excluding in (("files", False), ("exclude", True))

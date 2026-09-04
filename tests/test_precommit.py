@@ -4485,8 +4485,7 @@ def test_always_run_is_not_coverage_for_a_hook_that_consumes_filenames(repo, stu
     """pre-commit runs an `always_run` hook whatever its scope admits -- with
     the files it admits, which may be none. Both mermaid scripts exit 0 on an
     empty argv, so that is a run over nothing. gitleaks ignores its file list
-    (upstream sets `pass_filenames: false`) and is genuinely live; a hook that
-    says so itself is too."""
+    (upstream sets `pass_filenames: false`) and is genuinely live."""
     (repo / "doc.md").write_text("# hi\n")
     hook = (
         "repos:\n  - repo: local\n    hooks:\n"
@@ -4497,9 +4496,25 @@ def test_always_run_is_not_coverage_for_a_hook_that_consumes_filenames(repo, stu
     (repo / ".pre-commit-config.yaml").write_text(hook)
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
     assert "mermaid" in got["disabled"], got["disabled"]
-    (repo / ".pre-commit-config.yaml").write_text(hook + "        pass_filenames: false\n")
+
+
+def test_pass_filenames_false_on_a_hook_that_reads_its_file_list_is_a_run_over_nothing(repo, stubs):
+    """What the program does is the catalog's knowledge: both mermaid scripts
+    read argv, so a hook that hands them none -- whatever its scope, and
+    whether or not it is `always_run` -- checks nothing. gitleaks never reads
+    the list, so the same setting on it changes nothing."""
+    (repo / "doc.md").write_text("# hi\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+        "        files: '(?i)\\.(md|markdown)$'\n        pass_filenames: false\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        pass_filenames: false\n"
+    )
     got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
-    assert got["disabled"] == {}, got["disabled"]
+    assert set(got["disabled"]) == {"mermaid-parse"}, got["disabled"]
+    assert "pass_filenames: false" in got["disabled"]["mermaid-parse"][0]
 
 
 def test_an_explicitly_empty_exclude_is_a_pattern_that_matches_everything(repo, stubs):
