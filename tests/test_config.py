@@ -683,6 +683,33 @@ def test_a_plain_value_yaml_cannot_start_refuses_the_config():
         C.scan("default_stages:\n  - manual\n  - 123\nrepos: []\n")
 
 
+def test_a_non_boolean_where_pre_commit_wants_one_refuses_the_config():
+    """`always_run` and `pass_filenames` are booleans in pre-commit's schema:
+    `"true"` in quotes is a string, `maybe` a word, `!!str yes` a string again,
+    and nothing after the colon is null. pre-commit rejects each, and the file
+    does not load; read as its spelling, the value was then compared as though
+    it were the boolean it is not. Every plain YAML 1.1 spelling is one."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    for line in (
+        'pass_filenames: "true"',
+        "always_run: maybe",
+        "always_run: !!str yes",
+        "always_run:",
+        "always_run: 1",
+    ):
+        with pytest.raises(C.ConfigRefused, match=r"wants a boolean.*line 5"):
+            C.scan(head + f"        {line}\n")
+    # A list under a boolean key is refused too -- at the item, since a list's
+    # items are read as text and `true` is not, before the shape is even asked.
+    with pytest.raises(C.ConfigRefused, match=r"line 5"):
+        C.scan(head + "        always_run:\n          - true\n")
+    with pytest.raises(C.ConfigRefused, match=r"holds a list, where pre-commit wants a boolean"):
+        C.scan(head + "        always_run:\n          - x\n")
+    for spelling in ("true", "False", "yes", "NO", "on", "Off"):
+        cfg = C.scan(head + f"        always_run: {spelling}\n        pass_filenames: {spelling}\n")
+        assert cfg.repos[0].hooks[0].settings["always_run"] == spelling
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""

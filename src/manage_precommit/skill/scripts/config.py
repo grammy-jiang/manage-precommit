@@ -86,6 +86,13 @@ TEXT_GATING_KEYS = ("files", "exclude")
 # a scalar where pre-commit's schema wants an array, and the file would not
 # load; read as a one-item list it judged a hook in a config that runs none.
 LIST_GATING_KEYS = ("stages", "types", "types_or", "exclude_types", "default_stages")
+# ... and the ones it wants as a boolean. Only a plain YAML boolean spelling
+# will do: `pass_filenames: "true"` is a string and `always_run: maybe` a word,
+# and pre-commit rejects both, so the file would not load.
+BOOL_GATING_KEYS = ("always_run", "pass_filenames")
+_YAML_BOOL = re.compile(
+    r"yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
+)
 # The top-level keys that gate every hook the same way, and whose values the
 # scan reads once so a refusal lands at scan time with its line.
 TOP_LEVEL_GATING_KEYS = ("files", "exclude", "default_stages")
@@ -871,7 +878,8 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
     if inline:
         # The key's own value, folded with any lines that continue it; an
         # indicator such as `|-` comes back untouched.
-        return _listed(key, _scalar(_continuation(lines, key_line, inline, key_indent), text=text))
+        raw = _continuation(lines, key_line, inline, key_indent)
+        return _listed(key, _boolean(key, raw, _scalar(raw, text=text)))
     # `stages:` followed by a block sequence -- indented, or at the key's own
     # column -- is the everyday way to write this, and reading only the inline
     # scalar left it as "", which every caller treats as "not set": a hook
@@ -881,10 +889,27 @@ def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int,
     # then as a pattern matching every path.
     block = _block_sequence(lines, key_line, key_indent)
     if block:
-        if text:
-            raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants text")
+        if text or key in BOOL_GATING_KEYS:
+            wanted = "text" if text else "a boolean"
+            raise ConfigRefused(f"`{key}:` holds a list, where pre-commit wants {wanted}")
         return block
-    return _listed(key, _scalar(_continuation(lines, key_line, "", key_indent), text=text))
+    raw = _continuation(lines, key_line, "", key_indent)
+    return _listed(key, _boolean(key, raw, _scalar(raw, text=text)))
+
+
+def _boolean(key: str, raw: str, value: str) -> str:
+    """`value`, once it is the boolean a BOOL_GATING_KEYS key has to hold.
+
+    `raw` is the value as written and `value` the scalar read from it. Only a
+    plain YAML boolean spelling is one: quoted, `"true"` is a string, `!!str
+    true` the same, `maybe` a word, and nothing at all is null -- pre-commit's
+    schema rejects each, and the file does not load. Read as its spelling, the
+    value was then compared as though it were the boolean it is not.
+    """
+    if key in BOOL_GATING_KEYS and not _YAML_BOOL.fullmatch(_code_only(raw).strip(" \t")):
+        what = "nothing" if not value else f"`{value}`"
+        raise ConfigRefused(f"`{key}:` holds {what}, where pre-commit wants a boolean")
+    return value
 
 
 def _listed(key: str, value: str) -> str:
