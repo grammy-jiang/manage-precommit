@@ -4615,6 +4615,31 @@ def test_coverage_is_judged_on_the_path_as_git_names_it(repo, stubs):
     assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
 
 
+def test_a_live_alternative_must_reach_every_fence_file_to_stand_in(repo, stubs):
+    """The probe records every Markdown file with a fence, not only the first
+    it meets. A renderer scoped to `^a/` covers `a/covered.md` and never sees
+    `z/uncovered.md`, so the recommendation stands; scoped to every Markdown
+    file, it is stood in for."""
+    (repo / "a").mkdir()
+    (repo / "z").mkdir()
+    (repo / "a" / "covered.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / "z" / "uncovered.md").write_text("```mermaid\ngraph TD;\nC-->D;\n```\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '^a/'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert offered.get("mermaid-parse") == "a/covered.md"  # the first file, as always
+    assert got["detected_paths"] == ["README.md", "a/covered.md"]  # unchanged: one trigger
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        files: '\\.md$'\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" not in {r["name"] for r in got["recommended"]}
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

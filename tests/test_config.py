@@ -637,6 +637,10 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     nbsp = C.scan("files: ^a\u00a0\nexclude:\n  ^b\u00a0\nrepos: []\n")
     assert C.top_level_scalar(nbsp, "files") == "^a\u00a0"
     assert C.top_level_scalar(nbsp, "exclude") == "^b\u00a0"
+    # And only a space or a tab before `#` opens a comment: `README\u00a0#missing`
+    # is one value, to YAML and to pre-commit.
+    hashed = C.scan("files: README\u00a0#missing\nrepos: []\n")
+    assert C.top_level_scalar(hashed, "files") == "README\u00a0#missing"
     # A plain scalar may start on the key's line and continue below it.
     prefixed = C.scan(
         "files: ^docs/\n  a\\.md$\ndefault_stages: [manual,\n  pre-push]\nrepos: []\n"

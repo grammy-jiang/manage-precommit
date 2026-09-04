@@ -1100,7 +1100,7 @@ def prerequisites() -> dict[str, str]:
 
 def detect_markers(
     directory: str,
-) -> tuple[list[Recommendation], list[str], list[str], dict[str, str]]:
+) -> tuple[list[Recommendation], list[str], list[str], dict[str, list[str]]]:
     """Which catalog entries the repo's contents call for, and the file that says so.
 
     The `reason` is always a path that was actually seen, never a category. A
@@ -1110,11 +1110,13 @@ def detect_markers(
     markers: list[str] = []
     trigger_paths: list[str] = []
     recs: list[Recommendation] = []
-    # The file behind each recommendation as git names it. `reason` is that
-    # path cleaned for display, and `clean` strips whitespace -- so a filename
-    # with a leading space would be tested against a name pre-commit never
-    # sees. Coverage is judged on this copy.
-    raw_paths: dict[str, str] = {}
+    # The files behind each recommendation as git names them. `reason` is the
+    # first of them cleaned for display, and `clean` strips whitespace -- so a
+    # filename with a leading space would be tested against a name pre-commit
+    # never sees. Coverage is judged on this copy, and on every file in it: a
+    # renderer scoped to `^a/` covers `a/covered.md` and not `z/uncovered.md`,
+    # and both carry a fence.
+    raw_paths: dict[str, list[str]] = {}
 
     markdown = [p for p in paths if p.lower().endswith((".md", ".markdown"))]
     # The FIRST one that is a real regular file, not simply the first one. This
@@ -1127,7 +1129,7 @@ def detect_markers(
     safe_markdown = [p for p in markdown if not os.path.islink(os.path.join(directory, p))]
     if safe_markdown:
         recs.append({"name": "markdownlint", "reason": clean(safe_markdown[0])})
-        raw_paths["markdownlint"] = safe_markdown[0]
+        raw_paths["markdownlint"] = [safe_markdown[0]]
         markers.append(f"markdown ({clean(safe_markdown[0])})")
         trigger_paths.append(safe_markdown[0])
     if markdown:
@@ -1144,16 +1146,21 @@ def detect_markers(
             except OSError:
                 continue
             text = raw.decode("utf-8", "replace")
-            if MERMAID_FENCE.search(text):
+            if not MERMAID_FENCE.search(text):
+                continue
+            # Every file with a fence, for the coverage judgement; the marker,
+            # the trigger path and the reason name the first, as they always
+            # have. The probe stays bounded by MAX_MERMAID_PROBES either way.
+            fenced = raw_paths.setdefault("mermaid-parse", [])
+            if not fenced:
                 # The syntax check, not the renderer: a pre-commit hook is a
                 # syntax check first, and this one needs no browser. `mermaid`
                 # stays in the catalog for render-level coverage, asked for by
                 # name; cmd_recommend offers neither while the other is present.
                 recs.append({"name": "mermaid-parse", "reason": clean(rel)})
-                raw_paths["mermaid-parse"] = rel
                 markers.append(f"mermaid fence ({clean(rel)})")
                 trigger_paths.append(rel)
-                break
+            fenced.append(rel)
 
     # Offered for every repo: a secret scan is not conditional on what the tree
     # happens to contain today.
@@ -2192,8 +2199,10 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
         # recommendation names -- judged on the path as git names it, since
         # `reason` is that path cleaned for display.
         alternatives = set(CATALOG[rec["name"]].get("alternatives", ())) & covering
-        path = raw_paths.get(rec["name"], rec["reason"])
-        return any(reaches(cfg, alt, path, listing) for alt in alternatives) if cfg else False
+        paths = raw_paths.get(rec["name"], [rec["reason"]])
+        if not cfg:
+            return False
+        return any(all(reaches(cfg, alt, p, listing) for p in paths) for alt in alternatives)
 
     recs = [r for r in recs if not stood_in_for(r)]
     proposed = [k for k in ALWAYS_ON if k not in previous] + [

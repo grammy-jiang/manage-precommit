@@ -338,9 +338,10 @@ def _code_only(line: str) -> str:
                 return line  # unterminated: _split_key refuses it properly
             i = end
             continue
-        if ch == "#" and (i == 0 or line[i - 1].isspace()):
-            # YAML opens a comment only at an unquoted # preceded by whitespace
-            # (or at the start of the line). Cutting at any # truncated ordinary
+        if ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            # YAML opens a comment only at an unquoted # preceded by white space
+            # -- a space or a tab, not a U+00A0, which is content -- or at the
+            # start of the line. Cutting at any # truncated ordinary
             # values -- `id: check-todo#123`, `exclude: vendor/.*#generated$` --
             # silently, which is the outcome this module says is worse than a
             # refusal. _scalar had the rule right; _code_only ran first and
