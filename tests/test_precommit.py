@@ -3293,6 +3293,23 @@ def test_the_configs_own_files_filter_is_part_of_every_hooks_scope(repo, stubs):
     assert "the config's files: \\.py$ (matches no file here)" in got["disabled"]["gitleaks"][0]
 
 
+@pytest.mark.parametrize(
+    "top",
+    ["files:\n  ^src/\n", "default_stages:\n  [manual]\n"],
+    ids=["continued-filter", "continued-flow-default_stages"],
+)
+def test_a_config_wide_setting_continued_onto_the_next_line_still_counts(repo, stubs, top):
+    """The same two settings written with their value on the following line --
+    valid YAML the scanner read as empty, so a config-wide filter vanished from
+    every scope and a stage default read as unset."""
+    (repo / ".pre-commit-config.yaml").write_text(
+        top + "repos:\n  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "gitleaks" in got["disabled"], got["disabled"]
+
+
 def test_a_config_wide_filter_that_kills_mermaid_frees_its_alternative(
     repo, keys_file, facts_path, stubs
 ):

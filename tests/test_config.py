@@ -575,6 +575,24 @@ def test_top_level_sequence_reads_flow_and_block_forms_alike():
     # config in which this reader would meet one.
 
 
+def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
+    """`files:\n  ^src/` and `default_stages:\n  [manual]` are ordinary YAML.
+    Read from the key's own line only, both came back empty -- a config-wide
+    filter silently dropped from every hook's scope, a stage default read as
+    unset -- and YAML's own rule for the continued lines of a plain or flow
+    scalar is to fold them with single spaces."""
+    cfg = C.scan(
+        "files:\n  ^src/\nexclude:\n  # a comment between\n  ^vendor/\n"
+        "default_stages:\n  [manual,\n   pre-push]\nrepos: []\n"
+    )
+    assert C.top_level_scalar(cfg, "files") == "^src/"
+    assert C.top_level_scalar(cfg, "exclude") == "^vendor/"
+    assert C.top_level_sequence(cfg, "default_stages") == "[manual, pre-push]"
+    block = C.scan("default_stages:\n  - manual\nrepos: []\n")
+    assert C.top_level_sequence(block, "default_stages") == "[manual]"
+    assert C.top_level_scalar(cfg, "fail_fast") is None
+
+
 def test_top_level_scalar_is_public():
     """precommit.py was reaching through _split_key + _scalar, twice."""
     cfg = C.scan("exclude: '^vendor/'\nrepos:\n  - repo: https://x/y\n    hooks:\n      - id: a\n")

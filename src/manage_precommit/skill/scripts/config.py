@@ -733,13 +733,33 @@ def reindent(block: str, spaces: int) -> str:
     return "\n".join(out)
 
 
+def _continuation(lines: list[str], key_line: int) -> list[str]:
+    """The indented lines that carry a top-level key's value when its own line does not.
+
+    YAML lets a value start on the next line -- `files:\n  ^src/`, or
+    `default_stages:\n  [manual]` -- and folds the lines of a plain or flow
+    scalar with single spaces. A line at column zero is the next key and ends
+    it; blank lines and comments are skipped.
+    """
+    out: list[str] = []
+    for j in range(key_line + 1, len(lines)):
+        line = lines[j]
+        if _is_blank_or_comment(line):
+            continue
+        if _indent_of(line) == 0:
+            break
+        out.append(line.strip())
+    return out
+
+
 def top_level_sequence(cfg: Config, key: str) -> str | None:
     """A top-level `<key>:` sequence as "[a, b]", whichever form the file used.
 
     None when the key is absent. `default_stages:` is the one that matters:
     written as a block sequence, `top_level_scalar` read it as "" and every
     caller treats "" as unset -- the same blindness `_block_sequence` exists to
-    cure for a hook's own `stages:`, one level up.
+    cure for a hook's own `stages:`, one level up. A flow sequence continued
+    onto the next line is read too, folded the way YAML folds it.
     """
     if key not in cfg.top_keys:
         return None
@@ -747,7 +767,11 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
     parsed = _split_key(cfg.lines[line])
     value = _scalar(parsed[1]) if parsed else ""
     if not value:
-        value = _block_sequence(cfg.lines, line, 0)
+        continued = _continuation(cfg.lines, line)
+        if continued and continued[0].startswith("- "):
+            value = _block_sequence(cfg.lines, line, 0)
+        elif continued:
+            value = _scalar(" ".join(continued))
     return value or None
 
 
@@ -759,11 +783,22 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
     module's underscore names means the public surface is insufficient for its
     own consumer, and it pins two unrelated functions in another file to the
     private return shape of this one.
+
+    A value continued onto the following line(s) -- `files:\n  ^src/` -- is read
+    and folded with spaces, as YAML folds a plain scalar. Reading only the key's
+    own line returned "" for it, and a config-wide filter written that way was
+    silently dropped from every hook's scope.
     """
     if key not in cfg.top_keys:
         return None
-    parsed = _split_key(cfg.lines[cfg.top_keys[key]])
-    return _scalar(parsed[1]) if parsed else None
+    line = cfg.top_keys[key]
+    parsed = _split_key(cfg.lines[line])
+    value = _scalar(parsed[1]) if parsed else ""
+    if not value:
+        continued = _continuation(cfg.lines, line)
+        if continued and not continued[0].startswith("- "):
+            value = _scalar(" ".join(continued))
+    return value
 
 
 def hook_delta(entry: RepoEntry) -> int | None:
