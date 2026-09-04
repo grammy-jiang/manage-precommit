@@ -69,6 +69,9 @@ _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 # `pass_filenames` because `always_run` is coverage only for a hook that does
 # not consume the (possibly empty) file list it is handed.
 HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run", "pass_filenames")
+# The top-level keys that gate every hook the same way, and whose values the
+# scan reads once so a refusal lands at scan time with its line.
+TOP_LEVEL_GATING_KEYS = ("files", "exclude", "default_stages")
 
 
 # Schemes a `repo:` may use. Everything else -- notably git's transport-helper
@@ -260,7 +263,11 @@ def _split_key(text: str) -> tuple[str, str] | None:
 # that matters here: `files: "\\.md$"` is the regex `\.md$` to YAML and to
 # pre-commit, and reading the two backslashes as written compiled a regex for
 # a literal backslash instead -- calling a live hook dead. Single quotes have
-# no escapes at all, so they are left exactly as written.
+# no escapes at all, so they are left exactly as written. An escape outside
+# this table -- `files: "\.md$"`, a regex written as if the quotes were single
+# -- refuses the config: pre-commit's own loader stops at it ("found unknown
+# escape character"), so the file runs no hook, and reading it as the pattern
+# its author meant called a hook live in a config that loads nothing.
 _DQ_ESCAPES = {
     "0": "\0",
     "a": "\a",
@@ -288,10 +295,22 @@ def _unescape_double_quoted(inner: str) -> str:
     def one(match: re.Match[str]) -> str:
         code = match.group(1)
         if code[0] in "xuU" and len(code) > 1:
-            return chr(int(code[1:], 16))
-        # An escape YAML does not define is left as written rather than
-        # guessed at; YAML itself would refuse the document.
-        return _DQ_ESCAPES.get(code, match.group(0))
+            try:
+                return chr(int(code[1:], 16))
+            except ValueError:  # `\U` past the last code point there is
+                raise ConfigRefused(
+                    f"a double-quoted value uses \\U{code[1:]}, which is past the last "
+                    "Unicode code point"
+                ) from None
+        if code in _DQ_ESCAPES:
+            return _DQ_ESCAPES[code]
+        # Not an escape YAML defines. It was left as written here, and that
+        # was a guess that read right: `"\.md$"` compiled as the regex meant,
+        # for a config pre-commit refuses to load at all.
+        raise ConfigRefused(
+            f"a double-quoted value has a backslash before {code!r}, which is not an "
+            "escape YAML defines"
+        )
 
     return _DQ_ESCAPE_RE.sub(one, inner)
 
@@ -346,11 +365,17 @@ def _scalar(raw: str) -> str:
         inner = raw[1 : end - 1]
         return inner.replace("''", "'") if raw[0] == "'" else _unescape_double_quoted(inner)
     # Unquoted: a `#` after a space or a tab starts a comment; a bare `#`
-    # inside a word does not.
-    comment = re.search(r"[ \t]#", raw)
-    if comment:
-        raw = raw[: comment.start()]
-    return raw.strip(" \t")
+    # inside a word does not, and neither does one inside a quoted item of a
+    # flow sequence -- `[commit, "x #y"]` was being cut inside its quotes.
+    raw = _code_only(raw).strip(" \t")
+    # A plain scalar cannot start with `[`, so this is a flow sequence. It is
+    # returned as written -- flow_items reads it on demand -- but its items are
+    # read once here, so that one YAML would refuse (a quote never closed, an
+    # escape it does not define) refuses the config at scan time, with a line,
+    # rather than escaping from whoever asks for the stages later.
+    if raw.startswith("[") and raw.endswith("]"):
+        flow_items(raw)
+    return raw
 
 
 def _code_only(line: str) -> str:
@@ -461,6 +486,15 @@ def scan(text: str) -> Config:
             raise ConfigRefused(f"config defines the top-level key {key!r} twice", i + 1)
         top_keys[key] = i
         if key != "repos":
+            if key in TOP_LEVEL_GATING_KEYS:
+                # Read once now, for the refusal only. A filter or stage default
+                # YAML would not load used to come back as "not set" when asked
+                # for later, and every hook was then judged as if the config had
+                # never written it.
+                try:
+                    _top_value(lines, i, value)
+                except ConfigRefused as exc:
+                    raise _located(exc, i + 1) from None
             i = _skip_block(lines, i + 1)
             continue
 
@@ -738,30 +772,44 @@ def _scan_hook(lines: list[str], start: int, item_indent: int) -> tuple[int, Hoo
         if _indent_of(line) <= item_indent:
             break
         if _indent_of(line) == key_indent:
-            entry = _split_key(line.strip())
-            if entry and entry[0] in HOOK_GATING_KEYS:
-                inline = entry[1].strip(" \t")
-                if inline:
-                    # The key's own value, folded with any lines that continue
-                    # it; an indicator such as `|-` comes back untouched.
-                    value = _scalar(_continuation(lines, i, inline, key_indent))
-                else:
-                    # `stages:` followed by a block sequence -- indented, or at
-                    # the key's own column -- is the everyday way to write this,
-                    # and reading only the inline scalar left it as "", which
-                    # every caller treats as "not set": a hook confined to the
-                    # manual stage was reported as active coverage. Failing
-                    # that, a value on the following line(s) -- `files:` over
-                    # an indented `^docs/` -- reads the way a top-level one
-                    # does, rather than as "" and then as a pattern matching
-                    # every path.
-                    value = _block_sequence(lines, i, key_indent) or _scalar(
-                        _continuation(lines, i, "", key_indent)
+            try:
+                entry = _split_key(line.strip())
+                if entry and entry[0] in HOOK_GATING_KEYS:
+                    hook.settings[entry[0]] = _gating_value(
+                        lines, i, entry[1].strip(" \t"), key_indent
                     )
-                hook.settings[entry[0]] = value
+            except ConfigRefused as exc:
+                raise _located(exc, i + 1) from None
         hook.end = i
         i += 1
     return i, hook
+
+
+def _gating_value(lines: list[str], key_line: int, inline: str, key_indent: int) -> str:
+    """The value of a hook's gating key, in whichever shape the file used."""
+    if inline:
+        # The key's own value, folded with any lines that continue it; an
+        # indicator such as `|-` comes back untouched.
+        return _scalar(_continuation(lines, key_line, inline, key_indent))
+    # `stages:` followed by a block sequence -- indented, or at the key's own
+    # column -- is the everyday way to write this, and reading only the inline
+    # scalar left it as "", which every caller treats as "not set": a hook
+    # confined to the manual stage was reported as active coverage. Failing
+    # that, a value on the following line(s) -- `files:` over an indented
+    # `^docs/` -- reads the way a top-level one does, rather than as "" and
+    # then as a pattern matching every path.
+    return _block_sequence(lines, key_line, key_indent) or _scalar(
+        _continuation(lines, key_line, "", key_indent)
+    )
+
+
+def _located(exc: ConfigRefused, line_no: int) -> ConfigRefused:
+    """The same refusal, pointing at `line_no` when it points nowhere yet.
+
+    _scalar and _continuation refuse without a line -- they read a value, not
+    a file -- and the caller that knows the line adds it.
+    """
+    return exc if exc.line_no else ConfigRefused(exc.reason, line_no)
 
 
 def _next_content(lines: list[str], start: int) -> int | None:
@@ -916,6 +964,23 @@ def _ends_with_escape(text: str) -> bool:
     return trailing % 2 == 1
 
 
+def _top_value(lines: list[str], key_line: int, inline: str) -> tuple[bool, str]:
+    """A top-level key's value, and whether it is a block sequence.
+
+    A block sequence under the key comes back in the flow shape; anything else
+    is the scalar, folded with the lines that continue it, or a block-scalar
+    indicator left as it is. `scan` reads every key in TOP_LEVEL_GATING_KEYS
+    through this once, so a value YAML would refuse -- a quote never closed, an
+    escape it does not define -- refuses the config there, with its line,
+    before anything is judged by it; the public readers below therefore never
+    meet one for those keys.
+    """
+    continued = _continuation(lines, key_line, inline)
+    if not inline and continued.startswith("- "):
+        return True, _block_sequence(lines, key_line, 0)
+    return False, _scalar(continued)
+
+
 def top_level_sequence(cfg: Config, key: str) -> str | None:
     """A top-level `<key>:` sequence as "[a, b]", whichever form the file used.
 
@@ -929,16 +994,8 @@ def top_level_sequence(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    inline = parsed[1].strip(" \t") if parsed else ""
-    try:
-        continued = _continuation(cfg.lines, line, inline)
-        if not inline and continued.startswith("- "):
-            return _block_sequence(cfg.lines, line, 0) or None
-        return _scalar(continued) or None
-    except ConfigRefused:
-        # A quote this reader cannot see closed. pre-commit's own loader would
-        # refuse the file; here it is a value not read, and nothing is claimed.
-        return None
+    _, value = _top_value(cfg.lines, line, parsed[1].strip(" \t") if parsed else "")
+    return value or None
 
 
 def top_level_scalar(cfg: Config, key: str) -> str | None:
@@ -959,14 +1016,8 @@ def top_level_scalar(cfg: Config, key: str) -> str | None:
         return None
     line = cfg.top_keys[key]
     parsed = _split_key(cfg.lines[line])
-    inline = parsed[1].strip(" \t") if parsed else ""
-    try:
-        continued = _continuation(cfg.lines, line, inline)
-        if not inline and continued.startswith("- "):
-            return ""  # a sequence where a scalar was asked for: nothing to read
-        return _scalar(continued)
-    except ConfigRefused:
-        return None  # see top_level_sequence
+    sequence, value = _top_value(cfg.lines, line, parsed[1].strip(" \t") if parsed else "")
+    return "" if sequence else value  # a sequence where a scalar was asked for: nothing to read
 
 
 def hook_delta(entry: RepoEntry) -> int | None:

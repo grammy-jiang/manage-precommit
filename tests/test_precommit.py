@@ -4779,6 +4779,30 @@ def test_an_observed_gap_is_reported_even_when_the_probe_was_capped(repo, stubs)
     assert "mermaid" in {r["name"] for r in got["recommended"]}
 
 
+def test_a_config_yaml_would_not_load_is_refused_not_judged(repo, stubs):
+    """`files: "\\.md$"` is a regex written as if the quotes were single; YAML
+    has no `\\.` escape and pre-commit stops at "found unknown escape
+    character", so the file runs no hook. The scan read it as the regex meant,
+    called the entry live, and let it stand in for the working alternative. It
+    is a refusal now, with the line, like every other shape YAML would not
+    load -- including a never-closed quote inside a flow item, which used to
+    pass the scan whole and escape as a traceback when the stages were read."""
+    (repo / "README.md").write_text("# hi\n\n```mermaid\ngraph TD;\nA-->B;\n```\n")
+    head = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-parse\n        name: mermaid-parse\n"
+        "        entry: node scripts/parse-mermaid.mjs\n        language: node\n"
+    )
+    for tail in ('        files: "\\.md$"\n', '        stages: ["pre-commit]\n'):
+        (repo / ".pre-commit-config.yaml").write_text(head + tail)
+        proc = run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs)
+        assert proc.returncode == 5, proc.stderr
+        assert "Traceback" not in proc.stderr
+        got = out_json(proc)
+        assert got["reason"] == "config-refused"
+        assert got["line"] == 8
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

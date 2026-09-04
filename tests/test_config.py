@@ -545,6 +545,48 @@ def test_ragged_sequence_items_are_not_read_as_one_sequence():
     assert _hook_settings(text)["stages"] == "[manual]"
 
 
+def test_an_escape_yaml_does_not_define_refuses_the_config():
+    """`files: "\\.md$"` is a regex written as if the quotes were single. YAML
+    has no `\\.` escape and pre-commit's loader stops there ("found unknown
+    escape character"), so the file loads no hook at all. Left as written it
+    compiled as the regex its author meant, and a hook in a config that runs
+    nothing read as live -- and stood in for the working alternative."""
+    hook = 'repos:\n  - repo: local\n    hooks:\n      - id: a\n        files: "\\.md$"\n'
+    with pytest.raises(C.ConfigRefused, match=r"backslash before '\.'.*line 5"):
+        C.scan(hook)
+    # At the top level the same value came back as "not set", and every hook
+    # was judged as if the config-wide filter had never been written.
+    with pytest.raises(C.ConfigRefused, match=r"backslash before '\.'.*line 1"):
+        C.scan('files: "\\.md$"\nrepos: []\n')
+    # Inside a flow item the whole `[...]` passed the scan and the item was
+    # only read when the stages were asked for -- where the refusal surfaced
+    # as a traceback. It is read at scan time now, at either level.
+    with pytest.raises(C.ConfigRefused, match=r"backslash before '-'.*line 5"):
+        C.scan(
+            'repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages: ["pre\\-commit"]\n'
+        )
+    with pytest.raises(C.ConfigRefused, match=r"never closed.*line 5"):
+        C.scan(
+            'repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages: ["pre-commit]\n'
+        )
+    with pytest.raises(C.ConfigRefused, match=r"never closed.*line 1"):
+        C.scan('default_stages: ["pre-commit]\nrepos: []\n')
+    # A `\\U` escape naming a code point past the last one there is.
+    with pytest.raises(C.ConfigRefused, match="past the last Unicode code point"):
+        C.scan('repos:\n  - repo: local\n    hooks:\n      - id: a\n        files: "\\U00110000"\n')
+
+
+def test_a_hash_inside_a_quoted_flow_item_is_not_a_comment():
+    """`stages: [commit, "x #y"]`: the `#` sits inside quotes. The plain-scalar
+    comment cut did not know that and left `[commit, "x`, whose never-closed
+    quote then refused a valid config -- as a traceback, when the stages were
+    read."""
+    cfg = C.scan(
+        'repos:\n  - repo: local\n    hooks:\n      - id: a\n        stages: [commit, "x #y"]\n'
+    )
+    assert C.flow_items(cfg.repos[0].hooks[0].settings["stages"]) == ["commit", "x #y"]
+
+
 def test_double_quoted_scalars_resolve_their_escapes_and_single_quoted_do_not():
     """`files: "\\\\.md$"` is the regex `\\.md$` to YAML and to pre-commit.
     Reading the two backslashes as written compiled a regex for a literal
@@ -661,9 +703,11 @@ def test_a_top_level_value_continued_onto_the_next_line_is_read_and_folded():
     assert C.top_level_sequence(block_break, "default_stages") == "[pre-commit, manual]"
     plain = C.scan("files: don't\n  care\nrepos: []\n")
     assert C.top_level_scalar(plain, "files") == "don't care"
-    # A quote this reader cannot see closed is a value not read, not a crash.
-    unclosed = C.scan('default_stages:\n  - "pre-\nrepos: []\n')
-    assert C.top_level_sequence(unclosed, "default_stages") is None
+    # A quote this reader cannot see closed refuses the config at scan time,
+    # with its line, as pre-commit's own loader would. Read as "not set" it
+    # left every hook judged as if the stage default had never been written.
+    with pytest.raises(C.ConfigRefused, match=r"never closed.*line 1"):
+        C.scan('default_stages:\n  - "pre-\nrepos: []\n')
     # A tag says what the value is, not what it says, and comes off first.
     tagged = C.scan("files: !!str '^README[.]md$'\nexclude: !!str ^vendor/\nrepos: []\n")
     assert C.top_level_scalar(tagged, "files") == "^README[.]md$"

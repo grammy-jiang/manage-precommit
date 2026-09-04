@@ -177,7 +177,8 @@ reconstructed from the result by deleting exactly the blocks that were added.
 
 Reading is a strict line scanner rather than a YAML library. It refuses anything
 it cannot prove it understands — anchors, aliases, merge keys, flow sequences
-where a block is expected, more than one document, tabs — and says which line.
+where a block is expected, more than one document, tabs, a quoted value YAML
+itself would not load — and says which line.
 A refusal is an exit code; a guess would be a wrong answer that looks right.
 
 ## Dogfooding
