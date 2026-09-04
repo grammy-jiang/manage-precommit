@@ -808,3 +808,12 @@ def test_a_lone_quote_marker_leaves_no_paragraph_open(docs, env):
     proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
     assert proc.returncode == 0, proc.stderr
     assert env.parsed() == ["flowchart TD"]
+
+
+def test_a_lowercase_declaration_is_text_not_an_html_block(docs, env):
+    """A kind-4 block needs `<!` and an uppercase letter; `<!doctype html>` is
+    prose, and the fence under it is a fence."""
+    (docs / "doc.md").write_text("<!doctype html>\n```mermaid\nflowchart TD\n  A --> B\n```\n>\n")
+    proc = hook("doc.md", cwd=docs, node_path=str(env.modules))
+    assert proc.returncode == 0, proc.stderr
+    assert env.parsed() == ["flowchart TD\n  A --> B"]

@@ -4396,6 +4396,72 @@ def test_a_disabled_alternative_does_not_hide_the_recommendation(repo, stubs):
     assert "mermaid-parse" in got["proposed"]
 
 
+def test_a_dead_mermaid_parse_gets_the_renderer_offered_in_its_place(
+    repo, keys_file, facts_path, stubs
+):
+    """The mirror of the case above: the scan names `mermaid-parse`, it is
+    present but parked on `stages: [manual]`, and selecting it again would write
+    nothing. Its live alternative is offered instead, with the same reason."""
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    generate(repo, keys_file, facts_path, stubs, "mermaid-parse")
+    config = repo / ".pre-commit-config.yaml"
+    config.write_text(
+        config.read_text().replace(
+            "      - id: mermaid-parse\n", "      - id: mermaid-parse\n        stages: [manual]\n"
+        )
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid-parse" in got["disabled"], got["disabled"]
+    offered = {r["name"]: r["reason"] for r in got["recommended"]}
+    assert "mermaid-parse" not in offered
+    assert offered["mermaid"] == "doc.md"
+    assert "mermaid" in got["proposed"]
+
+
+def test_a_scope_is_judged_among_the_files_the_entry_is_for(repo, stubs):
+    """A mermaid hook behind `files: '\\.py$'` admits every Python file in a
+    mixed repository and read as live, while no Markdown file could reach it --
+    the diagram the scan found went unchecked, and the alternative that would
+    check it was withheld. Judged among the Markdown files, which is what the
+    entry is for, it is dead; a gitleaks hook behind the same filter is for
+    every file, and stays live."""
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "doc.md").write_text("```mermaid\ngraph TD;\nA-->B;\n```\n")
+    (repo / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '\\.py$'\n"
+        "  - repo: https://github.com/gitleaks/gitleaks\n    rev: v8.0.0\n"
+        "    hooks:\n      - id: gitleaks\n        files: '\\.py$'\n"
+    )
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert set(got["disabled"]) == {"mermaid"}, got["disabled"]
+    assert "matches none of the files this entry is for" in got["disabled"]["mermaid"][0]
+    assert "mermaid-parse" in {r["name"] for r in got["recommended"]}
+
+
+def test_always_run_is_not_coverage_for_a_hook_that_consumes_filenames(repo, stubs):
+    """pre-commit runs an `always_run` hook whatever its scope admits -- with
+    the files it admits, which may be none. Both mermaid scripts exit 0 on an
+    empty argv, so that is a run over nothing. gitleaks ignores its file list
+    (upstream sets `pass_filenames: false`) and is genuinely live; a hook that
+    says so itself is too."""
+    (repo / "doc.md").write_text("# hi\n")
+    hook = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: mermaid-lint\n        name: mermaid-lint\n"
+        "        entry: node scripts/lint-mermaid.mjs\n        language: node\n"
+        "        files: '^never/'\n        always_run: true\n"
+    )
+    (repo / ".pre-commit-config.yaml").write_text(hook)
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert "mermaid" in got["disabled"], got["disabled"]
+    (repo / ".pre-commit-config.yaml").write_text(hook + "        pass_filenames: false\n")
+    got = out_json(run("precommit.py", "--dir", str(repo), "--recommend", stubs=stubs))
+    assert got["disabled"] == {}, got["disabled"]
+
+
 def test_the_alternatives_point_at_each_other(stubs):
     import precommit as P
 

@@ -65,8 +65,10 @@ _MERGE_KEY = re.compile(r"^\s*<<\s*:")
 
 # Hook-level keys that can stop a hook running in the ordinary flow. `stages`
 # can exclude pre-commit; `files`/`exclude` can match nothing; `always_run` is
-# recorded because its absence matters when `files` is restrictive.
-HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run")
+# recorded because its absence matters when `files` is restrictive, and
+# `pass_filenames` because `always_run` is coverage only for a hook that does
+# not consume the (possibly empty) file list it is handed.
+HOOK_GATING_KEYS = ("stages", "files", "exclude", "always_run", "pass_filenames")
 
 
 # Schemes a `repo:` may use. Everything else -- notably git's transport-helper

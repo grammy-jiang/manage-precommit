@@ -123,11 +123,12 @@ existing entry's `stages`/`files`/`exclude`. The fix is a hand edit of that
 entry, the same as a `needs_manual` case. Being told "gitleaks is already
 there" about a scanner configured never to run is worse than not being told at
 all — and being told the skill will repair it is worse still. One exception,
-which the tool decides for you: a switched-off `mermaid` does not stop the scan
-recommending `mermaid-parse`, because that is a different hook id and can be
-added. When it appears in `recommended`, offer it the ordinary way — as a
-working check beside the dead one, not as a repair of it — and still say the
-dead one is dead.
+which the tool decides for you: a switched-off mermaid entry does not stop the
+scan recommending its alternative — `mermaid-parse` beside a dead `mermaid`,
+`mermaid` in place of a dead `mermaid-parse` — because that is a different hook
+id and can be added. When it appears in `recommended`, offer it the ordinary
+way — as a working check beside the dead one, not as a repair of it — and
+still say the dead one is dead.
 Offer a free-text "Other" — *exact catalog names, comma-separated*. A near-miss is
 rejected by the tool, not quietly corrected. Show the catalog with `--catalog` if
 asked.

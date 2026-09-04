@@ -157,6 +157,11 @@ CATALOG: dict[str, dict[str, Any]] = {
         "fragment": "gitleaks.yaml",
         "rev_repo": "https://github.com/gitleaks/gitleaks",
         "assets": [],
+        # Upstream's hook definition sets `pass_filenames: false`: it scans the
+        # staged diff and never reads the file list. That is what makes
+        # `always_run: true` on it coverage, where on a hook that consumes
+        # filenames it is a run over none.
+        "pass_filenames": False,
         "desc": "secret scanner",
     },
 }
@@ -1236,7 +1241,32 @@ def top_level(cfg: cfgmod.Config) -> TopLevel:
     return TopLevel(filters, cfgmod.top_level_sequence(cfg, "default_stages") or "")
 
 
-def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | None:
+def intended_targets(key: str) -> re.Pattern[str] | None:
+    """The files a catalog entry is FOR, as its own fragment scopes them.
+
+    A mermaid hook behind `files: '\\.py$'` admits every Python file in a mixed
+    repository and reads as live, while no Markdown file can reach it -- the
+    diagram the scan found is unchecked, and the alternative that would check
+    it is not offered. So a scope is judged among the files the entry exists
+    to check: the fragment's own `files:`, read off the template rather than
+    written down a second time. None for an entry that is for every file.
+    """
+    meta = CATALOG[key]
+    text = read_bytes_or_die(os.path.join(TEMPLATES, meta["fragment"]), die).decode("utf-8")
+    for placeholder in meta.get("npm", {}):
+        text = text.replace(placeholder, "0.0.0")
+    text = text.replace("__REV__", "v0.0.0")
+    try:
+        parsed = cfgmod.scan("repos:\n" + text)
+    except cfgmod.ConfigRefused as exc:  # pragma: no cover - our own templates
+        die(f"catalog fragment {meta['fragment']} is malformed: {exc}")
+    pattern = next((h.settings.get("files") for e in parsed.repos for h in e.hooks), None)
+    return re.compile(pattern) if pattern else None
+
+
+def scope_admits_nothing(
+    filters: Sequence[Filter], listing: Listing, intended: re.Pattern[str] | None = None
+) -> str | None:
     """Why a hook's scope lets no file through, or None when it lets some.
 
     A scope is not a switch. Our own mermaid fragments carry
@@ -1270,9 +1300,15 @@ def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | N
             compiled.append((label, pattern, excluding, re.compile(pattern)))
         except re.error as exc:
             return f"{label}: {pattern} (not a valid pattern: {clean(str(exc))})"
-    if not compiled or not listing.complete or not listing.paths:
+    if not compiled or not listing.complete:
         return None
-    paths = listing.paths
+    # Among the files the entry is for, when it is for some in particular: a
+    # Markdown check that admits only Python files is not live for anything it
+    # exists to check. No such files here means nothing to judge against.
+    paths = [p for p in listing.paths if intended is None or intended.search(p)]
+    if not paths:
+        return None
+    what = "file here" if intended is None else "of the files this entry is for"
 
     def admitted(path: str) -> bool:
         return all(bool(rx.search(path)) != excluding for _, _, excluding, rx in compiled)
@@ -1282,14 +1318,21 @@ def scope_admits_nothing(filters: Sequence[Filter], listing: Listing) -> str | N
     for label, pattern, excluding, rx in compiled:
         hits = sum(1 for p in paths if rx.search(p))
         if not excluding and hits == 0:
-            return f"{label}: {pattern} (matches no file here)"
+            return f"{label}: {pattern} (matches no{'' if intended is None else 'ne'} {what})"
         if excluding and hits == len(paths):
-            return f"{label}: {pattern} (matches every file here)"
+            return f"{label}: {pattern} (matches every {what.removeprefix('of the ')})"
     named = " with ".join(f"{label}: {pattern}" for label, pattern, _, _ in compiled)
-    return f"{named} (together they leave no file here)"
+    return f"{named} (together they leave no{'' if intended is None else 'ne'} {what})"
 
 
-def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: TopLevel) -> str | None:
+def looks_disabled(
+    hook: cfgmod.Hook,
+    listing: Listing,
+    top: TopLevel,
+    *,
+    intended: re.Pattern[str] | None = None,
+    consumes_files: bool = True,
+) -> str | None:
     """What would stop this hook running, or None.
 
     "Already present" was decided on the hook id alone, so an entry could carry
@@ -1307,15 +1350,23 @@ def looks_disabled(hook: cfgmod.Hook, listing: Listing, top: TopLevel) -> str | 
     # always_run: true makes the hook fire whatever files: and exclude: say,
     # which is exactly why config.py captures it. Reading stages first is
     # deliberate -- always_run does not put a hook back on a stage it was
-    # excluded from.
+    # excluded from. And firing is not coverage for a hook that consumes its
+    # filenames: pre-commit runs it with the files the scope admits, which may
+    # be none, and both mermaid scripts exit 0 on an empty argv. Only a hook
+    # that ignores the file list -- gitleaks, which scans the staged diff -- is
+    # made live by it; `pass_filenames` on the hook itself overrides what the
+    # catalog knows about the upstream definition.
     if settings.get("always_run", "").lower() in ("true", "yes", "on"):
-        return None
+        explicit = settings.get("pass_filenames", "").lower()
+        consumes = explicit in ("true", "yes", "on") if explicit else consumes_files
+        if not consumes:
+            return None
     own: list[Filter] = [
         (key, settings[key], excluding)
         for key, excluding in (("files", False), ("exclude", True))
         if settings.get(key)
     ]
-    return scope_admits_nothing([*top.filters, *own], listing)
+    return scope_admits_nothing([*top.filters, *own], listing, intended)
 
 
 def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
@@ -1332,6 +1383,8 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
     url = meta.get("rev_repo") or "local"
     wanted_id = meta.get("local_hook_id") if not meta.get("rev_repo") else None
     top = top_level(cfg)
+    intended = intended_targets(key)
+    consumes_files = bool(meta.get("pass_filenames", True))
     out = []
     for entry in cfg.repos:
         if entry.url != url:
@@ -1339,7 +1392,9 @@ def disabled_hooks(cfg: cfgmod.Config, key: str, listing: Listing) -> list[str]:
         for hook in entry.hooks:
             if wanted_id is not None and hook.id != wanted_id:
                 continue
-            why = looks_disabled(hook, listing, top)
+            why = looks_disabled(
+                hook, listing, top, intended=intended, consumes_files=consumes_files
+            )
             if why:
                 out.append(f"{clean(hook.id)} ({clean(why)})")
     return out
@@ -2034,7 +2089,20 @@ def cmd_recommend(directory: str, facts_out: str | None = None) -> int:
     disabled = {k: disabled_hooks(cfg, k, listing) for k in previous if cfg} if cfg else {}
     disabled = {k: v for k, v in disabled.items() if v}
     recs, markers, trigger_paths = detect_markers(directory)
-    recs = [r for r in recs if r["name"] not in previous]
+    # An entry the scan named that is present but switched off cannot be
+    # repaired by selecting it again -- same hook id, nothing written -- and
+    # the fence that got it named is still there. Its live alternative is
+    # offered in its place: `mermaid` for a dead `mermaid-parse`, the mirror
+    # of the filter below, which keeps `mermaid-parse` on offer beside a dead
+    # `mermaid`.
+    substitutes: list[Recommendation] = [
+        {"name": alt, "reason": r["reason"]}
+        for r in recs
+        if r["name"] in disabled
+        for alt in CATALOG[r["name"]].get("alternatives", ())
+        if alt not in previous
+    ]
+    recs = [r for r in recs if r["name"] not in previous] + substitutes
     # Nor an entry whose alternative is already there AND live: the two mermaid
     # entries check the same fences, and offering the second beside a working
     # first reads as a gap in coverage that does not exist. Beside a disabled
