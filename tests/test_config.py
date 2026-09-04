@@ -839,6 +839,29 @@ def test_flow_items_are_trimmed_of_line_breaks_and_refuse_a_bracket_inside_a_pla
     assert C.flow_items(cfg.repos[0].hooks[0].settings["types_or"]) == ["markdown", "foo[bar"]
 
 
+def test_a_comment_line_ends_a_plain_scalar_and_more_content_after_it_refuses():
+    """`files: README` over an indented `# why` over `.*md$`: a comment line
+    ends a plain scalar that has started, and YAML stops at the content that
+    follows. Folded on, the value read as `README .*md$`, a pattern in a
+    config that does not load. A comment before the value starts, or between
+    the items of a flow sequence, is nothing at all; and a `#` line inside a
+    quoted scalar is content."""
+    head = "repos:\n  - repo: local\n    hooks:\n      - id: a\n"
+    with pytest.raises(C.ConfigRefused, match=r"comment line ended.*line 5"):
+        C.scan(head + "        files: README\n          # why\n          .*md$\n")
+    with pytest.raises(C.ConfigRefused, match=r"comment line ended.*line 1"):
+        C.scan("files: README\n  # why\n  .*md$\nrepos: []\n")
+    # The comment alone, with the next key after it, simply ends the value.
+    cfg = C.scan(head + "        files: README\n          # why\n        stages: [manual]\n")
+    assert cfg.repos[0].hooks[0].settings == {"files": "README", "stages": "[manual]"}
+    cfg = C.scan(head + "        files:\n          # the value follows\n          ^src/\n")
+    assert cfg.repos[0].hooks[0].settings["files"] == "^src/"
+    cfg = C.scan(head + "        stages: [manual,\n          # and\n          pre-push]\n")
+    assert C.flow_items(cfg.repos[0].hooks[0].settings["stages"]) == ["manual", "pre-push"]
+    cfg = C.scan(head + '        files: "a\n          # not a comment\n          b"\n')
+    assert cfg.repos[0].hooks[0].settings["files"] == "a # not a comment b"
+
+
 def test_type_filters_are_captured_like_every_other_gate():
     """pre-commit applies them on top of `files:`/`exclude:`, so a scope verdict
     that never saw them called a `types: [python]` Markdown hook live."""

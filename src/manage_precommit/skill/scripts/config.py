@@ -1174,6 +1174,7 @@ def _continuation(
         return inline
     value = inline
     pending_break = False  # a blank line since the last part: folds to a newline
+    ended_by_comment = False  # a comment line after a plain scalar started: the scalar is over
     for j in range(key_line + 1, len(lines)):
         line = lines[j]
         # Blank and comment lines by YAML's own white space -- space and tab --
@@ -1183,12 +1184,25 @@ def _continuation(
             continue
         quote = _open_quote(value)
         if quote is None and line.strip(" \t").startswith("#"):
+            # Before a value has started, or between the items of a flow
+            # collection, a comment line is nothing. Once a PLAIN scalar has
+            # started, a comment line ends it -- and another line of content
+            # after that is not YAML, which the next content line reports.
+            if value and value[:1] not in ("[", "{"):
+                ended_by_comment = True
             continue
         if _indent_of(line) <= key_indent:
             break
         text = line.lstrip(" \t")  # trailing white space is decided below
         if item and text.startswith("- "):
             break
+        if ended_by_comment:
+            # `files: README` over an indented `# why` over `.*md$`: YAML stops
+            # at the third line, and read on it folded to `README .*md$`, a
+            # pattern in a config that does not load.
+            raise ConfigRefused(
+                "a comment line ended this value, and more of it follows; YAML does not allow that"
+            )
         if not value and _BLOCK_INDICATOR.fullmatch(_split_tag(text)[1].rstrip(" \t")):
             return text.rstrip(" \t")
         if quote is None:
